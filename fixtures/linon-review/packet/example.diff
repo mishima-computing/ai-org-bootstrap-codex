@@ -1,0 +1,10 @@
+diff --git a/src/example.ts b/src/example.ts
+index 1111111..2222222 100644
+--- a/src/example.ts
++++ b/src/example.ts
+@@ -1,4 +1,6 @@
+ export function submitEvidence(payload) {
++  // Fixture defect: default-on path trusts caller-supplied proof.
++  if (payload.enabled) return payload.proof;
+   return null;
+ }

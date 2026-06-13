@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.linon-review.v1",
+  "type": "object",
+  "required": [
+    "profile_id",
+    "findings",
+    "criterion_verdicts",
+    "gaps"
+  ],
+  "properties": {
+    "profile_id": {
+      "type": "string",
+      "const": "linon-review"
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "line_range",
+          "severity",
+          "lens",
+          "basis",
+          "claim",
+          "evidence_ref"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line_range": {
+            "type": "object",
+            "description": "start and end are positive line numbers. The repository validator enforces end >= start because portable JSON Schema draft 2020-12 cannot compare sibling numeric fields without nonstandard $data extensions.",
+            "required": [
+              "start",
+              "end"
+            ],
+            "properties": {
+              "start": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "major",
+              "minor"
+            ]
+          },
+          "lens": {
+            "type": "string",
+            "enum": [
+              "self-report-trust",
+              "forgeability",
+              "unverified-integration",
+              "silent-failure",
+              "other"
+            ]
+          },
+          "class_note": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "basis": {
+            "type": "string",
+            "const": "static-read"
+          },
+          "claim": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "evidence_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "defect_locus": {
+            "type": "string",
+            "enum": [
+              "implementation",
+              "contract"
+            ]
+          },
+          "principle_id": {
+            "type": "string",
+            "enum": [
+              "NN1",
+              "NN2",
+              "NN3",
+              "NN4",
+              "none"
+            ]
+          },
+          "exploit_path": {
+            "type": "string",
+            "maxLength": 600
+          }
+        },
+        "if": {
+          "properties": {
+            "severity": {
+              "type": "string",
+              "const": "critical"
+            }
+          },
+          "required": [
+            "severity"
+          ]
+        },
+        "then": {
+          "required": [
+            "defect_locus",
+            "principle_id"
+          ]
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "lens": {
+                  "type": "string",
+                  "const": "other"
+                }
+              },
+              "required": [
+                "lens"
+              ]
+            },
+            "then": {
+              "required": [
+                "class_note"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      }
+    },
+    "criterion_verdicts": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": [
+          "criterion_index",
+          "criterion_text_echo",
+          "verdict",
+          "evidence_ref"
+        ],
+        "properties": {
+          "criterion_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "criterion_text_echo": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "criterion text echo. Cap matches the contract acceptance-criteria cap; an echo field must never be shorter than its source (self-application finding, 2026-06-13)."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "refuted",
+              "unverifiable-static"
+            ]
+          },
+          "evidence_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "principle_id": {
+            "type": "string",
+            "enum": [
+              "NN1",
+              "NN2",
+              "NN3",
+              "NN4",
+              "none"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "description"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "truncation",
+              "static-limit",
+              "carrier-limit",
+              "other"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "severity_first_truncation_applied": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "truncation"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "severity_first_truncation_applied"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

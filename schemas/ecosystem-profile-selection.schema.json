@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.ecosystem-profile-selection.v1",
+  "type": "object",
+  "required": [
+    "primary_ecosystem",
+    "supporting_profiles",
+    "selected_profile_cards",
+    "repo_local_cards",
+    "evidence_refs",
+    "selection_warnings",
+    "knowledge_gaps"
+  ],
+  "properties": {
+    "primary_ecosystem": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "supporting_profiles": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "selected_profile_cards": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "repo_local_cards": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "selection_warnings": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "knowledge_gaps": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    }
+  },
+  "additionalProperties": false
+}

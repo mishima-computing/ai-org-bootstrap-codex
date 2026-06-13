@@ -1,0 +1,18 @@
+{
+  "profile_id": "linon-review",
+  "findings": [
+    {
+      "file": "src/example.ts",
+      "line_range": {
+        "start": 12,
+        "end": 18
+      },
+      "severity": "major",
+      "lens": "self-report-trust",
+      "basis": "static-read",
+      "claim": "A reported number is trusted without verification."
+    }
+  ],
+  "criterion_verdicts": [],
+  "gaps": []
+}

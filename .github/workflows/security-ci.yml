@@ -1,0 +1,16 @@
+name: security-ci
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Codex-only residue check
+        run: python3 scripts/validate-bootstrap-pack.py

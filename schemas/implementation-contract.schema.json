@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.implementation-contract.v1",
+  "type": "object",
+  "required": [
+    "role_id",
+    "contract_id",
+    "objective",
+    "selected_direction",
+    "rejected_parts",
+    "implementation_summary",
+    "acceptance_criteria",
+    "files_allowed_to_change",
+    "files_not_allowed_to_change",
+    "required_checks",
+    "security_requirements",
+    "nonfunctional_requirements",
+    "non_goals",
+    "risks",
+    "fallback_plan",
+    "handoff_to_implementer"
+  ],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "const": "aufheben-designer"
+    },
+    "contract_id": {
+      "type": "string"
+    },
+    "objective": {
+      "type": "string"
+    },
+    "selected_direction": {
+      "type": "string"
+    },
+    "situation_read": {
+      "type": "string",
+      "maxLength": 1100
+    },
+    "rejected_parts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source",
+          "rejected_part",
+          "reason"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "aggressive-designer",
+              "conservative-designer",
+              "genius"
+            ]
+          },
+          "rejected_part": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "implementation_summary": {
+      "type": "string"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_allowed_to_change": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_not_allowed_to_change": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "security_requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nonfunctional_requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fallback_plan": {
+      "type": "string"
+    },
+    "handoff_to_implementer": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

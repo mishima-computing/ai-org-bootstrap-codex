@@ -1,0 +1,12 @@
+{
+  "name": "empty",
+  "check_runs_response": {
+    "total_count": 0,
+    "check_runs": []
+  },
+  "combined_status_response": {
+    "state": "pending",
+    "statuses": []
+  },
+  "expected_exit": 3
+}

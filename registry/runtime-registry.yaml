@@ -1,0 +1,56 @@
+version: 1
+runtime: codex
+
+agents:
+  functional-ci-action-writer:
+    role: roles/functional-ci-action-writer.md
+    adapter: .codex/agents/functional-ci-action-writer.toml
+    schema: schemas/ci-action-writer-result.schema.json
+    output_to: aufheben-designer
+    write_scope:
+      - .github/workflows/**
+  security-ci-action-writer:
+    role: roles/security-ci-action-writer.md
+    adapter: .codex/agents/security-ci-action-writer.toml
+    schema: schemas/ci-action-writer-result.schema.json
+    output_to: aufheben-designer
+    write_scope:
+      - .github/workflows/**
+  nonfunctional-ci-action-writer:
+    role: roles/nonfunctional-ci-action-writer.md
+    adapter: .codex/agents/nonfunctional-ci-action-writer.toml
+    schema: schemas/ci-action-writer-result.schema.json
+    output_to: aufheben-designer
+    write_scope:
+      - .github/workflows/**
+  aggressive-designer:
+    role: roles/aggressive-designer.md
+    adapter: .codex/agents/aggressive-designer.toml
+    schema: schemas/design-proposal.schema.json
+    output_to: aufheben-designer
+    write_scope: []
+  conservative-designer:
+    role: roles/conservative-designer.md
+    adapter: .codex/agents/conservative-designer.toml
+    schema: schemas/design-proposal.schema.json
+    output_to: aufheben-designer
+    write_scope: []
+  genius:
+    role: roles/genius.md
+    adapter: .codex/agents/genius.toml
+    schema: schemas/genius-packet.schema.json
+    output_to: aufheben-designer
+    write_scope: []
+  aufheben-designer:
+    role: roles/aufheben-designer.md
+    adapter: .codex/agents/aufheben-designer.toml
+    schema: schemas/implementation-contract.schema.json
+    output_to: implementer
+    write_scope: []
+  implementer:
+    role: roles/implementer.md
+    adapter: .codex/agents/implementer.toml
+    schema: schemas/implementation-result.schema.json
+    output_to:
+    write_scope:
+      - implementation-contract

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.aufheben-verdict.v1",
+  "type": "object",
+  "required": ["role_id", "decision", "situation_read"],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "const": "aufheben-designer"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["proceed", "redo", "escalate"]
+    },
+    "situation_read": {
+      "type": "string",
+      "description": "Quadrant read of completeness x reversibility and designer confidence posture."
+    },
+    "redo_brief": {
+      "type": "object",
+      "description": "Required when decision=redo; names the designers the controller should re-invoke.",
+      "required": ["targets", "diagnosis", "new_info_or_angle_needed"],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["aggressive-designer", "conservative-designer", "genius"]
+          }
+        },
+        "diagnosis": {
+          "type": "string"
+        },
+        "new_info_or_angle_needed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "escalation_reason": {
+      "type": "string",
+      "description": "Required when decision=escalate."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,11 @@
+name = "nonfunctional-ci-action-writer"
+description = "Workflow-only writer for existing nonfunctional checks."
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Canonical role spec controls behavior: roles/nonfunctional-ci-action-writer.md
+Required schema: schemas/ci-action-writer-result.schema.json
+
+Write only .github/workflows/**. Add existing nonfunctional commands to GitHub Actions. Do not invent commands. Do not edit application code, tests, package manifests, dependencies, secrets, deployments, or branch protection.
+No adoption authority.
+"""

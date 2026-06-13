@@ -1,0 +1,567 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.genius-packet.v2",
+  "type": "object",
+  "required": [
+    "role_id",
+    "objective",
+    "substrate_inputs",
+    "official_spec_evidence",
+    "repo_evidence",
+    "kept_hypotheses",
+    "refuted_hypotheses",
+    "unverified_hypotheses",
+    "what_not_to_copy",
+    "handoff_to_aufheben"
+  ],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "const": "genius",
+      "maxLength": 400
+    },
+    "objective": {
+      "type": "string",
+      "maxLength": 600
+    },
+    "substrate_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ref_type",
+          "locator",
+          "summary"
+        ],
+        "properties": {
+          "ref_type": {
+            "type": "string",
+            "enum": [
+              "repo_pointer",
+              "official_spec",
+              "standard",
+              "paper",
+              "mature_implementation",
+              "run_artifact"
+            ],
+            "maxLength": 400
+          },
+          "locator": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 400
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "official_spec_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ref_type",
+          "locator",
+          "summary"
+        ],
+        "properties": {
+          "ref_type": {
+            "type": "string",
+            "enum": [
+              "repo_pointer",
+              "official_spec",
+              "standard",
+              "paper",
+              "mature_implementation",
+              "run_artifact"
+            ],
+            "maxLength": 400
+          },
+          "locator": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 400
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "repo_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ref_type",
+          "locator",
+          "summary"
+        ],
+        "properties": {
+          "ref_type": {
+            "type": "string",
+            "enum": [
+              "repo_pointer",
+              "official_spec",
+              "standard",
+              "paper",
+              "mature_implementation",
+              "run_artifact"
+            ],
+            "maxLength": 400
+          },
+          "locator": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 400
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "kept_hypotheses": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "hypothesis_id",
+          "mechanism",
+          "score",
+          "verification_status",
+          "repo_evidence_refs",
+          "external_refs",
+          "expected_benefit",
+          "risks",
+          "rejection_conditions",
+          "what_not_to_copy"
+        ],
+        "properties": {
+          "hypothesis_id": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "mechanism": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "score": {
+            "type": "number",
+            "description": "Advisory score only; keep/drop authority rests with aufheben-designer."
+          },
+          "verification_status": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "refuted",
+              "unverified"
+            ],
+            "maxLength": 400
+          },
+          "repo_evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "external_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "expected_benefit": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "rejection_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "what_not_to_copy": {
+            "type": "array",
+            "description": "Hypothesis-specific anti-patterns, distinct from the top-level global anti-patterns for the objective.",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "refuted_hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "hypothesis_id",
+          "mechanism",
+          "score",
+          "verification_status",
+          "repo_evidence_refs",
+          "external_refs",
+          "expected_benefit",
+          "risks",
+          "rejection_conditions",
+          "what_not_to_copy"
+        ],
+        "properties": {
+          "hypothesis_id": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "mechanism": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "score": {
+            "type": "number",
+            "description": "Advisory score only; keep/drop authority rests with aufheben-designer."
+          },
+          "verification_status": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "refuted",
+              "unverified"
+            ],
+            "maxLength": 400
+          },
+          "repo_evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "external_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "expected_benefit": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "rejection_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "what_not_to_copy": {
+            "type": "array",
+            "description": "Hypothesis-specific anti-patterns, distinct from the top-level global anti-patterns for the objective.",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "unverified_hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "hypothesis_id",
+          "mechanism",
+          "score",
+          "verification_status",
+          "repo_evidence_refs",
+          "external_refs",
+          "expected_benefit",
+          "risks",
+          "rejection_conditions",
+          "what_not_to_copy"
+        ],
+        "properties": {
+          "hypothesis_id": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "mechanism": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "score": {
+            "type": "number",
+            "description": "Advisory score only; keep/drop authority rests with aufheben-designer."
+          },
+          "verification_status": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "refuted",
+              "unverified"
+            ],
+            "maxLength": 400
+          },
+          "repo_evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "external_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "ref_type",
+                "locator",
+                "summary"
+              ],
+              "properties": {
+                "ref_type": {
+                  "type": "string",
+                  "enum": [
+                    "repo_pointer",
+                    "official_spec",
+                    "standard",
+                    "paper",
+                    "mature_implementation",
+                    "run_artifact"
+                  ],
+                  "maxLength": 400
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 400
+                },
+                "summary": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 6
+          },
+          "expected_benefit": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "rejection_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          },
+          "what_not_to_copy": {
+            "type": "array",
+            "description": "Hypothesis-specific anti-patterns, distinct from the top-level global anti-patterns for the objective.",
+            "items": {
+              "type": "string",
+              "maxLength": 400
+            },
+            "maxItems": 6
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "what_not_to_copy": {
+      "type": "array",
+      "description": "Global anti-patterns for this objective, distinct from hypothesis-specific what_not_to_copy fields.",
+      "items": {
+        "type": "string",
+        "maxLength": 400
+      }
+    },
+    "handoff_to_aufheben": {
+      "type": "string",
+      "maxLength": 1100
+    }
+  },
+  "additionalProperties": false
+}

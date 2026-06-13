@@ -1,0 +1,19 @@
+{
+  "profile_id": "linon-review",
+  "findings": [
+    {
+      "file": "src/example.ts",
+      "line_range": {
+        "start": 18,
+        "end": 12
+      },
+      "severity": "major",
+      "lens": "silent-failure",
+      "basis": "static-read",
+      "claim": "A failure path is invisible to operators.",
+      "evidence_ref": "src/example.ts:12-18"
+    }
+  ],
+  "criterion_verdicts": [],
+  "gaps": []
+}

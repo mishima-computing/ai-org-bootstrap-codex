@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.implementation-result.v1",
+  "type": "object",
+  "required": [
+    "role_id",
+    "implementation_contract_id",
+    "summary",
+    "files_changed",
+    "commands_run",
+    "command_results",
+    "checks_passed",
+    "checks_failed",
+    "remaining_failures",
+    "scope_deviations",
+    "manual_followup"
+  ],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "const": "implementer"
+    },
+    "implementation_contract_id": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commands_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "command_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "command",
+          "exit_code",
+          "result"
+        ],
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "result": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "checks_passed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checks_failed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "remaining_failures": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scope_deviations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "manual_followup": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

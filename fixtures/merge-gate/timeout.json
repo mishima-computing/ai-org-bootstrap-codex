@@ -1,0 +1,23 @@
+{
+  "name": "timeout",
+  "check_runs_response": {
+    "total_count": 1,
+    "check_runs": [
+      {
+        "name": "functional-ci",
+        "status": "queued",
+        "conclusion": null
+      }
+    ]
+  },
+  "combined_status_response": {
+    "state": "pending",
+    "statuses": [
+      {
+        "context": "legacy-ci",
+        "state": "pending"
+      }
+    ]
+  },
+  "expected_exit": 3
+}

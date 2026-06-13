@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.security-ci-profile-selection.v1",
+  "type": "object",
+  "required": [
+    "general_profile_enabled",
+    "supporting_profiles",
+    "selected_profile_cards",
+    "evidence_refs",
+    "selection_warnings",
+    "security_gaps"
+  ],
+  "properties": {
+    "general_profile_enabled": {
+      "type": "boolean"
+    },
+    "supporting_profiles": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "selected_profile_cards": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "selection_warnings": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "security_gaps": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    }
+  },
+  "additionalProperties": false
+}

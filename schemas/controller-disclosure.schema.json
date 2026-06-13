@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.controller-disclosure.v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "handoffs"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "handoffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "handoff",
+          "forwarded_verbatim",
+          "source_sha256",
+          "controller_authored_text",
+          "evaluative_language_added"
+        ],
+        "properties": {
+          "handoff": {
+            "type": "string"
+          },
+          "forwarded_verbatim": {
+            "type": "boolean"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "controller_authored_text": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evaluative_language_added": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,17 @@
+{
+  "name": "legacy-status-only",
+  "check_runs_response": {
+    "total_count": 0,
+    "check_runs": []
+  },
+  "combined_status_response": {
+    "state": "success",
+    "statuses": [
+      {
+        "context": "legacy-ci",
+        "state": "success"
+      }
+    ]
+  },
+  "expected_exit": 0
+}

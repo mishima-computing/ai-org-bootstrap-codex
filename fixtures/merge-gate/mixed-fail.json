@@ -1,0 +1,28 @@
+{
+  "name": "mixed-fail",
+  "check_runs_response": {
+    "total_count": 2,
+    "check_runs": [
+      {
+        "name": "functional-ci",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "security-ci",
+        "status": "completed",
+        "conclusion": "failure"
+      }
+    ]
+  },
+  "combined_status_response": {
+    "state": "success",
+    "statuses": [
+      {
+        "context": "legacy-ci",
+        "state": "success"
+      }
+    ]
+  },
+  "expected_exit": 1
+}

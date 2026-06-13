@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.design-proposal.v1",
+  "type": "object",
+  "required": [
+    "role_id",
+    "objective",
+    "proposal_summary",
+    "recommended_direction",
+    "expected_benefits",
+    "risks",
+    "assumptions",
+    "constraints",
+    "things_to_avoid",
+    "handoff_notes",
+    "confidence"
+  ],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "enum": [
+        "aggressive-designer",
+        "conservative-designer"
+      ]
+    },
+    "objective": {
+      "type": "string"
+    },
+    "proposal_summary": {
+      "type": "string"
+    },
+    "recommended_direction": {
+      "type": "string"
+    },
+    "expected_benefits": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "things_to_avoid": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "handoff_notes": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "object",
+      "required": [
+        "overall_posture",
+        "grounded_claims",
+        "speculative_claims"
+      ],
+      "properties": {
+        "overall_posture": {
+          "type": "string",
+          "enum": [
+            "grounded",
+            "speculative"
+          ]
+        },
+        "grounded_claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "claim",
+              "evidence_ref"
+            ],
+            "properties": {
+              "claim": {
+                "type": "string"
+              },
+              "evidence_ref": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "speculative_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "questioning_targets_selected": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "target",
+          "selection_reason"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "selection_reason": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "structural_hypotheses": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "broken_assumption",
+          "alternative_structure",
+          "leverage",
+          "what_breaks",
+          "rejection_conditions"
+        ],
+        "properties": {
+          "broken_assumption": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "alternative_structure": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "leverage": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "what_breaks": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "rejection_conditions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "string",
+              "maxLength": 300
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "conflict_points": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "point",
+          "evidence_ref"
+        ],
+        "properties": {
+          "point": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "evidence_ref": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "continuity": {
+      "type": "object",
+      "required": [
+        "selected_profiles",
+        "version_constraints",
+        "ecosystem_facts_used",
+        "forbidden_expansions",
+        "safe_change_path",
+        "reversibility_plan",
+        "missing_safety_checks",
+        "knowledge_gaps"
+      ],
+      "properties": {
+        "selected_profiles": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "version_constraints": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "ecosystem_facts_used": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "forbidden_expansions": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "safe_change_path": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "reversibility_plan": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "missing_safety_checks": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "knowledge_gaps": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

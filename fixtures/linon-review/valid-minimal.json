@@ -1,0 +1,35 @@
+{
+  "profile_id": "linon-review",
+  "findings": [
+    {
+      "file": "src/example.ts",
+      "line_range": {
+        "start": 12,
+        "end": 18
+      },
+      "severity": "critical",
+      "lens": "unverified-integration",
+      "basis": "static-read",
+      "claim": "Default-on integration has no cited test proving the wire shape.",
+      "evidence_ref": "src/example.ts:12-18",
+      "defect_locus": "implementation",
+      "principle_id": "NN3",
+      "exploit_path": "Runtime drift would ship as a default-on path until a live check proves the upstream contract."
+    }
+  ],
+  "criterion_verdicts": [
+    {
+      "criterion_index": 0,
+      "criterion_text_echo": "Linon profile exists with required sections.",
+      "verdict": "confirmed",
+      "evidence_ref": ".agent-org/knowledge/review/linon-review-profile.md:1"
+    }
+  ],
+  "gaps": [
+    {
+      "kind": "truncation",
+      "description": "No truncation applied; severity-first truncation slot recorded.",
+      "severity_first_truncation_applied": false
+    }
+  ]
+}

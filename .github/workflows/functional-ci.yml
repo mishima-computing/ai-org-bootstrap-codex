@@ -1,0 +1,27 @@
+name: functional-ci
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate pack
+        run: python3 scripts/validate-bootstrap-pack.py
+      - name: Codex-only residue
+        run: python3 scripts/check-codex-private-residue.py --strict
+      - name: Script self-tests
+        run: |
+          python3 scripts/submit-result.py --self-test
+          python3 scripts/merge-gate.py --self-test
+          python3 scripts/check-anchor-urls.py --self-test
+      - name: Install package
+        run: python3 -m pip install -e packages/codex-org-bootstrap
+      - name: Unit tests
+        run: python3 -m unittest discover -s packages/codex-org-bootstrap/tests

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-org-bootstrap"
+version = "0.1.0"
+description = "Codex-native AI Org Bootstrap runtime and validation CLI."
+requires-python = ">=3.11"
+
+[project.scripts]
+aob = "ai_org_bootstrap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

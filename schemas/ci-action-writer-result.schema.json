@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.ci-action-writer-result.v1",
+  "type": "object",
+  "required": [
+    "role_id",
+    "detected_ecosystem",
+    "workflows_read",
+    "workflows_changed",
+    "commands_added",
+    "commands_already_present",
+    "checks_added",
+    "checks_already_present",
+    "gaps",
+    "files_changed"
+  ],
+  "properties": {
+    "role_id": {
+      "type": "string",
+      "enum": [
+        "functional-ci-action-writer",
+        "security-ci-action-writer",
+        "nonfunctional-ci-action-writer"
+      ]
+    },
+    "detected_ecosystem": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "workflows_read": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "workflows_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commands_added": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commands_already_present": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checks_added": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checks_already_present": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^\\.github/workflows/"
+      }
+    }
+  },
+  "additionalProperties": false
+}

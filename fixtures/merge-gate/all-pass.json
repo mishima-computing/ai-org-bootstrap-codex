@@ -1,0 +1,33 @@
+{
+  "name": "all-pass",
+  "check_runs_response": {
+    "total_count": 3,
+    "check_runs": [
+      {
+        "name": "functional-ci",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "security-ci",
+        "status": "completed",
+        "conclusion": "neutral"
+      },
+      {
+        "name": "nonfunctional-ci",
+        "status": "completed",
+        "conclusion": "skipped"
+      }
+    ]
+  },
+  "combined_status_response": {
+    "state": "success",
+    "statuses": [
+      {
+        "context": "legacy-ci",
+        "state": "success"
+      }
+    ]
+  },
+  "expected_exit": 0
+}
