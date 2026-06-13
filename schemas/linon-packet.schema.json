@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.linon-packet.v1",
+  "type": "object",
+  "required": [
+    "packet_id",
+    "profile_id",
+    "target_repo",
+    "head_sha",
+    "diff_artifact",
+    "implementation_contract",
+    "sha256_pair"
+  ],
+  "properties": {
+    "packet_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "profile_id": {
+      "type": "string",
+      "const": "linon-review"
+    },
+    "target_repo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 1
+    },
+    "diff_artifact": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "implementation_contract": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "ratification_status",
+        "embedded_contract"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "ratification_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "embedded_contract": {
+          "type": "object",
+          "required": [
+            "contract_id",
+            "files_allowed_to_change"
+          ],
+          "properties": {
+            "contract_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "files_allowed_to_change": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "sha256_pair": {
+      "type": "object",
+      "required": [
+        "diff_sha256",
+        "contract_sha256"
+      ],
+      "properties": {
+        "diff_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "contract_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

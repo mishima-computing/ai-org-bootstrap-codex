@@ -1,15 +1,15 @@
 {
-  "packet_id": "linon-review-sha256-pair-fixture",
+  "packet_id": "linon-review-forged-sha256-fixture",
   "profile_id": "linon-review",
   "target_repo": "/fixture/target-repo",
   "head_sha": "0000000000000000000000000000000000000000",
   "diff_artifact": {
     "path": "fixtures/linon-review/packet/example.diff",
-    "sha256": "f3c74ca8b61c990da9acd8864382fb0971dea8375e478ddaec61a9cf0c58d33a"
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
   "implementation_contract": {
     "path": "fixtures/linon-review/packet/example-contract.json",
-    "sha256": "932b09a220b841715bd178e70fc7fe38f9936cf567b325564465ff2d503ee33a",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "ratification_status": "committed-0000000000000000000000000000000000000000",
     "embedded_contract": {
       "role_id": "aufheben-designer",
@@ -41,7 +41,7 @@
     }
   },
   "sha256_pair": {
-    "diff_sha256": "f3c74ca8b61c990da9acd8864382fb0971dea8375e478ddaec61a9cf0c58d33a",
-    "contract_sha256": "932b09a220b841715bd178e70fc7fe38f9936cf567b325564465ff2d503ee33a"
+    "diff_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "contract_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   }
 }

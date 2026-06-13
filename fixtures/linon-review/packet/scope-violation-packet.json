@@ -1,11 +1,11 @@
 {
-  "packet_id": "linon-review-sha256-pair-fixture",
+  "packet_id": "linon-review-scope-violation-fixture",
   "profile_id": "linon-review",
   "target_repo": "/fixture/target-repo",
   "head_sha": "0000000000000000000000000000000000000000",
   "diff_artifact": {
-    "path": "fixtures/linon-review/packet/example.diff",
-    "sha256": "f3c74ca8b61c990da9acd8864382fb0971dea8375e478ddaec61a9cf0c58d33a"
+    "path": "fixtures/linon-review/packet/scope-violation.diff",
+    "sha256": "5f04add8928756c07a2213d63ccea33594c9bf3ecebee99ead54e98d1daf5d10"
   },
   "implementation_contract": {
     "path": "fixtures/linon-review/packet/example-contract.json",
@@ -41,7 +41,7 @@
     }
   },
   "sha256_pair": {
-    "diff_sha256": "f3c74ca8b61c990da9acd8864382fb0971dea8375e478ddaec61a9cf0c58d33a",
+    "diff_sha256": "5f04add8928756c07a2213d63ccea33594c9bf3ecebee99ead54e98d1daf5d10",
     "contract_sha256": "932b09a220b841715bd178e70fc7fe38f9936cf567b325564465ff2d503ee33a"
   }
 }

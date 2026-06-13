@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import sys
+import importlib.util
 from typing import Any
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+LINON_PACKET_VERIFIER = ROOT / "scripts" / "verify-linon-packet.py"
 PKG = ROOT / "packages" / "codex-org-bootstrap" / "src"
 sys.path.insert(0, str(PKG))
 
@@ -100,6 +102,31 @@ def validate_linon_review_fixtures(root: Path) -> list[str]:
     return errors
 
 
+def validate_linon_packet_fixtures(root: Path) -> list[str]:
+    spec = importlib.util.spec_from_file_location("verify_linon_packet", LINON_PACKET_VERIFIER)
+    if spec is None or spec.loader is None:
+        return [f"{LINON_PACKET_VERIFIER.relative_to(root)}: cannot import packet verifier"]
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    fixture_dir = root / "fixtures" / "linon-review" / "packet"
+    expectations = {
+        "example-packet.json": True,
+        "forged-packet.json": False,
+        "scope-violation-packet.json": False,
+    }
+    errors: list[str] = []
+    for name, should_accept in expectations.items():
+        fixture_path = fixture_dir / name
+        fixture_errors = verifier.verify_packet(fixture_path, root)
+        rel = fixture_path.relative_to(root)
+        if should_accept and fixture_errors:
+            errors.append(f"{rel}: expected ACCEPTED, got REJECTED: {fixture_errors}")
+        if not should_accept and not fixture_errors:
+            errors.append(f"{rel}: expected REJECTED, got ACCEPTED")
+    return errors
+
+
 def _validate_value(schema: dict[str, Any], value: object, path: str, errors: list[str]) -> None:
     expected_type = schema.get("type")
     if expected_type == "object":
@@ -174,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
     errors = validate_pack(root)
     errors.extend(validate_linon_review_fixtures(root))
+    errors.extend(validate_linon_packet_fixtures(root))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
