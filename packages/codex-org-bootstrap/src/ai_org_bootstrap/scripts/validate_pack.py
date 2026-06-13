@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 from ai_org_bootstrap.pack import find_repo_root
@@ -76,9 +77,23 @@ def validate(root: Path) -> list[str]:
         except json.JSONDecodeError as exc:
             errors.append(f"schema is not valid JSON: {schema_path.relative_to(root)}: {exc}")
 
-    for script in ["scripts/merge-gate.py", "scripts/validate-bootstrap-pack.py"]:
+    for script in ["scripts/merge-gate.py", "scripts/profile-evidence-check.py", "scripts/validate-bootstrap-pack.py"]:
         if not (root / script).is_file():
             errors.append(f"required script missing: {script}")
+
+    for script in ["scripts/profile-evidence-check.py", "scripts/submit-result.py"]:
+        script_path = root / script
+        if not script_path.is_file():
+            continue
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--self-test"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            errors.append(f"{script} --self-test failed: {detail}")
 
     return errors
 

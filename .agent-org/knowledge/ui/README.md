@@ -31,3 +31,4 @@ For WorldCat literature pointers with a stable ISBN, prefer `https://search.worl
 | `ui-corporate-trust-genre` | Claim classes cite `anchor:evaluation-instruments#claim-classes`. |
 | `ui-information-design` | Claim classes cite `anchor:evaluation-instruments#claim-classes`. |
 | `ui-feel-foundations` | Product-measurement wording cites `anchor:evaluation-instruments#claim-classes`. |
+| `ui-retro-gamer` | Retro game-feel claims cite source-readable anchors such as `anchor:genre-retro-game-experience#adarkroom-button-state`. |

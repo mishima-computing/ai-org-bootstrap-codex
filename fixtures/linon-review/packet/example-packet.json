@@ -9,7 +9,7 @@
   },
   "implementation_contract": {
     "path": "fixtures/linon-review/packet/example-contract.json",
-    "sha256": "932b09a220b841715bd178e70fc7fe38f9936cf567b325564465ff2d503ee33a",
+    "sha256": "99acf733b71ec96ff74dd70ce8c38c7a74ec9bbdafc0bc1bc75781a89259c8a2",
     "embedded_contract": {
       "role_id": "aufheben-designer",
       "contract_id": "linon-packet-fixture-contract",
@@ -20,6 +20,7 @@
       "acceptance_criteria": [
         "The Linon packet records sha256 values for the diff artifact and embedded contract."
       ],
+      "profile_applications": [],
       "files_allowed_to_change": [
         "src/example.ts"
       ],
@@ -41,7 +42,7 @@
   },
   "sha256_pair": {
     "diff_sha256": "f3c74ca8b61c990da9acd8864382fb0971dea8375e478ddaec61a9cf0c58d33a",
-    "contract_sha256": "932b09a220b841715bd178e70fc7fe38f9936cf567b325564465ff2d503ee33a"
+    "contract_sha256": "99acf733b71ec96ff74dd70ce8c38c7a74ec9bbdafc0bc1bc75781a89259c8a2"
   },
   "bootstrap_note": "Inline diff review is bootstrap-only and not an activation path after this tracked packet fixture exists."
 }

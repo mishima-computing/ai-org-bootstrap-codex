@@ -36,7 +36,9 @@ Emit the normal proposal fields plus `continuity` when continuity is evaluable. 
 
 Truncation priority is safety-first: preserve selector `knowledge_gaps` 6-to-6, reduce selector `evidence_refs` from 12 into `ecosystem_facts_used` 8 by keeping facts that affect compatibility, migration, tests, or operational behavior, then preserve selected profiles up to 5. If truncation hides a safety-relevant gap, declare that truncation fact in `knowledge_gaps`.
 
-Selected-profiles vocabulary includes `htmlcss-computable-spatial`, `htmlcss-modern-layout`, `htmlcss-motion-implementation`, `python`, `python-testing`, and `rust` when objective-declared or mechanically selected.
+Selected-profiles vocabulary includes `htmlcss-computable-spatial`, `htmlcss-modern-layout`, `htmlcss-motion-implementation`, `python`, `python-testing`, `rust`, `ui-bilingual-typography`, `ui-composition-patterns`, `ui-corporate-trust-genre`, `ui-feel-foundations`, `ui-gacha-genre`, `ui-information-design`, and `ui-retro-gamer` when objective-declared or mechanically selected.
+
+When objective-declared Experience Constraints name UI profiles, copy those profile IDs into `continuity.selected_profiles` before selector-derived ecosystem cards. For every selected UI profile used in the recommendation, make at least one proposal constraint or handoff note executable enough for `aufheben-designer` to convert into `profile_applications`: name the observable event or state, the implementation surface, and the evidence that an implementer must return. If a named UI profile cannot be converted that far from available repo evidence, keep the profile selected but place the missing implementation surface or evidence method in `continuity.knowledge_gaps` and downgrade the affected claim to speculative.
 
 ## Stop Conditions
 Proceed degraded when continuity is partially evaluable. Non-empty `continuity.knowledge_gaps` means affected proposal claims must be placed in `confidence.speculative_claims`, not `confidence.grounded_claims`.

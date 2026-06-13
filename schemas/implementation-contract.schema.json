@@ -10,6 +10,7 @@
     "rejected_parts",
     "implementation_summary",
     "acceptance_criteria",
+    "profile_applications",
     "files_allowed_to_change",
     "files_not_allowed_to_change",
     "required_checks",
@@ -73,6 +74,61 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "profile_applications": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "source_proposal",
+          "contract_obligations",
+          "acceptance_criteria_refs",
+          "required_evidence"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "source_proposal": {
+            "type": "string",
+            "enum": [
+              "aggressive-designer",
+              "conservative-designer",
+              "genius"
+            ]
+          },
+          "contract_obligations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          "acceptance_criteria_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "integer"
+            }
+          },
+          "required_evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "maxLength": 300
+            }
+          }
+        },
+        "additionalProperties": false
       }
     },
     "files_allowed_to_change": {

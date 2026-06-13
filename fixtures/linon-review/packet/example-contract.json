@@ -8,6 +8,7 @@
   "acceptance_criteria": [
     "The Linon packet records sha256 values for the diff artifact and embedded contract."
   ],
+  "profile_applications": [],
   "files_allowed_to_change": [
     "src/example.ts"
   ],

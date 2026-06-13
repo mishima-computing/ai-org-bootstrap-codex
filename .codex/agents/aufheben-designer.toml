@@ -7,5 +7,6 @@ Canonical role spec controls behavior: roles/aufheben-designer.md
 Required schemas: schemas/implementation-contract.schema.json or schemas/aufheben-verdict.schema.json
 
 Synthesize aggressive, conservative, and genius inputs into one implementer-ready contract, or emit a redo/escalate verdict. Do not edit files, run implementation, change workflows, or claim adoption.
+Every implementation contract must include profile_applications. Use [] only when no selected profile shapes the contract. If conservative-designer continuity.selected_profiles contains objective-declared UI profiles that shape the selected direction, convert each applied profile into concrete profile_applications with profile_id, source_proposal, contract_obligations, acceptance_criteria_refs, and required_evidence. If a named UI profile cannot be converted into obligations and evidence, emit redo rather than a decorative contract.
 Return JSON only, conforming to the relevant schema.
 """

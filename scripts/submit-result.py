@@ -252,6 +252,7 @@ def implementation_contract_instance() -> dict[str, Any]:
         "rejected_parts": [],
         "implementation_summary": "example summary",
         "acceptance_criteria": [],
+        "profile_applications": [],
         "files_allowed_to_change": [],
         "files_not_allowed_to_change": [],
         "required_checks": [],
@@ -261,6 +262,23 @@ def implementation_contract_instance() -> dict[str, Any]:
         "risks": [],
         "fallback_plan": "example fallback",
         "handoff_to_implementer": "example handoff",
+    }
+
+
+def implementation_result_instance() -> dict[str, Any]:
+    return {
+        "role_id": "implementer",
+        "implementation_contract_id": "IC-self-test",
+        "summary": "example implementation result",
+        "files_changed": [],
+        "implementation_evidence": [],
+        "commands_run": [],
+        "command_results": [],
+        "checks_passed": [],
+        "checks_failed": [],
+        "remaining_failures": [],
+        "scope_deviations": [],
+        "manual_followup": [],
     }
 
 
@@ -293,6 +311,64 @@ def _self_test_missing_required_field() -> None:
     _assert(
         any("$.continuity.knowledge_gaps: missing required field" == item for item in errors),
         "missing required field error must include field JSON path",
+    )
+
+
+def _self_test_contract_requires_profile_applications() -> None:
+    instance = implementation_contract_instance()
+    del instance["profile_applications"]
+    errors, _schema = validate_payload("aufheben-designer", instance)
+    _assert(
+        any("$.profile_applications: missing required field" == item for item in errors),
+        "implementation contract must require profile_applications",
+    )
+
+
+def _self_test_result_requires_implementation_evidence() -> None:
+    instance = implementation_result_instance()
+    del instance["implementation_evidence"]
+    errors, _schema = validate_payload("implementer", instance)
+    _assert(
+        any("$.implementation_evidence: missing required field" == item for item in errors),
+        "implementation result must require implementation_evidence",
+    )
+
+
+def _self_test_profile_application_requires_obligation_items() -> None:
+    instance = implementation_contract_instance()
+    instance["acceptance_criteria"] = ["observable profile obligation is implemented"]
+    instance["profile_applications"] = [
+        {
+            "profile_id": "ui-retro-gamer",
+            "source_proposal": "conservative-designer",
+            "contract_obligations": [],
+            "acceptance_criteria_refs": [0],
+            "required_evidence": ["file and check evidence"],
+        }
+    ]
+    errors, _schema = validate_payload("aufheben-designer", instance)
+    _assert(
+        any("$.profile_applications[0].contract_obligations: at least 1 items" in item for item in errors),
+        "profile application obligations must not be empty",
+    )
+
+
+def _self_test_profile_application_refs_acceptance_criteria() -> None:
+    instance = implementation_contract_instance()
+    instance["acceptance_criteria"] = ["observable profile obligation is implemented"]
+    instance["profile_applications"] = [
+        {
+            "profile_id": "ui-retro-gamer",
+            "source_proposal": "conservative-designer",
+            "contract_obligations": ["Implement pointerdown feedback as visible state."],
+            "acceptance_criteria_refs": [1],
+            "required_evidence": ["file and check evidence"],
+        }
+    ]
+    errors, _schema = validate_payload("aufheben-designer", instance)
+    _assert(
+        any("criterion index 1 out of range" in item for item in errors),
+        "profile application refs must point to existing acceptance criteria",
     )
 
 
@@ -360,6 +436,10 @@ def run_self_tests() -> int:
         ("unknown_key_tombstone", _self_test_unknown_key),
         ("cap_excess_actual_vs_allowed", _self_test_cap_excess),
         ("missing_required_field_path", _self_test_missing_required_field),
+        ("contract_requires_profile_applications", _self_test_contract_requires_profile_applications),
+        ("result_requires_implementation_evidence", _self_test_result_requires_implementation_evidence),
+        ("profile_application_requires_obligation_items", _self_test_profile_application_requires_obligation_items),
+        ("profile_application_refs_acceptance_criteria", _self_test_profile_application_refs_acceptance_criteria),
         ("passing_instance_and_atomic_write", _self_test_passing_instance_and_atomic_write),
         ("path_containment", _self_test_path_containment),
         ("emitted_validation_error_shape", _self_test_emitted_validation_error_shape),

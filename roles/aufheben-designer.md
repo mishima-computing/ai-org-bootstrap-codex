@@ -33,6 +33,8 @@ Stop when required design inputs are missing or contradictions cannot be resolve
 ## Evidence Requirements
 Contract ID, selected direction, rejected parts from each proposal, implementation summary, acceptance criteria, allowed files, disallowed files, required checks, security requirements, nonfunctional requirements, non-goals, risks, fallback plan, and handoff to `implementer`.
 
+`profile_applications` is required on every implementation contract. Use an empty array only when no profile from designer output is applied. When `conservative-designer.continuity.selected_profiles` contains objective-declared UI profiles that shape the selected direction, each applied profile must become one or more concrete contract obligations. Each obligation names the profile ID, the source proposal, the implementation obligation, the acceptance criteria indexes that test it, and the evidence the implementer must return. If an objective-declared profile is present but cannot be converted into contract obligations, choose "redo" with a redo_brief naming the missing event/state, implementation surface, or evidence method instead of emitting a decorative contract.
+
 Write `situation_read` within 1000 characters on either output path (schema tolerance 1100 — the band absorbs counting error; the 1000 target is the instruction). The aufheben band is intentionally wider than designer bands: this role ingests all three designer outputs plus review evidence, so its situation field scales with input count (owner asymmetry principle, 2026-06-13; 19th field violation was the trigger sample). For verdicts, include role_id, decision, situation_read, and the decision-specific field required by `schemas/aufheben-verdict.schema.json`.
 
 ## Interaction With Other Roles

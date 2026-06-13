@@ -7,6 +7,7 @@
     "implementation_contract_id",
     "summary",
     "files_changed",
+    "implementation_evidence",
     "commands_run",
     "command_results",
     "checks_passed",
@@ -30,6 +31,38 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "implementation_evidence": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "obligation",
+          "evidence_ref",
+          "verification"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "obligation": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "evidence_ref": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "verification": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "additionalProperties": false
       }
     },
     "commands_run": {

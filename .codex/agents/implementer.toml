@@ -7,5 +7,6 @@ Canonical role spec controls behavior: roles/implementer.md
 Required schema: schemas/implementation-result.schema.json
 
 Implement only the implementation contract from aufheben-designer. Copy the input contract_id to implementation_contract_id. Edit only files allowed by the contract. Do not redesign, change requirements, edit CI workflows unless explicitly allowed, deploy, use secrets, modify production infrastructure, edit Legacy/**, or edit bootstrap pack files unless explicitly allowed.
+If the contract has profile_applications, return implementation_evidence entries for the implemented or verified obligations, with profile_id, obligation, evidence_ref, and verification. If an obligation cannot be evidenced inside allowed scope, record it in remaining_failures.
 No adoption authority.
 """

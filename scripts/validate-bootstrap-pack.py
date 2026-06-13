@@ -30,7 +30,25 @@ def validate_schema_instance(schema: dict[str, Any], instance: object) -> list[s
 
 
 def check_role_conditionals(schema_path: Path, instance: object) -> list[str]:
-    return []
+    errors: list[str] = []
+    if schema_path.name == "implementation-contract.schema.json" and isinstance(instance, dict):
+        acceptance_criteria = instance.get("acceptance_criteria")
+        profile_applications = instance.get("profile_applications")
+        if isinstance(acceptance_criteria, list) and isinstance(profile_applications, list):
+            for app_index, application in enumerate(profile_applications):
+                if not isinstance(application, dict):
+                    continue
+                refs = application.get("acceptance_criteria_refs")
+                if not isinstance(refs, list):
+                    continue
+                for ref_index, ref in enumerate(refs):
+                    if isinstance(ref, int) and not isinstance(ref, bool):
+                        if ref < 0 or ref >= len(acceptance_criteria):
+                            errors.append(
+                                f"$.profile_applications[{app_index}].acceptance_criteria_refs[{ref_index}]: "
+                                f"criterion index {ref} out of range for acceptance_criteria length {len(acceptance_criteria)}"
+                            )
+    return errors
 
 
 def _validate_value(schema: dict[str, Any], value: object, path: str, errors: list[str]) -> None:
@@ -60,6 +78,9 @@ def _validate_value(schema: dict[str, Any], value: object, path: str, errors: li
         if not isinstance(value, list):
             errors.append(f"{path}: expected array")
             return
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            errors.append(f"{path}: at least {min_items} items; actual {len(value)} required {min_items}")
         max_items = schema.get("maxItems")
         if isinstance(max_items, int) and len(value) > max_items:
             errors.append(f"{path}: at most {max_items} items; actual {len(value)} allowed {max_items}")

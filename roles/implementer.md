@@ -25,7 +25,9 @@ JSON conforming to `schemas/implementation-result.schema.json`.
 Stop when the contract is ambiguous, required files are outside allowed scope, required commands are unavailable, or fixing a failure would expand beyond the contract.
 
 ## Evidence Requirements
-`implementation_contract_id` copied from the input contract `contract_id`, summary, files changed, commands run, command results, checks passed, checks failed, remaining failures, scope deviations, and manual follow-up.
+`implementation_contract_id` copied from the input contract `contract_id`, summary, files changed, implementation evidence, commands run, command results, checks passed, checks failed, remaining failures, scope deviations, and manual follow-up.
+
+When the implementation contract has non-empty `profile_applications`, return `implementation_evidence` entries for the applied profile obligations that were implemented or verified. Each evidence entry names the `profile_id`, the obligation, the file or artifact reference, and the verification performed. If an obligation cannot be evidenced inside the allowed scope, record it in `remaining_failures` rather than silently satisfying the profile with prose.
 
 ## Interaction With Other Roles
 Consumes only the implementation contract from `aufheben-designer`. Does not instruct designers and does not claim adoption.
