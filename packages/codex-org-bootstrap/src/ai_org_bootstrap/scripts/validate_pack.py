@@ -27,7 +27,9 @@ def validate(root: Path) -> list[str]:
         return ["registry/runtime-registry.yaml is required."]
 
     for path in root.rglob("*"):
-        if ".git" in path.parts:
+        # .agent-runs/ is gitignored runtime scratch, never published; out of scope for
+        # this tracked-pack purity scan (excluding it is scoping, not a ban relaxation).
+        if ".git" in path.parts or ".agent-runs" in path.parts:
             continue
         if any(part in FORBIDDEN_PATH_PARTS for part in path.parts):
             errors.append(f"forbidden non-Codex path present: {path.relative_to(root)}")
@@ -53,6 +55,7 @@ def validate(root: Path) -> list[str]:
         "genius",
         "aufheben-designer",
         "implementer",
+        "linon",
     }
     if agent_ids != expected_agents:
         errors.append(f"runtime registry agents mismatch: {sorted(agent_ids)}")

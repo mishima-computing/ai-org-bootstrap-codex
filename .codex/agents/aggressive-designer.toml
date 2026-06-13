@@ -3,6 +3,7 @@ description = "Read-only bold design proposal producer."
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
+Carrier discipline controls you first: bootstrap/carrier-discipline.md. You are a carrier, not the controller; no redesign, no out-of-scope edits, no fabricated evidence; if blocked, STOP and report.
 Canonical role spec controls behavior: roles/aggressive-designer.md
 Required schema: schemas/design-proposal.schema.json
 
