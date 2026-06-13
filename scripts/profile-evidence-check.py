@@ -214,40 +214,57 @@ def decode_git_path_token(token: str) -> str:
     return output.decode("utf-8")
 
 
-def split_git_path_fields(text: str) -> list[str]:
-    fields: list[str] = []
-    index = 0
-    while index < len(text):
-        while index < len(text) and text[index].isspace():
-            index += 1
-        if index >= len(text):
-            break
-        if text[index] == '"':
-            start = index
-            index += 1
-            escaped = False
-            while index < len(text):
-                char = text[index]
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    index += 1
-                    break
-                index += 1
-            fields.append(text[start:index])
-            continue
-        start = index
-        while index < len(text) and not text[index].isspace():
-            index += 1
-        fields.append(text[start:index])
-    return fields
-
-
 def strip_git_side_prefix(path: str, side: str) -> str:
     prefix = f"{side}/"
     return path[2:] if path.startswith(prefix) else path
+
+
+def _scan_c_quoted_token(text: str, start: int = 0) -> tuple[str, int] | None:
+    if start >= len(text) or text[start] != '"':
+        return None
+    index = start + 1
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            index += 1
+            return text[start:index], index
+        index += 1
+    return None
+
+
+def _header_path_field(raw: str) -> str:
+    field = raw.rstrip("\r")
+    if field.startswith('"'):
+        scanned = _scan_c_quoted_token(field)
+        if scanned is not None:
+            return decode_git_path_token(scanned[0])
+        return decode_git_path_token(field)
+    if "\t" in field:
+        field = field.split("\t", 1)[0]
+    return decode_git_path_token(field)
+
+
+def parse_diff_git_new_path(line: str) -> str | None:
+    text = line[len("diff --git "):]
+    first = _scan_c_quoted_token(text)
+    if first is not None:
+        left_token, index = first
+        while index < len(text) and text[index].isspace():
+            index += 1
+        second = _scan_c_quoted_token(text, index)
+        if second is None:
+            return None
+        return strip_git_side_prefix(decode_git_path_token(second[0]), "b")
+
+    marker = " b/"
+    if text.startswith("a/") and marker in text:
+        return text.rsplit(marker, 1)[1]
+    return None
 
 
 def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
@@ -256,32 +273,26 @@ def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
     saw_matching_plus = False
     current_file: str | None = None
     new_line: int | None = None
+    in_hunk = False
     last_consumed_by_file: dict[str, int] = {}
 
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            parts = split_git_path_fields(line[len("diff --git "):])
-            if len(parts) < 2:
-                raise DiffError(f"diff: malformed file header {line!r}")
-            right = decode_git_path_token(parts[1])
-            diff_file = strip_git_side_prefix(right, "b")
+            diff_file = parse_diff_git_new_path(line)
             saw_matching_plus = False
             current_file = None
             new_line = None
+            in_hunk = False
             continue
 
-        if line.startswith("+++ "):
-            target = decode_git_path_token(line[4:].strip())
+        if not in_hunk and line.startswith("+++ "):
+            target = _header_path_field(line[4:])
             if target == "/dev/null":
-                if diff_file is None:
-                    raise DiffError("diff: +++ header appears before diff --git header")
                 current_file = None
                 saw_matching_plus = True
             elif target.startswith("b/"):
                 plus_file = target[2:]
-                if diff_file is None:
-                    raise DiffError(f"diff: +++ b/{plus_file} appears before diff --git header")
-                if plus_file != diff_file:
+                if diff_file is not None and plus_file != diff_file:
                     raise DiffError(f"diff: +++ b/{plus_file} does not match diff --git b/{diff_file}")
                 current_file = plus_file
                 added.setdefault(current_file, {})
@@ -293,13 +304,13 @@ def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
 
         match = HUNK_RE.match(line)
         if match:
-            if diff_file is None:
-                raise DiffError("diff: hunk appears before diff --git header")
             if not saw_matching_plus:
-                raise DiffError(f"diff: hunk for {diff_file} lacks matching +++ b/{diff_file} header")
+                target = diff_file if diff_file is not None else "<unknown>"
+                raise DiffError(f"diff: hunk for {target} lacks matching +++ b/{target} header")
             if current_file is not None and new_line is not None:
                 last_consumed_by_file[current_file] = max(last_consumed_by_file.get(current_file, 0), new_line - 1)
             new_line = int(match.group(1))
+            in_hunk = True
             if current_file is not None and new_line <= last_consumed_by_file.get(current_file, 0):
                 raise DiffError(
                     f"diff: non-monotonic overlapping hunk for {current_file}; new start {new_line} "
@@ -310,7 +321,7 @@ def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
         if current_file is None or new_line is None:
             continue
 
-        if line.startswith("+") and not line.startswith("+++"):
+        if line.startswith("+"):
             added.setdefault(current_file, {})[new_line] = line[1:]
             new_line += 1
         elif line.startswith(" ") or line == "":
@@ -435,7 +446,7 @@ def git_diff_text(base: str | None, head: str, protected_ref: str = "main", repo
     if errors:
         return "", errors
 
-    proc = git_run(["diff", f"{base_oid}..{head_oid}"], repo_root=repo_root)
+    proc = git_run(["-c", "core.quotepath=false", "diff", f"{base_oid}..{head_oid}"], repo_root=repo_root)
     if proc.returncode != 0:
         errors.append(f"git diff: failed for {base_oid}..{head_oid}: {proc.stderr.strip()}")
     return proc.stdout, errors
@@ -477,7 +488,7 @@ def list_ints(value: object) -> list[int]:
 
 
 CODE_KEYWORD_RE = re.compile(
-    r"\b(def|class|if|elif|else|for|while|try|except|finally|with|return|raise|assert|import|from|yield|await|match|case|pass)\b"
+    r"\b(def|class|if|elif|else|for|while|try|except|finally|with|return|raise|assert|import|from|yield|await|match|case|pass|del|global|nonlocal)\b"
 )
 ASSIGNMENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b\s*(?::=|[+\-*/%|&^]?=(?!=))")
 CALL_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*\(")
@@ -510,29 +521,55 @@ def is_assignable_lvalue(node: ast.AST) -> bool:
     return False
 
 
-def ast_has_code_structure(stripped: str) -> bool:
-    try:
-        parsed = ast.parse(stripped)
-    except SyntaxError:
+def _add_node_line(lines: set[int], node: ast.AST) -> None:
+    line = getattr(node, "lineno", None)
+    if isinstance(line, int):
+        lines.add(line)
+
+
+def _expr_has_executable_structure(node: ast.AST) -> bool:
+    if isinstance(node, (ast.Constant, ast.JoinedStr, ast.Name)):
         return False
+    return any(isinstance(child, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)) for child in ast.walk(node))
+
+
+def python_code_structure_lines(source: str) -> set[int]:
+    try:
+        parsed = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    lines: set[int] = set()
     for node in ast.walk(parsed):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If, ast.For, ast.AsyncFor, ast.While)):
-            return True
-        if isinstance(node, (ast.Try, ast.With, ast.AsyncWith, ast.Return, ast.Raise, ast.Assert, ast.Import, ast.ImportFrom)):
-            return True
-        if isinstance(node, (ast.Match, ast.Pass, ast.Break, ast.Continue)):
-            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _add_node_line(lines, node)
+            for decorator in node.decorator_list:
+                _add_node_line(lines, decorator)
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith, ast.Match)):
+            _add_node_line(lines, node)
+            continue
+        if isinstance(node, (ast.Return, ast.Raise, ast.Assert, ast.Import, ast.ImportFrom)):
+            _add_node_line(lines, node)
+            continue
+        if isinstance(node, (ast.Pass, ast.Break, ast.Continue, ast.Delete, ast.Global, ast.Nonlocal)):
+            _add_node_line(lines, node)
+            continue
         if isinstance(node, ast.Assign) and any(is_assignable_lvalue(target) for target in node.targets):
-            return True
-        if isinstance(node, ast.AnnAssign) and is_assignable_lvalue(node.target):
-            return True
+            _add_node_line(lines, node)
+            continue
+        if isinstance(node, ast.AnnAssign) and node.value is not None and is_assignable_lvalue(node.target):
+            _add_node_line(lines, node)
+            continue
         if isinstance(node, ast.AugAssign) and is_assignable_lvalue(node.target):
-            return True
+            _add_node_line(lines, node)
+            continue
         if isinstance(node, ast.NamedExpr) and is_assignable_lvalue(node.target):
-            return True
-        if isinstance(node, (ast.Yield, ast.YieldFrom, ast.Await, ast.Call)):
-            return True
-    return False
+            _add_node_line(lines, node)
+            continue
+        if isinstance(node, ast.Expr) and _expr_has_executable_structure(node.value):
+            _add_node_line(lines, node)
+    return lines
 
 
 def string_stripped_source(source: str) -> str:
@@ -551,14 +588,35 @@ def string_stripped_source(source: str) -> str:
     return " ".join(pieces)
 
 
-def has_code_structure(added_text: str) -> bool:
+def has_lexical_code_structure(added_text: str) -> bool:
     stripped = added_text.strip()
     if not stripped or stripped.startswith("#") or is_bare_string_literal(stripped):
         return False
-    if ast_has_code_structure(stripped):
-        return True
     code_only = string_stripped_source(stripped)
     return bool(CODE_KEYWORD_RE.search(code_only) or ASSIGNMENT_RE.search(code_only) or CALL_RE.search(code_only))
+
+
+def load_new_file_content(path: str, diff_text: str, head: str, repo_root: Path) -> str | None:
+    proc = git_run(["show", f"{head}:{path}"], repo_root=repo_root)
+    if proc.returncode == 0:
+        return proc.stdout
+    return materialize_patch_files(diff_text).get(path)
+
+
+def code_structure_lines_by_path(
+    added_lines: dict[str, dict[int, str]],
+    diff_text: str,
+    head: str,
+    repo_root: Path,
+) -> dict[str, set[int]]:
+    structured: dict[str, set[int]] = {}
+    for path, lines in added_lines.items():
+        if path.endswith(".py"):
+            content = load_new_file_content(path, diff_text, head, repo_root)
+            structured[path] = python_code_structure_lines(content) if content is not None else set()
+        else:
+            structured[path] = {line_no for line_no, text in lines.items() if has_lexical_code_structure(text)}
+    return structured
 
 
 def criterion_texts(criteria: list[object], refs: list[int], label: str, errors: list[str]) -> str:
@@ -656,6 +714,7 @@ def validate_documents(
         errors.append(str(exc))
     if not added_lines:
         errors.append("diff: no added lines found")
+    structured_lines = code_structure_lines_by_path(added_lines, diff_text, head, repo_root) if added_lines else {}
 
     evidence_entries = implementation_evidence(evidence_doc)
     if not evidence_entries:
@@ -699,8 +758,7 @@ def validate_documents(
                 f"{label}.evidence_ref: {path}:{line} is outside added-line range in diff"
             )
         else:
-            added_text = added_lines[path][line]
-            if not has_code_structure(added_text):
+            if line not in structured_lines.get(path, set()):
                 entry_errors.append(f"{label}.evidence_ref: {path}:{line} is not an added code-structure line")
 
         ref_key = f"{path}:{line}"
@@ -786,18 +844,26 @@ SELF_TESTS = {
 def materialize_patch_files(diff_text: str) -> dict[str, str]:
     files: dict[str, list[str]] = {}
     current_file: str | None = None
+    in_hunk = False
     for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            target = decode_git_path_token(line[4:].strip())
+        if line.startswith("diff --git "):
+            current_file = None
+            in_hunk = False
+            continue
+        if not in_hunk and line.startswith("+++ "):
+            target = _header_path_field(line[4:])
             if target.startswith("b/"):
                 current_file = target[2:]
                 files.setdefault(current_file, [])
             else:
                 current_file = None
             continue
-        if current_file is None or line.startswith("+++") or line.startswith("---"):
+        if HUNK_RE.match(line):
+            in_hunk = True
             continue
-        if line.startswith("+") and not line.startswith("+++"):
+        if current_file is None or not in_hunk:
+            continue
+        if line.startswith("+"):
             files[current_file].append(line[1:])
         elif line.startswith(" "):
             files[current_file].append(line[1:])
@@ -1012,11 +1078,212 @@ def run_range_binding_self_test() -> list[str]:
     return []
 
 
+def run_real_git_probe(
+    case_name: str,
+    files: dict[str, str],
+    evidence_refs: list[tuple[str, int]],
+) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix=f"profile-evidence-{case_name}-") as tmp:
+        repo_root = Path(tmp)
+        for args in (
+            ["init"],
+            ["config", "user.email", "profile-evidence@example.invalid"],
+            ["config", "user.name", "Profile Evidence Self Test"],
+        ):
+            proc = git_run(args, repo_root=repo_root)
+            if proc.returncode != 0:
+                return [f"{case_name}: git {' '.join(args)} failed: {proc.stderr.strip()}"]
+
+        card_proc = git_run(["ls-files", ".agent-org/knowledge/ui/*.md"])
+        if card_proc.returncode != 0:
+            return [f"{case_name}: git ls-files profile cards failed: {card_proc.stderr.strip()}"]
+        for raw_path in card_proc.stdout.splitlines():
+            source = ROOT / raw_path
+            target = repo_root / raw_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        add_cards = git_run(["add", ".agent-org/knowledge/ui"], repo_root=repo_root)
+        if add_cards.returncode != 0:
+            return [f"{case_name}: git add profile cards failed: {add_cards.stderr.strip()}"]
+        base_commit = git_run(["commit", "-m", "base profile cards"], repo_root=repo_root)
+        if base_commit.returncode != 0:
+            return [f"{case_name}: git commit base failed: {base_commit.stderr.strip()}"]
+        base_proc = git_run(["rev-parse", "HEAD"], repo_root=repo_root)
+        if base_proc.returncode != 0:
+            return [f"{case_name}: git rev-parse base failed: {base_proc.stderr.strip()}"]
+        base = base_proc.stdout.strip()
+
+        for raw_path, content in files.items():
+            target = repo_root / raw_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        add_files = git_run(["add", "."], repo_root=repo_root)
+        if add_files.returncode != 0:
+            return [f"{case_name}: git add files failed: {add_files.stderr.strip()}"]
+        head_commit = git_run(["commit", "-m", f"profile evidence probe {case_name}"], repo_root=repo_root)
+        if head_commit.returncode != 0:
+            return [f"{case_name}: git commit probe failed: {head_commit.stderr.strip()}"]
+        head_proc = git_run(["rev-parse", "HEAD"], repo_root=repo_root)
+        if head_proc.returncode != 0:
+            return [f"{case_name}: git rev-parse head failed: {head_proc.stderr.strip()}"]
+        head = head_proc.stdout.strip()
+
+        objective_path = repo_root / "objective.json"
+        contract_path = repo_root / "contract.json"
+        evidence_path = repo_root / "evidence.json"
+        obligations = [f"{case_name} obligation {index + 1}" for index in range(len(evidence_refs))]
+        write_temp_json(objective_path, {"authorized_profiles": ["ui-information-design"]})
+        write_temp_json(
+            contract_path,
+            {
+                "acceptance_criteria": obligations,
+                "profile_applications": [
+                    {
+                        "profile_id": "ui-information-design",
+                        "source_proposal": "conservative",
+                        "contract_obligations": obligations,
+                        "acceptance_criteria_refs": list(range(len(obligations))),
+                        "required_evidence": ["implementation_evidence"],
+                    }
+                ],
+            },
+        )
+        write_temp_json(
+            evidence_path,
+            {
+                "implementation_evidence": [
+                    {
+                        "profile_id": "ui-information-design",
+                        "obligation": obligation,
+                        "evidence_ref": f"{path}:{line}",
+                        "verification": "python3 scripts/profile-evidence-check.py --self-test",
+                    }
+                    for obligation, (path, line) in zip(obligations, evidence_refs)
+                ]
+            },
+        )
+
+        return validate_paths(
+            objective_path,
+            contract_path,
+            evidence_path,
+            None,
+            None,
+            base,
+            head,
+            protected_ref=head,
+            repo_root=repo_root,
+        )
+
+
+def run_parser_ast_self_test() -> list[str]:
+    probes: list[tuple[str, dict[str, str], list[tuple[str, int]], bool, list[str]]] = [
+        (
+            "valueless-annassign",
+            {"tmp_profile_evidence/ann.py": "x: int\n"},
+            [("tmp_profile_evidence/ann.py", 1)],
+            False,
+            ["not an added code-structure line"],
+        ),
+        (
+            "multiline-string-interior",
+            {
+                "tmp_profile_evidence/story.py": (
+                    "def story():\n"
+                    "    text = \"\"\"\n"
+                    "    raise RuntimeError\n"
+                    "    \"\"\"\n"
+                    "    return text\n"
+                )
+            },
+            [("tmp_profile_evidence/story.py", 3)],
+            False,
+            ["not an added code-structure line"],
+        ),
+        (
+            "plus-prefixed-added-line",
+            {"tmp_profile_evidence/plus.py": "def bump(count):\n    ++count\n    return count\n"},
+            [("tmp_profile_evidence/plus.py", 3)],
+            True,
+            [],
+        ),
+        (
+            "space-path",
+            {"tmp_profile_evidence/p q.py": "def path_with_space():\n    return True\n"},
+            [("tmp_profile_evidence/p q.py", 1)],
+            True,
+            [],
+        ),
+        (
+            "decorator-del-global-aug-ann",
+            {
+                "tmp_profile_evidence/structures.py": (
+                    "import functools\n"
+                    "\n"
+                    "@functools.cache\n"
+                    "def cached():\n"
+                    "    return 1\n"
+                    "\n"
+                    "def mutate(items, mapping):\n"
+                    "    global total\n"
+                    "    del mapping['k']\n"
+                    "    items[0] += 1\n"
+                    "    n: int = 1\n"
+                    "    return n\n"
+                )
+            },
+            [
+                ("tmp_profile_evidence/structures.py", 3),
+                ("tmp_profile_evidence/structures.py", 8),
+                ("tmp_profile_evidence/structures.py", 9),
+                ("tmp_profile_evidence/structures.py", 10),
+                ("tmp_profile_evidence/structures.py", 11),
+            ],
+            True,
+            [],
+        ),
+        (
+            "cjk-real-path",
+            {"tmp_profile_evidence/証拠.py": "def cjk_evidence():\n    return True\n"},
+            [("tmp_profile_evidence/証拠.py", 1)],
+            True,
+            [],
+        ),
+        (
+            "cjk-forged-path",
+            {"tmp_profile_evidence/証拠.py": "def cjk_evidence():\n    return True\n"},
+            [("tmp_profile_evidence/不存在.py", 1)],
+            False,
+            ["file is not changed in diff"],
+        ),
+    ]
+
+    failures: list[str] = []
+    for name, files, refs, should_pass, expected_messages in probes:
+        errors = run_real_git_probe(name, files, refs)
+        passed = not errors
+        joined = "\n".join(errors)
+        if passed != should_pass:
+            failures.append(f"{name}: expected {'PASS' if should_pass else 'REJECT'}, got {'PASS' if passed else 'REJECT'}: {errors}")
+            continue
+        for expected in expected_messages:
+            if expected not in joined:
+                failures.append(f"{name}: missing expected error substring {expected!r}: {errors}")
+    return failures
+
+
 def run_self_test() -> int:
     print(
         "Boundary: verifies provenance and structure only; semantic satisfaction is delegated to adversarial Linon review."
     )
     failures: list[str] = []
+    parser_ast_errors = run_parser_ast_self_test()
+    if parser_ast_errors:
+        failures.extend(parser_ast_errors)
+        print("parser-ast-real-git: REJECT", file=sys.stderr)
+    else:
+        print("parser-ast-real-git: PASS")
     range_errors = run_range_binding_self_test()
     if range_errors:
         failures.extend(range_errors)

@@ -14,7 +14,7 @@
     },
     {
       "profile_id": "ui-information-design",
-      "obligation": "Accept bare annotation evidence",
+      "obligation": "Accept annotated assignment evidence",
       "evidence_ref": "tmp_profile_evidence/lvalues.py:3",
       "verification": "python3 scripts/profile-evidence-check.py --self-test"
     }
