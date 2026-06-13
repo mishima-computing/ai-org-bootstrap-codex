@@ -112,6 +112,7 @@ NEGATION_TERMS = {"deny", "never", "no", "not", "reject", "unless", "without"}
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+TYPE_ALIAS_NODE = getattr(ast, "TypeAlias", ())
 
 
 def load_json(path: Path) -> Any:
@@ -261,10 +262,11 @@ def parse_diff_git_new_path(line: str) -> str | None:
             return None
         return strip_git_side_prefix(decode_git_path_token(second[0]), "b")
 
-    marker = " b/"
-    if text.startswith("a/") and marker in text:
-        return text.rsplit(marker, 1)[1]
     return None
+
+
+def git_diff_lines(diff_text: str) -> list[str]:
+    return [line[:-1] if line.endswith("\r") else line for line in diff_text.split("\n")]
 
 
 def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
@@ -276,7 +278,7 @@ def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
     in_hunk = False
     last_consumed_by_file: dict[str, int] = {}
 
-    for line in diff_text.splitlines():
+    for line in git_diff_lines(diff_text):
         if line.startswith("diff --git "):
             diff_file = parse_diff_git_new_path(line)
             saw_matching_plus = False
@@ -516,6 +518,8 @@ def is_string_literal_expr(node: ast.AST) -> bool:
 def is_assignable_lvalue(node: ast.AST) -> bool:
     if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
         return True
+    if isinstance(node, ast.Starred):
+        return is_assignable_lvalue(node.value)
     if isinstance(node, (ast.Tuple, ast.List)):
         return all(is_assignable_lvalue(item) for item in node.elts)
     return False
@@ -555,6 +559,9 @@ def python_code_structure_lines(source: str) -> set[int]:
         if isinstance(node, (ast.Pass, ast.Break, ast.Continue, ast.Delete, ast.Global, ast.Nonlocal)):
             _add_node_line(lines, node)
             continue
+        if isinstance(node, TYPE_ALIAS_NODE):
+            _add_node_line(lines, node)
+            continue
         if isinstance(node, ast.Assign) and any(is_assignable_lvalue(target) for target in node.targets):
             _add_node_line(lines, node)
             continue
@@ -588,12 +595,133 @@ def string_stripped_source(source: str) -> str:
     return " ".join(pieces)
 
 
-def has_lexical_code_structure(added_text: str) -> bool:
+def _comment_markers_for_path(path: str) -> tuple[tuple[str, ...], bool, bool]:
+    suffix = Path(path).suffix.lower()
+    c_style = suffix in {
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cs",
+        ".css",
+        ".go",
+        ".h",
+        ".hpp",
+        ".java",
+        ".js",
+        ".jsx",
+        ".kt",
+        ".m",
+        ".mm",
+        ".rs",
+        ".scss",
+        ".swift",
+        ".ts",
+        ".tsx",
+    }
+    html_style = suffix in {".htm", ".html", ".svg", ".vue", ".xml", ".xhtml"}
+    line_markers: list[str] = []
+    if c_style:
+        line_markers.append("//")
+    if suffix in {".lua", ".sql"}:
+        line_markers.append("--")
+    if suffix in {".asm", ".clj", ".el", ".lisp", ".rkt", ".scm", ".s"}:
+        line_markers.append(";")
+    return tuple(line_markers), c_style, html_style
+
+
+def strip_non_python_comments(
+    added_text: str,
+    path: str,
+    in_block_comment: bool = False,
+    in_html_comment: bool = False,
+) -> tuple[str, bool, bool]:
+    line_markers, c_style, html_style = _comment_markers_for_path(path)
+    text = added_text.strip()
+    if c_style:
+        pieces: list[str] = []
+        index = 0
+        while index < len(text):
+            if in_block_comment:
+                end = text.find("*/", index)
+                if end == -1:
+                    return "".join(pieces).strip(), True, in_html_comment
+                index = end + 2
+                in_block_comment = False
+                continue
+            block_start = text.find("/*", index)
+            line_start = text.find("//", index)
+            if line_start != -1 and (block_start == -1 or line_start < block_start):
+                pieces.append(text[index:line_start])
+                break
+            if block_start == -1:
+                pieces.append(text[index:])
+                break
+            pieces.append(text[index:block_start])
+            block_end = text.find("*/", block_start + 2)
+            if block_end == -1:
+                in_block_comment = True
+                break
+            index = block_end + 2
+        text = "".join(pieces).strip()
+    if html_style:
+        pieces = []
+        index = 0
+        while index < len(text):
+            if in_html_comment:
+                end = text.find("-->", index)
+                if end == -1:
+                    return "".join(pieces).strip(), in_block_comment, True
+                index = end + 3
+                in_html_comment = False
+                continue
+            comment_start = text.find("<!--", index)
+            if comment_start == -1:
+                pieces.append(text[index:])
+                break
+            pieces.append(text[index:comment_start])
+            comment_end = text.find("-->", comment_start + 4)
+            if comment_end == -1:
+                in_html_comment = True
+                break
+            index = comment_end + 3
+        text = "".join(pieces).strip()
+    if any(text.startswith(marker) for marker in line_markers):
+        return "", in_block_comment, in_html_comment
+    for marker in line_markers:
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    return text.strip(), in_block_comment, in_html_comment
+
+
+def has_lexical_code_shape(added_text: str) -> bool:
     stripped = added_text.strip()
     if not stripped or stripped.startswith("#") or is_bare_string_literal(stripped):
         return False
     code_only = string_stripped_source(stripped)
     return bool(CODE_KEYWORD_RE.search(code_only) or ASSIGNMENT_RE.search(code_only) or CALL_RE.search(code_only))
+
+
+def has_lexical_code_structure(added_text: str, path: str = "") -> bool:
+    stripped, _, _ = strip_non_python_comments(added_text, path)
+    return has_lexical_code_shape(stripped)
+
+
+def lexical_code_structure_lines(path: str, lines: dict[int, str], content: str | None) -> set[int]:
+    structured: set[int] = set()
+    selected_lines = set(lines)
+    in_block_comment = False
+    in_html_comment = False
+    source_lines = enumerate(content.split("\n"), 1) if content is not None else sorted(lines.items())
+    for line_no, text in source_lines:
+        stripped, in_block_comment, in_html_comment = strip_non_python_comments(
+            text,
+            path,
+            in_block_comment,
+            in_html_comment,
+        )
+        if line_no in selected_lines and has_lexical_code_shape(stripped):
+            structured.add(line_no)
+    return structured
 
 
 def load_new_file_content(path: str, diff_text: str, head: str, repo_root: Path) -> str | None:
@@ -615,7 +743,8 @@ def code_structure_lines_by_path(
             content = load_new_file_content(path, diff_text, head, repo_root)
             structured[path] = python_code_structure_lines(content) if content is not None else set()
         else:
-            structured[path] = {line_no for line_no, text in lines.items() if has_lexical_code_structure(text)}
+            content = load_new_file_content(path, diff_text, head, repo_root)
+            structured[path] = lexical_code_structure_lines(path, lines, content)
     return structured
 
 
@@ -845,7 +974,7 @@ def materialize_patch_files(diff_text: str) -> dict[str, str]:
     files: dict[str, list[str]] = {}
     current_file: str | None = None
     in_hunk = False
-    for line in diff_text.splitlines():
+    for line in git_diff_lines(diff_text):
         if line.startswith("diff --git "):
             current_file = None
             in_hunk = False
@@ -1209,9 +1338,51 @@ def run_parser_ast_self_test() -> list[str]:
             [],
         ),
         (
+            "non-python-line-comment",
+            {"tmp_profile_evidence/comments.go": "// func forged() bool { return true }\nfunc honest() bool { return true }\n"},
+            [("tmp_profile_evidence/comments.go", 1)],
+            False,
+            ["not an added code-structure line"],
+        ),
+        (
+            "non-python-block-comment",
+            {"tmp_profile_evidence/comments.ts": "/* function forged() { return true } */\nexport function honest() { return true }\n"},
+            [("tmp_profile_evidence/comments.ts", 1)],
+            False,
+            ["not an added code-structure line"],
+        ),
+        (
+            "non-python-code-line",
+            {"tmp_profile_evidence/comments.go": "// func forged() bool { return true }\nfunc honest() bool { return true }\n"},
+            [("tmp_profile_evidence/comments.go", 2)],
+            True,
+            [],
+        ),
+        (
+            "star-assignment-type-alias",
+            {"tmp_profile_evidence/bindings.py": "first, *rest = compute()\ntype V = list[float]\n"},
+            [("tmp_profile_evidence/bindings.py", 1), ("tmp_profile_evidence/bindings.py", 2)],
+            True,
+            [],
+        ),
+        (
             "space-path",
             {"tmp_profile_evidence/p q.py": "def path_with_space():\n    return True\n"},
             [("tmp_profile_evidence/p q.py", 1)],
+            True,
+            [],
+        ),
+        (
+            "space-b-slash-path",
+            {"tmp_profile_evidence/a b/real.py": "def path_with_space_b_slash():\n    return True\n"},
+            [("tmp_profile_evidence/a b/real.py", 1)],
+            True,
+            [],
+        ),
+        (
+            "form-feed-line-numbering",
+            {"tmp_profile_evidence/page.py": "before_page = 1\n\x0c\nafter_page = compute()\n"},
+            [("tmp_profile_evidence/page.py", 3)],
             True,
             [],
         ),
