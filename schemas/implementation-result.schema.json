@@ -90,6 +90,36 @@
       "items": {
         "type": "string"
       }
+    },
+    "implementation_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "obligation",
+          "evidence_ref",
+          "verification"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "obligation": {
+            "type": "string"
+          },
+          "evidence_ref": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "verification": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false
