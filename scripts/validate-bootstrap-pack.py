@@ -204,6 +204,8 @@ def validate_profile_evidence_fixtures(root: Path) -> list[str]:
             for expected in expected_messages:
                 if expected not in joined:
                     errors.append(f"{rel}: expected error substring {expected!r}, got {fixture_errors}")
+    if checker.run_self_test() != 0:
+        errors.append("scripts/profile-evidence-check.py --self-test failed")
     return errors
 
 

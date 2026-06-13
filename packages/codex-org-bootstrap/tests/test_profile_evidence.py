@@ -63,6 +63,18 @@ class ProfileEvidenceTests(unittest.TestCase):
     def test_bare_string_evidence_rejected_by_structural_floor(self) -> None:
         self.assert_case_rejected("angle6-degenerate", "not an added code-structure line")
 
+    def test_single_quoted_string_evidence_rejected_by_structural_floor(self) -> None:
+        self.assert_case_rejected("single-quote-string", "not an added code-structure line")
+
+    def test_cjk_c_quoted_path_passes(self) -> None:
+        self.assertEqual(run_case("cjk-path"), [])
+
+    def test_subscript_attribute_and_annotation_lvalues_pass(self) -> None:
+        self.assertEqual(run_case("structural-lvalues"), [])
+
+    def test_range_binding_rejects_widened_base(self) -> None:
+        self.assertEqual(CHECKER.run_range_binding_self_test(), [])
+
     def test_misattributed_hunk_rejected(self) -> None:
         self.assert_case_rejected("angle8-misattrib", "lacks matching +++")
 
