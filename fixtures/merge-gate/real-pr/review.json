@@ -1,0 +1,13 @@
+{
+  "profile_id": "linon-review",
+  "findings": [],
+  "criterion_verdicts": [
+    {
+      "criterion_index": 0,
+      "criterion_text_echo": "A readiness record with a matching diff hash, clear Linon review, and valid packet passes.",
+      "verdict": "confirmed",
+      "evidence_ref": "fixtures/merge-gate/real-pr/diff.patch"
+    }
+  ],
+  "gaps": []
+}

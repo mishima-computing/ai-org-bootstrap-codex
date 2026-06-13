@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LINON_PACKET_VERIFIER = ROOT / "scripts" / "verify-linon-packet.py"
 PROFILE_EVIDENCE_CHECKER = ROOT / "scripts" / "profile-evidence-check.py"
+MERGE_READINESS_VERIFIER = ROOT / "scripts" / "verify-merge-readiness.py"
 PKG = ROOT / "packages" / "codex-org-bootstrap" / "src"
 sys.path.insert(0, str(PKG))
 
@@ -209,6 +210,19 @@ def validate_profile_evidence_fixtures(root: Path) -> list[str]:
     return errors
 
 
+def validate_merge_readiness_fixtures(root: Path) -> list[str]:
+    spec = importlib.util.spec_from_file_location("verify_merge_readiness", MERGE_READINESS_VERIFIER)
+    if spec is None or spec.loader is None:
+        return [f"{MERGE_READINESS_VERIFIER.relative_to(root)}: cannot import merge readiness verifier"]
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    code, payload = verifier.run_self_test()
+    if code != 0:
+        return [f"scripts/verify-merge-readiness.py --self-test failed: {payload}"]
+    return []
+
+
 def _validate_value(schema: dict[str, Any], value: object, path: str, errors: list[str]) -> None:
     expected_type = schema.get("type")
     if expected_type == "object":
@@ -285,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(validate_linon_review_fixtures(root))
     errors.extend(validate_linon_packet_fixtures(root))
     errors.extend(validate_profile_evidence_fixtures(root))
+    errors.extend(validate_merge_readiness_fixtures(root))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
