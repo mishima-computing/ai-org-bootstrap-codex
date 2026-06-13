@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LINON_PACKET_VERIFIER = ROOT / "scripts" / "verify-linon-packet.py"
+PROFILE_EVIDENCE_CHECKER = ROOT / "scripts" / "profile-evidence-check.py"
 PKG = ROOT / "packages" / "codex-org-bootstrap" / "src"
 sys.path.insert(0, str(PKG))
 
@@ -127,6 +128,85 @@ def validate_linon_packet_fixtures(root: Path) -> list[str]:
     return errors
 
 
+def validate_profile_evidence_fixtures(root: Path) -> list[str]:
+    spec = importlib.util.spec_from_file_location("profile_evidence_check", PROFILE_EVIDENCE_CHECKER)
+    if spec is None or spec.loader is None:
+        return [f"{PROFILE_EVIDENCE_CHECKER.relative_to(root)}: cannot import profile evidence checker"]
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    schema_paths = {
+        "objective": root / "schemas" / "objective.schema.json",
+        "profile_application": root / "schemas" / "profile-application.schema.json",
+        "implementation_evidence": root / "schemas" / "implementation-evidence.schema.json",
+    }
+    schemas: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for schema_name, schema_path in schema_paths.items():
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{schema_path.relative_to(root)}: schema_parse_error: {exc}")
+            continue
+        if not isinstance(schema, dict):
+            errors.append(f"{schema_path.relative_to(root)}: schema must be object")
+            continue
+        schemas[schema_name] = schema
+    if errors:
+        return errors
+
+    fixture_dir = root / "fixtures" / "profile-evidence"
+    expectations = checker.SELF_TESTS
+    for case_name, (should_accept, expected_messages) in expectations.items():
+        case_dir = fixture_dir / case_name
+        try:
+            objective = json.loads((case_dir / "objective.json").read_text(encoding="utf-8"))
+            contract = json.loads((case_dir / "contract.json").read_text(encoding="utf-8"))
+            evidence_doc = json.loads((case_dir / "evidence.json").read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{case_dir.relative_to(root)}: fixture_parse_error: {exc}")
+            continue
+
+        rel = case_dir.relative_to(root)
+        errors.extend(f"{rel}/objective.json: {error}" for error in validate_schema_instance(schemas["objective"], objective))
+        if isinstance(contract, dict):
+            applications = contract.get("profile_applications")
+            if isinstance(applications, list):
+                for index, app in enumerate(applications):
+                    errors.extend(
+                        f"{rel}/contract.json profile_applications[{index}]: {error}"
+                        for error in validate_schema_instance(schemas["profile_application"], app)
+                    )
+        if isinstance(evidence_doc, dict):
+            entries = evidence_doc.get("implementation_evidence")
+            if isinstance(entries, list):
+                for index, entry in enumerate(entries):
+                    errors.extend(
+                        f"{rel}/evidence.json implementation_evidence[{index}]: {error}"
+                        for error in validate_schema_instance(schemas["implementation_evidence"], entry)
+                    )
+
+        proposal_path = case_dir / "proposal.json"
+        fixture_errors = checker.validate_paths(
+            case_dir / "objective.json",
+            case_dir / "contract.json",
+            case_dir / "evidence.json",
+            case_dir / "diff.patch",
+            proposal_path if proposal_path.is_file() else None,
+            allow_fixture_diff=True,
+        )
+        joined = "\n".join(fixture_errors)
+        if should_accept and fixture_errors:
+            errors.append(f"{rel}: expected ACCEPTED, got REJECTED: {fixture_errors}")
+        if not should_accept and not fixture_errors:
+            errors.append(f"{rel}: expected REJECTED, got ACCEPTED")
+        if not should_accept:
+            for expected in expected_messages:
+                if expected not in joined:
+                    errors.append(f"{rel}: expected error substring {expected!r}, got {fixture_errors}")
+    return errors
+
+
 def _validate_value(schema: dict[str, Any], value: object, path: str, errors: list[str]) -> None:
     expected_type = schema.get("type")
     if expected_type == "object":
@@ -202,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     errors = validate_pack(root)
     errors.extend(validate_linon_review_fixtures(root))
     errors.extend(validate_linon_packet_fixtures(root))
+    errors.extend(validate_profile_evidence_fixtures(root))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

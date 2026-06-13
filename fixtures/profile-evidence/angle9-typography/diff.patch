@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/typography.py b/tmp_profile_evidence/typography.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/tmp_profile_evidence/typography.py
+@@ -0,0 +1,2 @@
++def validate_typography_budgets():
++    return "validate per-script measure token budgets and enforce contrast floors"

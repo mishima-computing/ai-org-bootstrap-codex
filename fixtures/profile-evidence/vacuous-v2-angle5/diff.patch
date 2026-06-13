@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/prefs.py b/tmp_profile_evidence/prefs.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tmp_profile_evidence/prefs.py
+@@ -0,0 +1,2 @@
++def settings_view():
++    return "verify settings reflect configured preferences appropriately"

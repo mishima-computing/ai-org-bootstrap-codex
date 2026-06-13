@@ -1,0 +1,20 @@
+{
+  "acceptance_criteria": [
+    "The profile evidence checker rejects fabricated evidence refs unless they resolve to reviewed diff added lines."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "profile-evidence",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Reject fabricated evidence refs unless they resolve to reviewed diff added lines"
+      ],
+      "acceptance_criteria_refs": [
+        0
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

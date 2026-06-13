@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-corporate-trust-genre",
+      "obligation": "Verify the disclosure register and require sober audit-friendly hierarchy on credibility surfaces",
+      "evidence_ref": "tmp_profile_evidence/corporate_trust.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

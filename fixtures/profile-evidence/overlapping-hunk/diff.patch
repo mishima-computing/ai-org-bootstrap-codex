@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/overlap.py b/tmp_profile_evidence/overlap.py
+--- a/tmp_profile_evidence/overlap.py
++++ b/tmp_profile_evidence/overlap.py
+@@ -10,1 +10,1 @@
++reject_fabricated_evidence_refs = True
+@@ -10,2 +10,2 @@
+ password = request.get("pw")
+ grant_access_without_check()

@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""Profile evidence provenance gate.
+
+This gate verifies provenance and structure only (authorized git-tracked profile,
+git-bound diff, every obligation backed by a distinct evidence_ref resolving to a
+real added code line, required-evidence kinds present). It does NOT judge whether
+the cited code semantically satisfies the obligation -- that is delegated to
+adversarial Linon review.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_DIR = ROOT / "fixtures" / "profile-evidence"
+PROFILE_CARD_DIR = ROOT / ".agent-org" / "knowledge" / "ui"
+
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "with",
+}
+
+LOW_INFO_TOKENS = {
+    "all",
+    "anything",
+    "everything",
+    "generally",
+    "nice",
+    "nicely",
+    "overall",
+    "proceed",
+    "stuff",
+    "thing",
+    "things",
+    "whatever",
+    "should",
+}
+
+GENERIC_TOKENS = {
+    "profile",
+    "system",
+    "checker",
+    "state",
+    "user",
+    "request",
+    "data",
+    "line",
+    "lines",
+    "file",
+    "files",
+    "code",
+}
+
+ACTION_TERMS = {
+    "add",
+    "allow",
+    "attach",
+    "back",
+    "bind",
+    "block",
+    "check",
+    "derive",
+    "encrypt",
+    "enforce",
+    "expose",
+    "grant",
+    "persist",
+    "reject",
+    "require",
+    "resolve",
+    "rotate",
+    "store",
+    "validate",
+    "verify",
+}
+
+PROTECTIVE_TERMS = {"block", "encrypt", "reject", "require", "validate", "verify"}
+RISKY_TERMS = {"allow", "expose", "grant", "persist", "plaintext", "raw", "unrestricted"}
+NEGATION_TERMS = {"deny", "never", "no", "not", "reject", "unless", "without"}
+
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def rel_fixture(case_name: str, name: str) -> Path:
+    return FIXTURE_DIR / case_name / name
+
+
+def substantive_tokens(value: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in TOKEN_RE.findall(value.lower()):
+        if raw in STOP_WORDS or raw in LOW_INFO_TOKENS or raw.isdigit() or len(raw) <= 2:
+            continue
+        token = raw
+        if len(token) > 5 and token.endswith("ing"):
+            stem = token[:-3]
+            token = f"{stem}e" if f"{stem}e" in ACTION_TERMS else stem
+        elif len(token) > 4 and token.endswith("ed"):
+            token = token[:-2]
+        elif len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        if token in LOW_INFO_TOKENS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def distinctive_tokens(value: str) -> set[str]:
+    return {token for token in substantive_tokens(value) if token not in GENERIC_TOKENS}
+
+
+def action_tokens(value: str) -> set[str]:
+    terms = substantive_tokens(value)
+    return terms & ACTION_TERMS
+
+
+def obligation_errors(obligation: object, _criterion_text: str, label: str) -> list[str]:
+    if not isinstance(obligation, str):
+        return [f"{label}: obligation must be a string"]
+    return []
+
+
+def parse_ref(ref: object, label: str) -> tuple[str, int] | None:
+    if not isinstance(ref, str) or ":" not in ref:
+        return None
+    path, line_text = ref.rsplit(":", 1)
+    if not path or not line_text.isdigit():
+        return None
+    line = int(line_text)
+    if line <= 0:
+        return None
+    return path, line
+
+
+class DiffError(ValueError):
+    pass
+
+
+def parse_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
+    added: dict[str, dict[int, str]] = {}
+    diff_file: str | None = None
+    saw_matching_plus = False
+    current_file: str | None = None
+    new_line: int | None = None
+    last_consumed_by_file: dict[str, int] = {}
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) < 4:
+                raise DiffError(f"diff: malformed file header {line!r}")
+            right = parts[3]
+            diff_file = right[2:] if right.startswith("b/") else right
+            saw_matching_plus = False
+            current_file = None
+            new_line = None
+            continue
+
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            if target == "/dev/null":
+                if diff_file is None:
+                    raise DiffError("diff: +++ header appears before diff --git header")
+                current_file = None
+                saw_matching_plus = True
+            elif target.startswith("b/"):
+                plus_file = target[2:]
+                if diff_file is None:
+                    raise DiffError(f"diff: +++ b/{plus_file} appears before diff --git header")
+                if plus_file != diff_file:
+                    raise DiffError(f"diff: +++ b/{plus_file} does not match diff --git b/{diff_file}")
+                current_file = plus_file
+                added.setdefault(current_file, {})
+                saw_matching_plus = True
+            else:
+                raise DiffError(f"diff: unsupported +++ header {target!r}; expected b/<path>")
+            new_line = None
+            continue
+
+        match = HUNK_RE.match(line)
+        if match:
+            if diff_file is None:
+                raise DiffError("diff: hunk appears before diff --git header")
+            if not saw_matching_plus:
+                raise DiffError(f"diff: hunk for {diff_file} lacks matching +++ b/{diff_file} header")
+            if current_file is not None and new_line is not None:
+                last_consumed_by_file[current_file] = max(last_consumed_by_file.get(current_file, 0), new_line - 1)
+            new_line = int(match.group(1))
+            if current_file is not None and new_line <= last_consumed_by_file.get(current_file, 0):
+                raise DiffError(
+                    f"diff: non-monotonic overlapping hunk for {current_file}; new start {new_line} "
+                    f"does not exceed previous consumed line {last_consumed_by_file[current_file]}"
+                )
+            continue
+
+        if current_file is None or new_line is None:
+            continue
+
+        if line.startswith("+") and not line.startswith("+++"):
+            added.setdefault(current_file, {})[new_line] = line[1:]
+            new_line += 1
+        elif line.startswith(" ") or line == "":
+            new_line += 1
+        elif line.startswith("-") or line.startswith("\\"):
+            continue
+
+    return added
+
+
+def git_run(
+    args: list[str],
+    *,
+    repo_root: Path = ROOT,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        input=input_text,
+    )
+
+
+def resolve_commit(ref: str, repo_root: Path = ROOT) -> tuple[str | None, str | None]:
+    proc = git_run(["rev-parse", "--verify", f"{ref}^{{commit}}"], repo_root=repo_root)
+    if proc.returncode != 0:
+        return None, proc.stderr.strip()
+    return proc.stdout.strip(), None
+
+
+def is_ancestor(ancestor: str, descendant: str, repo_root: Path = ROOT) -> bool:
+    return git_run(["merge-base", "--is-ancestor", ancestor, descendant], repo_root=repo_root).returncode == 0
+
+
+def merge_base(left: str, right: str, repo_root: Path = ROOT) -> tuple[str | None, str | None]:
+    proc = git_run(["merge-base", left, right], repo_root=repo_root)
+    if proc.returncode != 0:
+        return None, proc.stderr.strip()
+    return proc.stdout.strip(), None
+
+
+def tracked_profile_cards(head: str = "HEAD", repo_root: Path = ROOT) -> set[str]:
+    proc = git_run(["ls-files", ".agent-org/knowledge/ui/*.md"], repo_root=repo_root)
+    if proc.returncode != 0:
+        return set()
+    cards: set[str] = set()
+    for raw_path in proc.stdout.splitlines():
+        path = Path(raw_path)
+        if path.name == "README.md":
+            continue
+        exists_at_head = git_run(["cat-file", "-e", f"{head}:{raw_path}"], repo_root=repo_root).returncode == 0
+        if exists_at_head:
+            cards.add(path.stem)
+    return cards
+
+
+def validate_authorized_profile(profile_id: str, objective_profiles: set[str], card_profiles: set[str], label: str) -> list[str]:
+    if profile_id not in objective_profiles and profile_id not in card_profiles:
+        return [f"{label}: unauthorized uncarded profile {profile_id!r}"]
+    if profile_id not in objective_profiles:
+        return [f"{label}: unauthorized profile {profile_id!r}; not listed in objective.authorized_profiles"]
+    if profile_id not in card_profiles:
+        return [f"{label}: unauthorized uncarded profile {profile_id!r}; tracked profile card is missing"]
+    return []
+
+
+def evidence_kind(entry: dict[str, object]) -> str:
+    kind = entry.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        return kind
+    return "implementation_evidence"
+
+
+def git_diff_text(base: str | None, head: str, protected_ref: str = "HEAD", repo_root: Path = ROOT) -> tuple[str, list[str]]:
+    errors: list[str] = []
+    head_oid, head_error = resolve_commit(head, repo_root)
+    if head_oid is None:
+        return "", [f"git diff: cannot resolve head {head!r}: {head_error}"]
+
+    protected_oid, protected_error = resolve_commit(protected_ref, repo_root)
+    if protected_oid is None:
+        return "", [f"git diff: cannot resolve protected ref {protected_ref!r}: {protected_error}"]
+
+    if head_oid != protected_oid and not is_ancestor(head_oid, protected_oid, repo_root):
+        errors.append(f"git diff: head {head} is not reachable from protected ref {protected_ref}")
+
+    if base is None:
+        base = f"{head_oid}^"
+    base_oid, base_error = resolve_commit(base, repo_root)
+    if base_oid is None:
+        return "", [*errors, f"git diff: cannot resolve base {base!r}: {base_error}"]
+
+    if head_oid != protected_oid:
+        expected_base, merge_error = merge_base(head_oid, protected_oid, repo_root)
+        if expected_base is None:
+            errors.append(f"git diff: cannot compute merge-base for {head} and {protected_ref}: {merge_error}")
+        elif base_oid != expected_base:
+            errors.append(
+                f"git diff: base {base} must equal merge-base(head, protected) {expected_base}"
+            )
+
+    if not is_ancestor(base_oid, head_oid, repo_root) and base_oid != head_oid:
+        errors.append(f"git diff: base {base} is not an ancestor of head {head}")
+    if errors:
+        return "", errors
+
+    proc = git_run(["diff", f"{base_oid}..{head_oid}"], repo_root=repo_root)
+    if proc.returncode != 0:
+        errors.append(f"git diff: failed for {base_oid}..{head_oid}: {proc.stderr.strip()}")
+    return proc.stdout, errors
+
+
+def diff_path_allowed(diff_path: Path) -> bool:
+    try:
+        diff_path.resolve().relative_to(FIXTURE_DIR.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def validate_fixture_diff(diff_path: Path) -> list[str]:
+    if not diff_path_allowed(diff_path):
+        return [f"diff: caller-supplied --diff is only allowed for profile-evidence self-test fixtures: {diff_path}"]
+    proc = subprocess.run(
+        ["git", "apply", "--check", str(diff_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [f"diff: fixture patch is not git apply --check clean: {proc.stderr.strip()}"]
+    return []
+
+
+def list_strings(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def list_ints(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, int) and not isinstance(item, bool)]
+
+
+CODE_KEYWORD_RE = re.compile(
+    r"\b(def|class|if|elif|else|for|while|try|except|finally|with|return|raise|assert|import|from|yield|await|match|case|pass)\b"
+)
+ASSIGNMENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b\s*(?::=|[+\-*/%|&^]?=(?!=))")
+CALL_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*\(")
+
+
+def is_bare_string_literal(stripped: str) -> bool:
+    candidate = stripped[:-1].rstrip() if stripped.endswith(",") else stripped
+    try:
+        parsed = json.loads(candidate)
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(parsed, str)
+
+
+def has_code_structure(added_text: str) -> bool:
+    stripped = added_text.strip()
+    if not stripped or stripped.startswith("#") or is_bare_string_literal(stripped):
+        return False
+    return bool(CODE_KEYWORD_RE.search(stripped) or ASSIGNMENT_RE.search(stripped) or CALL_RE.search(stripped))
+
+
+def criterion_texts(criteria: list[object], refs: list[int], label: str, errors: list[str]) -> str:
+    texts: list[str] = []
+    if not refs:
+        errors.append(f"{label}: acceptance_criteria_refs must cite at least one criterion")
+    for ref in refs:
+        if ref < 0 or ref >= len(criteria):
+            errors.append(f"{label}: acceptance_criteria_refs index out of range: {ref}")
+        elif isinstance(criteria[ref], str):
+            texts.append(criteria[ref])
+        else:
+            errors.append(f"{label}: cited criterion {ref} must be a string")
+    return " ".join(texts)
+
+
+def implementation_evidence(evidence_doc: object) -> list[object]:
+    if isinstance(evidence_doc, dict):
+        value = evidence_doc.get("implementation_evidence")
+        if isinstance(value, list):
+            return value
+    if isinstance(evidence_doc, list):
+        return evidence_doc
+    return []
+
+
+def validate_documents(
+    objective: object,
+    contract: object,
+    evidence_doc: object,
+    diff_text: str,
+    proposal: object | None,
+    diff_errors: list[str] | None = None,
+    head: str = "HEAD",
+    repo_root: Path = ROOT,
+) -> list[str]:
+    errors: list[str] = []
+    if diff_errors:
+        errors.extend(diff_errors)
+    if not isinstance(objective, dict):
+        return ["objective: expected object"]
+    if not isinstance(contract, dict):
+        return ["contract: expected object"]
+
+    objective_profiles = set(list_strings(objective.get("authorized_profiles")))
+    card_profiles = tracked_profile_cards(head, repo_root)
+    if not objective_profiles:
+        errors.append("objective.authorized_profiles: must list at least one authorized profile")
+
+    if isinstance(proposal, dict):
+        for profile_id in list_strings(proposal.get("selected_profiles")):
+            errors.extend(validate_authorized_profile(profile_id, objective_profiles, card_profiles, "proposal.selected_profiles"))
+
+    criteria = contract.get("acceptance_criteria")
+    if not isinstance(criteria, list):
+        criteria = []
+        errors.append("contract.acceptance_criteria: expected array")
+
+    applications = contract.get("profile_applications")
+    if not isinstance(applications, list):
+        applications = []
+        errors.append("contract.profile_applications: expected array")
+
+    app_by_profile: dict[str, list[dict[str, object]]] = {}
+    known_obligations: dict[str, set[str]] = {}
+
+    for index, app in enumerate(applications):
+        label = f"contract.profile_applications[{index}]"
+        if not isinstance(app, dict):
+            errors.append(f"{label}: expected object")
+            continue
+        profile_id = app.get("profile_id")
+        if not isinstance(profile_id, str):
+            errors.append(f"{label}.profile_id: expected string")
+            continue
+        errors.extend(validate_authorized_profile(profile_id, objective_profiles, card_profiles, f"{label}.profile_id"))
+
+        refs = list_ints(app.get("acceptance_criteria_refs"))
+        criterion_text = criterion_texts(criteria, refs, label, errors)
+        obligations = list_strings(app.get("contract_obligations"))
+        required_evidence = list_strings(app.get("required_evidence"))
+        if not obligations:
+            errors.append(f"{label}.contract_obligations: must include at least one obligation")
+        if not required_evidence:
+            errors.append(f"{label}.required_evidence: must include at least one required evidence kind")
+        for obligation in obligations:
+            errors.extend(obligation_errors(obligation, criterion_text, f"{label}.contract_obligations"))
+            known_obligations.setdefault(profile_id, set()).add(obligation)
+        app_by_profile.setdefault(profile_id, []).append({"refs": refs, "criterion_text": criterion_text, "required_evidence": required_evidence})
+
+    try:
+        added_lines = parse_added_lines(diff_text)
+    except DiffError as exc:
+        added_lines = {}
+        errors.append(str(exc))
+    if not added_lines:
+        errors.append("diff: no added lines found")
+
+    evidence_entries = implementation_evidence(evidence_doc)
+    if not evidence_entries:
+        errors.append("implementation_evidence: must include at least one entry")
+
+    backed_refs: dict[tuple[str, str], set[str]] = {}
+    ref_owners: dict[str, tuple[str, str]] = {}
+    ref_kinds: dict[str, str] = {}
+    satisfied_kinds: dict[str, set[str]] = {}
+
+    for index, entry in enumerate(evidence_entries):
+        label = f"implementation_evidence[{index}]"
+        entry_errors: list[str] = []
+        if not isinstance(entry, dict):
+            errors.append(f"{label}: expected object")
+            continue
+        profile_id = entry.get("profile_id")
+        if not isinstance(profile_id, str):
+            errors.append(f"{label}.profile_id: expected string")
+            continue
+        entry_errors.extend(validate_authorized_profile(profile_id, objective_profiles, card_profiles, f"{label}.profile_id"))
+
+        obligation = entry.get("obligation")
+        profile_apps = app_by_profile.get(profile_id, [])
+        criterion_text = " ".join(str(app.get("criterion_text", "")) for app in profile_apps)
+        entry_errors.extend(obligation_errors(obligation, criterion_text, f"{label}.obligation"))
+        if isinstance(obligation, str) and obligation not in known_obligations.get(profile_id, set()):
+            entry_errors.append(f"{label}.obligation: not declared in contract profile_applications for {profile_id!r}")
+
+        ref = entry.get("evidence_ref")
+        parsed_ref = parse_ref(ref, label)
+        if parsed_ref is None:
+            entry_errors.append(f"{label}.evidence_ref: unresolved evidence_ref {ref!r}")
+            errors.extend(entry_errors)
+            continue
+        path, line = parsed_ref
+        if path not in added_lines:
+            entry_errors.append(f"{label}.evidence_ref: unresolved evidence_ref {path}:{line}; file is not changed in diff")
+        elif line not in added_lines[path]:
+            entry_errors.append(
+                f"{label}.evidence_ref: {path}:{line} is outside added-line range in diff"
+            )
+        else:
+            added_text = added_lines[path][line]
+            if not has_code_structure(added_text):
+                entry_errors.append(f"{label}.evidence_ref: {path}:{line} is not an added code-structure line")
+
+        ref_key = f"{path}:{line}"
+        kind = evidence_kind(entry)
+        previous_kind = ref_kinds.get(ref_key)
+        if previous_kind is not None and previous_kind != kind:
+            entry_errors.append(
+                f"{label}.evidence_ref: {ref_key} cannot satisfy distinct required_evidence kinds "
+                f"{previous_kind!r} and {kind!r}"
+            )
+        if isinstance(obligation, str):
+            owner = (profile_id, obligation)
+            previous_owner = ref_owners.get(ref_key)
+            if previous_owner is not None and previous_owner != owner:
+                entry_errors.append(f"{label}.evidence_ref: {ref_key} is reused for a distinct obligation")
+            elif not entry_errors:
+                ref_owners[ref_key] = owner
+                ref_kinds[ref_key] = kind
+                backed_refs.setdefault(owner, set()).add(ref_key)
+                satisfied_kinds.setdefault(profile_id, set()).add(kind)
+        errors.extend(entry_errors)
+
+    for profile_id, obligations in known_obligations.items():
+        for obligation in obligations:
+            if not backed_refs.get((profile_id, obligation)):
+                errors.append(f"contract obligation {obligation!r} for profile {profile_id!r} has no backing evidence")
+
+    for profile_id, apps in app_by_profile.items():
+        for app_index, app in enumerate(apps):
+            for required_kind in app.get("required_evidence", []):
+                if isinstance(required_kind, str) and required_kind not in satisfied_kinds.get(profile_id, set()):
+                    errors.append(f"profile {profile_id!r} required_evidence {required_kind!r} not satisfied")
+
+    return errors
+
+
+def validate_paths(
+    objective_path: Path,
+    contract_path: Path,
+    evidence_path: Path,
+    diff_path: Path | None = None,
+    proposal_path: Path | None = None,
+    base: str | None = None,
+    head: str = "HEAD",
+    *,
+    allow_fixture_diff: bool = False,
+    protected_ref: str = "HEAD",
+    repo_root: Path = ROOT,
+) -> list[str]:
+    objective = load_json(objective_path)
+    contract = load_json(contract_path)
+    evidence_doc = load_json(evidence_path)
+    diff_errors: list[str] = []
+    if diff_path is not None and allow_fixture_diff:
+        diff_text = diff_path.read_text(encoding="utf-8")
+        diff_errors = validate_fixture_diff(diff_path)
+    else:
+        diff_text, diff_errors = git_diff_text(base, head, protected_ref, repo_root)
+        if diff_path is not None:
+            diff_errors.append("diff: --diff is only honored under --self-test; real runs use git-bound diff")
+    proposal = load_json(proposal_path) if proposal_path is not None else None
+    return validate_documents(objective, contract, evidence_doc, diff_text, proposal, diff_errors, head=head, repo_root=repo_root)
+
+
+SELF_TESTS = {
+    "honest-rate-limiter": (True, []),
+    "angle9-polarity": (True, []),
+    "forged-objective": (False, ["unauthorized uncarded profile"]),
+    "forged-diff": (False, ["fixture patch is not git apply --check clean"]),
+    "angle8-misattrib": (False, ["lacks matching +++"]),
+    "tokenstuff-comment": (False, ["not an added code-structure line"]),
+    "angle6-degenerate": (False, ["not an added code-structure line"]),
+    "overlapping-hunk": (False, ["non-monotonic overlapping hunk"]),
+    "partial-coverage": (False, ["has no backing evidence"]),
+    "required-evidence-unmet": (False, ["required_evidence 'security_review_report' not satisfied"]),
+    "forged-security-kind": (False, ["cannot satisfy distinct required_evidence kinds"]),
+}
+
+
+def materialize_patch_files(diff_text: str) -> dict[str, str]:
+    files: dict[str, list[str]] = {}
+    current_file: str | None = None
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            if target.startswith("b/"):
+                current_file = target[2:]
+                files.setdefault(current_file, [])
+            else:
+                current_file = None
+            continue
+        if current_file is None or line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            files[current_file].append(line[1:])
+        elif line.startswith(" "):
+            files[current_file].append(line[1:])
+    return {path: "\n".join(lines) + ("\n" if lines else "") for path, lines in files.items()}
+
+
+def run_fixture_through_git(case_name: str, proposal_path: Path | None) -> list[str]:
+    diff_path = rel_fixture(case_name, "diff.patch")
+    fixture_errors = validate_fixture_diff(diff_path)
+    if fixture_errors:
+        return fixture_errors
+
+    with tempfile.TemporaryDirectory(prefix="profile-evidence-git-") as tmp:
+        repo_root = Path(tmp)
+        for args in (
+            ["init"],
+            ["config", "user.email", "profile-evidence@example.invalid"],
+            ["config", "user.name", "Profile Evidence Self Test"],
+        ):
+            proc = git_run(args, repo_root=repo_root)
+            if proc.returncode != 0:
+                return [f"{case_name}: git {' '.join(args)} failed: {proc.stderr.strip()}"]
+
+        card_proc = git_run(["ls-files", ".agent-org/knowledge/ui/*.md"])
+        if card_proc.returncode != 0:
+            return [f"{case_name}: git ls-files profile cards failed: {card_proc.stderr.strip()}"]
+        for raw_path in card_proc.stdout.splitlines():
+            source = ROOT / raw_path
+            target = repo_root / raw_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        add_cards = git_run(["add", ".agent-org/knowledge/ui"], repo_root=repo_root)
+        if add_cards.returncode != 0:
+            return [f"{case_name}: git add profile cards failed: {add_cards.stderr.strip()}"]
+        base_commit = git_run(["commit", "-m", "base profile cards"], repo_root=repo_root)
+        if base_commit.returncode != 0:
+            return [f"{case_name}: git commit base failed: {base_commit.stderr.strip()}"]
+        base_proc = git_run(["rev-parse", "HEAD"], repo_root=repo_root)
+        if base_proc.returncode != 0:
+            return [f"{case_name}: git rev-parse base failed: {base_proc.stderr.strip()}"]
+        base = base_proc.stdout.strip()
+
+        for path, content in materialize_patch_files(diff_path.read_text(encoding="utf-8")).items():
+            target = repo_root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        add_patch = git_run(["add", "."], repo_root=repo_root)
+        if add_patch.returncode != 0:
+            return [f"{case_name}: git add fixture files failed: {add_patch.stderr.strip()}"]
+        head_commit = git_run(["commit", "-m", f"profile evidence fixture {case_name}"], repo_root=repo_root)
+        if head_commit.returncode != 0:
+            return [f"{case_name}: git commit fixture failed: {head_commit.stderr.strip()}"]
+        head_proc = git_run(["rev-parse", "HEAD"], repo_root=repo_root)
+        if head_proc.returncode != 0:
+            return [f"{case_name}: git rev-parse head failed: {head_proc.stderr.strip()}"]
+        head = head_proc.stdout.strip()
+
+        return validate_paths(
+            rel_fixture(case_name, "objective.json"),
+            rel_fixture(case_name, "contract.json"),
+            rel_fixture(case_name, "evidence.json"),
+            None,
+            proposal_path,
+            base,
+            head,
+            protected_ref=head,
+            repo_root=repo_root,
+        )
+
+
+def run_self_test() -> int:
+    print(
+        "Boundary: verifies provenance and structure only; semantic satisfaction is delegated to adversarial Linon review."
+    )
+    failures: list[str] = []
+    fixture_parser_cases = {"angle8-misattrib", "overlapping-hunk"}
+    for case_name, (should_pass, expected_messages) in SELF_TESTS.items():
+        proposal_path = rel_fixture(case_name, "proposal.json")
+        if case_name in fixture_parser_cases:
+            errors = validate_paths(
+                rel_fixture(case_name, "objective.json"),
+                rel_fixture(case_name, "contract.json"),
+                rel_fixture(case_name, "evidence.json"),
+                rel_fixture(case_name, "diff.patch"),
+                proposal_path if proposal_path.is_file() else None,
+                allow_fixture_diff=True,
+            )
+        else:
+            errors = run_fixture_through_git(case_name, proposal_path if proposal_path.is_file() else None)
+        passed = not errors
+        joined = "\n".join(errors)
+        if passed != should_pass:
+            failures.append(f"{case_name}: expected {'PASS' if should_pass else 'REJECT'}, got {'PASS' if passed else 'REJECT'}: {errors}")
+            continue
+        for expected in expected_messages:
+            if expected not in joined:
+                failures.append(f"{case_name}: missing expected error substring {expected!r}: {errors}")
+        print(f"{case_name}: {'PASS' if passed else 'REJECT'}")
+
+    if failures:
+        for failure in failures:
+            print(failure, file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    boundary = (
+        "This gate verifies provenance and structure only (authorized git-tracked profile, "
+        "git-bound diff, every obligation backed by a distinct evidence_ref resolving to a real "
+        "added code line, required-evidence kinds present). It does NOT judge whether the cited "
+        "code semantically satisfies the obligation -- that is delegated to adversarial Linon review."
+    )
+    parser = argparse.ArgumentParser(description=boundary)
+    parser.add_argument("--objective")
+    parser.add_argument("--contract")
+    parser.add_argument("--evidence")
+    parser.add_argument("--diff")
+    parser.add_argument("--base")
+    parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--proposal")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        return run_self_test()
+
+    required = [args.objective, args.contract, args.evidence]
+    if any(value is None for value in required):
+        parser.error("--objective, --contract, and --evidence are required unless --self-test is used")
+
+    errors = validate_paths(
+        Path(args.objective),
+        Path(args.contract),
+        Path(args.evidence),
+        Path(args.diff) if args.diff else None,
+        Path(args.proposal) if args.proposal else None,
+        args.base,
+        args.head,
+    )
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1
+    print(f"profile evidence check passed. {boundary}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,16 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject excess login attempts with a rate limiter",
+      "evidence_ref": "tmp_profile_evidence/notes.py:2",
+      "verification": "manual"
+    },
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Validate session tokens on each authenticated request",
+      "evidence_ref": "tmp_profile_evidence/notes.py:3",
+      "verification": "manual"
+    }
+  ]
+}

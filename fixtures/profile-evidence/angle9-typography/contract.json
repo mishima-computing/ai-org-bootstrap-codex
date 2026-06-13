@@ -1,0 +1,20 @@
+{
+  "acceptance_criteria": [
+    "The ui bilingual typography profile requires the implementation to validate per-script measure token budgets and enforce contrast floors for mixed CJK and Latin surfaces."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-bilingual-typography",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Validate per-script measure token budgets and enforce contrast floors for bilingual typography"
+      ],
+      "acceptance_criteria_refs": [
+        0
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

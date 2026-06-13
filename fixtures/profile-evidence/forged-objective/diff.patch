@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/forged_profile.py b/tmp_profile_evidence/forged_profile.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tmp_profile_evidence/forged_profile.py
+@@ -0,0 +1,2 @@
++def enforce_production_credential_rotation():
++    return "grant production credential rotation override only with tracked approval"

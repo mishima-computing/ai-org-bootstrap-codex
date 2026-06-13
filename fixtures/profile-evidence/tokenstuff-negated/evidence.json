@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject excess login attempts with a rate limiter",
+      "evidence_ref": "tmp_profile_evidence/negated.py:1",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

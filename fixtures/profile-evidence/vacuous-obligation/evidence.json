@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "profile-evidence",
+      "obligation": "   ",
+      "evidence_ref": "src/profile_evidence_demo.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

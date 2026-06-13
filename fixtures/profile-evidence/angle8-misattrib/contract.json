@@ -1,0 +1,14 @@
+{
+  "acceptance_criteria": [
+    "The ui information design profile requires the implementation to reject excess login attempts with a rate limiter."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-information-design",
+      "source_proposal": "conservative",
+      "contract_obligations": ["Reject excess login attempts with a rate limiter"],
+      "acceptance_criteria_refs": [0],
+      "required_evidence": ["implementation_evidence"]
+    }
+  ]
+}

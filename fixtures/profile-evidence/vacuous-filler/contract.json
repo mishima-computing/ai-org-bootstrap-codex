@@ -1,0 +1,20 @@
+{
+  "acceptance_criteria": [
+    "Everything should generally proceed nicely overall and stuff."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-information-design",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Everything should generally proceed nicely."
+      ],
+      "acceptance_criteria_refs": [
+        0
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

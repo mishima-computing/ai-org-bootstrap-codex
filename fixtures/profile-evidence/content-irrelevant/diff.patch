@@ -1,0 +1,10 @@
+diff --git a/tmp_profile_evidence/unrelated_module.py b/tmp_profile_evidence/unrelated_module.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tmp_profile_evidence/unrelated_module.py
+@@ -0,0 +1,4 @@
++# Copyright 2026 Acme Corp. All rights reserved.
++import os
++BANANA_COLOR = "yellow"
++TOTALLY_UNRELATED = 42
