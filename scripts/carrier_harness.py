@@ -65,7 +65,12 @@ def changed_files(repo: Path) -> list[str]:
     for line in out.splitlines():
         if not line.strip():
             continue
-        files.append(line[3:].strip())
+        path = line[3:].strip()
+        # .agent-runs/ is the harness's own runtime scratch (logs, diff, report); it is never a
+        # carrier deliverable, so it is excluded from changed-files and scope enforcement.
+        if path == ".agent-runs" or path.startswith(".agent-runs/"):
+            continue
+        files.append(path)
     return files
 
 
@@ -109,8 +114,11 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
             stdout, stderr, code, timed_out = cp.stdout, cp.stderr, cp.returncode, False
         except subprocess.TimeoutExpired as exc:
             stdout, stderr, code, timed_out = (exc.stdout or ""), (exc.stderr or ""), None, True
+        # On TimeoutExpired the captured streams come back as bytes; normalize both to text.
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
         log = out_dir / f"carrier-attempt{attempt}.log"
         log.write_text(stdout + ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
         hang = STDIN_HANG_MARKER in stdout and code != 0
