@@ -87,10 +87,14 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     # before the controller reads it or a downstream carrier is wasted on it.
     output_gate = None
     if output_schema and output_path and carrier_ok:
+        import controller_cache
         import controller_output
-        op = repo / output_path
-        text = op.read_text(encoding="utf-8", errors="replace") if op.is_file() else ""
-        output_gate = controller_output.gate_output(text, output_schema)
+        if not controller_cache._safe_rel(repo, output_path):  # no traversal/escape to a foreign file
+            output_gate = {"output_ok": False, "errors": [f"output_path escapes repo: {output_path}"]}
+        else:
+            op = repo / output_path
+            text = op.read_text(encoding="utf-8", errors="replace") if op.is_file() else ""
+            output_gate = controller_output.gate_output(text, output_schema)
         journal.append("output_gate", output_gate)
 
     # forbidden classes are controller-owned: contract paths ADD to DEFAULT_FORBIDDEN, never replace

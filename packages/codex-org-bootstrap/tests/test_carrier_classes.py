@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import controller_output as output  # noqa: E402
+import controller_cache as cache  # noqa: E402
 import controller_workflow as workflow  # noqa: E402
 
 
@@ -122,6 +123,68 @@ class CacheTests(unittest.TestCase):
             workflow.run_contract(r, contract, "m2", carrier_runner=stub2,
                                   include_builtin_gates=False, cache_enabled=True, clock=lambda: 1)
             self.assertEqual(calls["n"], 1)  # different state → carrier ran (no false reuse)
+
+
+class LinonFixTests(unittest.TestCase):
+    def test_schema_unsupported_keyword_fails_closed(self):
+        # allOf/if/then are used by real schemas (linon-review) and the minimal validator can't check
+        # them — must fail closed (not silently pass).
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "s.json"
+            sp.write_text(json.dumps({"allOf": [{"type": "object"}]}))
+            res = output.gate_output('{"x": 1}', sp)
+            self.assertFalse(res["output_ok"])
+
+    def test_additional_properties_as_schema(self):
+        sch = {"type": "object", "additionalProperties": {"type": "string"}}
+        self.assertEqual(output.validate({"a": "ok"}, sch), [])
+        self.assertTrue(output.validate({"a": 1}, sch))
+
+    def test_cache_safe_rel(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d)
+            self.assertTrue(cache._safe_rel(r, "a/b.txt"))
+            self.assertFalse(cache._safe_rel(r, "../escape.txt"))
+            self.assertFalse(cache._safe_rel(r, "/etc/passwd"))
+
+    def test_lookup_rejects_tampered_bundle(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            (r / "out.txt").write_text("v1")
+            snap = {}
+            st = cache.state_hash(r, snap)
+            key = cache.contract_key({"role": "implementer"}, st)
+            cache.store(r, key, st, snap, {"ok": True, "attempts": []})
+            bpath = r / ".agent-runs" / "controller" / "cache" / f"{key}.json"
+            b = json.loads(bpath.read_text())
+            b["changed"] = b["changed"] + ["sneaky.txt"]   # tamper without fixing manifest
+            bpath.write_text(json.dumps(b))
+            self.assertIsNone(cache.lookup(r, key, st))     # integrity check rejects it
+
+    def test_replay_rejects_content_mismatch_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            bundle = {"key": "k", "state_hash": "s", "changed": ["x.txt"],
+                      "tracked_diff": "", "files": {"x.txt": "REAL CONTENT"},
+                      "content_hashes": {"x.txt": "deadbeef"},  # wrong hash → poisoned
+                      "carrier_result": {"ok": True, "attempts": []}}
+            self.assertFalse(cache.replay(r, bundle, {}))    # content mismatch → miss
+            self.assertFalse((r / "x.txt").exists())          # rolled back (no residue)
+
+    def test_workflow_blocks_output_path_traversal(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            sp = r / "schema.json"; sp.write_text(json.dumps(SCHEMA))
+
+            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir):
+                return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
+            rep = workflow.run_contract(r, {"role": "linon", "prompt": "p", "sandbox": "read-only",
+                                            "timeout": 30, "retries": 0},
+                                        "tr", carrier_runner=stub, include_builtin_gates=False,
+                                        clock=lambda: 1, output_schema=str(sp),
+                                        output_path="../../../etc/hosts")
+            self.assertFalse(rep.ok)
+            self.assertTrue(any("escapes repo" in u for u in rep.unresolved_failures))
 
 
 if __name__ == "__main__":

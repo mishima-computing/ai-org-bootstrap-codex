@@ -52,20 +52,40 @@ def _cache_dir(repo: Path) -> Path:
     return d
 
 
+def _safe_rel(repo: Path, rel: str) -> bool:
+    """A bundle path must be repo-relative with no `..`/absolute/symlink escape (NN3 — a poisoned
+    bundle must not write outside the repo)."""
+    if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        return False
+    try:
+        (repo.resolve() / rel).resolve().relative_to(repo.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _manifest(bundle: dict) -> str:
+    payload = {k: bundle[k] for k in ("key", "state_hash", "changed", "tracked_diff", "files",
+                                      "content_hashes", "carrier_result") if k in bundle}
+    return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
 def store(repo, key: str, state: str, snapshot: dict, carrier_result: dict) -> dict:
-    """Capture the carrier's change bundle (tracked diff + untracked contents) under the key."""
+    """Capture the carrier's change bundle (tracked diff + untracked contents + per-path content
+    hashes + a manifest digest) under the key."""
     repo = Path(repo)
     changed = scope.changed_since(repo, snapshot)
     tracked_diff = _git(repo, "diff").stdout.decode("utf-8", "replace")
-    untracked = {}
+    untracked, content_hashes = {}, {}
     for p in changed:
         fp = repo / p
+        content_hashes[p] = scope._content_hash(fp)  # final-state hash for replay verification
         if fp.is_file():
-            # store contents for paths git diff won't carry (untracked / newly added)
             untracked[p] = fp.read_text(encoding="utf-8", errors="replace")
-    bundle = {"key": key, "state_hash": state, "changed": changed,
-              "tracked_diff": tracked_diff, "files": untracked,
+    bundle = {"key": key, "state_hash": state, "changed": changed, "tracked_diff": tracked_diff,
+              "files": untracked, "content_hashes": content_hashes,
               "carrier_result": {"ok": carrier_result.get("ok"), "attempts": carrier_result.get("attempts", [])}}
+    bundle["manifest"] = _manifest(bundle)
     (_cache_dir(repo) / f"{key}.json").write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
     return bundle
 
@@ -74,25 +94,60 @@ def lookup(repo, key: str, state: str) -> dict | None:
     p = _cache_dir(Path(repo)) / f"{key}.json"
     if not p.is_file():
         return None
-    bundle = json.loads(p.read_text(encoding="utf-8"))
-    return bundle if bundle.get("state_hash") == state else None
+    try:
+        bundle = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    # integrity: key + state must match, and the manifest must recompute (reject a tampered bundle)
+    if bundle.get("key") != key or bundle.get("state_hash") != state:
+        return None
+    if bundle.get("manifest") != _manifest(bundle):
+        return None
+    return bundle
 
 
 def replay(repo, bundle: dict, snapshot: dict) -> bool:
-    """Apply the bundle's changes; verify the resulting change set matches. Returns True on success."""
+    """Transactionally apply the bundle; verify changed-set AND per-path content; rollback on any
+    mismatch (a failed replay must leave NO residue, else the carrier would run on a contaminated
+    tree). Returns True only on a fully-verified replay."""
     repo = Path(repo)
-    # write stored file contents (covers untracked / added)
-    for rel, content in bundle.get("files", {}).items():
-        fp = repo / rel
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content, encoding="utf-8")
+    files = bundle.get("files", {})
+    changed = bundle.get("changed", [])
+    content_hashes = bundle.get("content_hashes", {})
     diff = bundle.get("tracked_diff", "")
-    if diff.strip():
-        cp = _git(repo, "apply", "--whitespace=nowarn", input_bytes=diff.encode("utf-8"))
-        if cp.returncode != 0:
-            return False  # unclean apply → caller treats as cache miss and runs the carrier
-    # verify: the replayed change set must equal what was recorded
-    return scope.changed_since(repo, snapshot) == bundle.get("changed", [])
+
+    # preflight (NO mutation): every path safe, and the tracked diff applies cleanly
+    for rel in set(files) | set(changed):
+        if not _safe_rel(repo, rel):
+            return False
+    if diff.strip() and _git(repo, "apply", "--check", "--whitespace=nowarn",
+                             input_bytes=diff.encode("utf-8")).returncode != 0:
+        return False
+
+    written = []
+    try:
+        for rel, content in files.items():
+            fp = repo / rel
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content, encoding="utf-8")
+            written.append(rel)
+        if diff.strip() and _git(repo, "apply", "--whitespace=nowarn",
+                                 input_bytes=diff.encode("utf-8")).returncode != 0:
+            raise RuntimeError("apply failed after --check passed")
+        # verify: change set AND per-path content hashes both match the recorded bundle
+        if scope.changed_since(repo, snapshot) != changed:
+            raise RuntimeError("replayed change set differs")
+        for p in changed:
+            if scope._content_hash(repo / p) != content_hashes.get(p):
+                raise RuntimeError(f"replayed content differs for {p}")
+        return True
+    except Exception:  # noqa: BLE001 — any failure → roll back, report cache miss
+        for rel in written:
+            (repo / rel).unlink(missing_ok=True)
+        tracked = [p for p in changed if p not in files]
+        if tracked:
+            _git(repo, "checkout", "--", *tracked)
+        return False
 
 
 if __name__ == "__main__":

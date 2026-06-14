@@ -61,13 +61,15 @@ def validate(instance, schema, path: str = "$") -> list[str]:
             if req not in instance:
                 errors.append(f"{path}: missing required '{req}'")
         props = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
-            extra = set(instance) - set(props)
-            if extra:
-                errors.append(f"{path}: additionalProperties not allowed: {sorted(extra)}")
+        addl = schema.get("additionalProperties", True)
+        extra = set(instance) - set(props)
+        if addl is False and extra:
+            errors.append(f"{path}: additionalProperties not allowed: {sorted(extra)}")
         for k, v in instance.items():
             if k in props:
                 errors += validate(v, props[k], f"{path}.{k}")
+            elif isinstance(addl, dict):  # additionalProperties as a subschema
+                errors += validate(v, addl, f"{path}.{k}")
     elif isinstance(instance, list):
         items = schema.get("items")
         if isinstance(items, dict):
@@ -88,9 +90,29 @@ def validate(instance, schema, path: str = "$") -> list[str]:
     return errors
 
 
+# Keywords the minimal validator does NOT implement. If a schema uses any of them, the minimal
+# validator could pass invalid data (e.g. linon-review uses allOf/if/then for conditional required),
+# so we FAIL CLOSED unless the full `jsonschema` library is available (NN4 — never silently ignore).
+_UNSUPPORTED = {"allOf", "anyOf", "oneOf", "not", "if", "then", "else", "$ref",
+                "patternProperties", "dependencies", "dependentSchemas", "dependentRequired",
+                "propertyNames", "contains"}
+
+
+def _unsupported_keywords(schema) -> set[str]:
+    found = set()
+    if isinstance(schema, dict):
+        found |= _UNSUPPORTED & set(schema)
+        for v in schema.values():
+            found |= _unsupported_keywords(v)
+    elif isinstance(schema, list):
+        for v in schema:
+            found |= _unsupported_keywords(v)
+    return found
+
+
 def gate_output(output_text: str, schema_path) -> dict:
-    """Validate a carrier's JSON output text against a schema file. Fail-closed: unparseable JSON
-    or any validation error → output_ok False. Returns {output_ok, errors}."""
+    """Validate a carrier's JSON output text against a schema file. Fail-closed: unparseable JSON,
+    any validation error, or a schema the minimal validator can't fully check → output_ok False."""
     schema_path = Path(schema_path)
     try:
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -100,8 +122,21 @@ def gate_output(output_text: str, schema_path) -> dict:
         instance = json.loads(output_text)
     except json.JSONDecodeError as exc:
         return {"output_ok": False, "errors": [f"output is not valid JSON: {exc}"]}
-    errors = validate(instance, schema)
-    return {"output_ok": not errors, "errors": errors[:20]}
+
+    # Prefer the full validator; fall back to the minimal one, fail-closed on unsupported constructs.
+    try:
+        import jsonschema  # type: ignore
+        errs = [f"{list(e.absolute_path) or '$'}: {e.message}"
+                for e in jsonschema.Draft7Validator(schema).iter_errors(instance)]
+        return {"output_ok": not errs, "errors": errs[:20], "validator": "jsonschema"}
+    except ImportError:
+        unsupported = _unsupported_keywords(schema)
+        if unsupported:
+            return {"output_ok": False, "validator": "minimal",
+                    "errors": [f"schema uses {sorted(unsupported)}; minimal validator cannot verify "
+                               f"it — install jsonschema for fail-closed conditional schemas"]}
+        errors = validate(instance, schema)
+        return {"output_ok": not errors, "errors": errors[:20], "validator": "minimal"}
 
 
 def self_test() -> int:
