@@ -67,6 +67,7 @@ class ControllerRunReport:
     changed_files: list[str] = field(default_factory=list)
     scope: dict = field(default_factory=dict)
     diff_artifact: dict | None = None
+    quality: dict | None = None        # implementer quality-gate result (lint/debug-tag), if run
     verifier_results: list[dict] = field(default_factory=list)
     unresolved_failures: list[str] = field(default_factory=list)
 

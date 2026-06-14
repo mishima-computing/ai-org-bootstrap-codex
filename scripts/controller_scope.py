@@ -18,6 +18,7 @@ is a deviation.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,14 +55,23 @@ class ScopeError(RuntimeError):
 
 
 def _git(repo: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(repo), *args], check=False, capture_output=True).stdout
+    try:
+        return subprocess.run(["git", "-C", str(repo), *args], check=False, capture_output=True,
+                              timeout=60, stdin=subprocess.DEVNULL).stdout
+    except subprocess.TimeoutExpired as exc:
+        raise ScopeError(f"git {' '.join(args)} timed out") from exc
 
 
 def porcelain_touched(repo: Path) -> set[str]:
     """Touched paths from `git status --porcelain=v1 -z`. Rename/copy → both old and new counted.
     A failed `git status` is a hard scope failure (NN4: never silently degrade to "no changes")."""
-    cp = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z"],
-                        check=False, capture_output=True)
+    # -uall expands untracked directories to individual files (a collapsed `dir/` entry would hide
+    # edits inside it); bounded by timeout; stdin closed.
+    try:
+        cp = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "-uall"],
+                            check=False, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as exc:
+        raise ScopeError("git status timed out") from exc
     if cp.returncode != 0:
         raise ScopeError(f"git status failed (rc={cp.returncode}): "
                          f"{cp.stderr.decode('utf-8', 'replace')[:200]}")
@@ -84,12 +94,20 @@ def porcelain_touched(repo: Path) -> set[str]:
     return {p for p in touched if p and not any(p == s.rstrip("/") or p.startswith(s) for s in SCRATCH_PREFIXES)}
 
 
-def enforce(repo, allowed_globs, *, baseline=None, forbidden=DEFAULT_FORBIDDEN,
-            declared=None) -> ScopeReport:
-    """Compute the scope report. `baseline` = touched set captured BEFORE the carrier ran."""
+def enforce(repo, allowed_globs, *, baseline=None, baseline_snapshot=None,
+            forbidden=DEFAULT_FORBIDDEN, declared=None) -> ScopeReport:
+    """Compute the scope report.
+
+    `baseline_snapshot` (preferred) is a {path: content-hash} map from BEFORE the carrier ran; a
+    pre-dirty file the carrier edits FURTHER is then caught by content (path-set subtraction alone
+    would hide it — NN3). `baseline` is the legacy path-set form.
+    """
     repo = Path(repo)
     post = porcelain_touched(repo)
-    changed = sorted(post - set(baseline or set()))
+    if baseline_snapshot is not None:
+        changed = changed_since(repo, baseline_snapshot)
+    else:
+        changed = sorted(post - set(baseline or set()))
     # forbidden is checked against the FULL touched set (not post-baseline): a forbidden path that
     # was already dirty and is touched again must still be caught (NN3 — baseline must not hide it).
     forbidden_hits = sorted(f for f in post if any(fnmatch.fnmatch(f, g) for g in forbidden))
@@ -129,6 +147,26 @@ def dirty_submodules(repo: Path) -> list[str]:
 def baseline_of(repo) -> set[str]:
     """Capture the pre-run dirty baseline so pre-existing changes aren't blamed on the carrier."""
     return porcelain_touched(Path(repo))
+
+
+def _content_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "__nonfile__"
+
+
+def baseline_snapshot(repo) -> dict:
+    """Pre-run snapshot {path: content-hash} of every currently-dirty path (content, not just path)."""
+    repo = Path(repo)
+    return {p: _content_hash(repo / p) for p in porcelain_touched(repo)}
+
+
+def changed_since(repo, snapshot: dict) -> list[str]:
+    """Paths whose content differs from the snapshot. Iterates the UNION of the post-run touched set
+    AND the snapshot's paths, so a pre-dirty file the carrier REVERTS to HEAD or a dirty untracked
+    file it DELETES is still attributed (it would vanish from the post-run set otherwise — NN3/NN4)."""
+    repo = Path(repo)
+    candidates = set(snapshot.keys()) | porcelain_touched(repo)
+    out = [p for p in candidates if snapshot.get(p) != _content_hash(repo / p)]
+    return sorted(out)
 
 
 if __name__ == "__main__":
