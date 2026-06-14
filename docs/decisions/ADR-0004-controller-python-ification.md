@@ -83,8 +83,11 @@ needs semantic flexibility").
 
 - **Phase 0 (done):** `carrier_harness.py` — launch, stdin-closed, flags, discipline, timeout/retry,
   basic scope, provenance.
-- **Phase 1:** `controller_scope.py` (hardened) + `controller_models.py` + `controller_evidence.py`
-  + the `contract.json` / `controller-report.json` types.
+- **Phase 1 (done):** `controller_scope.py` (hardened — porcelain-z, rename/delete/untracked,
+  dirty baseline, forbidden-path classes, declared-vs-actual) + `controller_models.py`
+  (`CarrierContract` / `ControllerRunReport` / `SemanticDecision`, fail-closed validation) +
+  `controller_evidence.py` (append-only content-addressed run journal). 12 tests over a temp git
+  repo (add/modify/delete/rename/untracked/baseline/forbidden/allowed/declared) — all pass.
 - **Phase 2:** `controller_verifiers.py` (gate normalization) + `controller_workflow.py` runner.
 - **Phase 3:** the `semantic-decision.json` handoff loop end-to-end.
 

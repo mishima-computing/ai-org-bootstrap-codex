@@ -120,6 +120,70 @@
         },
         "additionalProperties": false
       }
+    },
+    "test_loop_evidence": {
+      "type": "array",
+      "description": "One entry per acceptance criterion showing RED→GREEN cycle",
+      "items": {
+        "type": "object",
+        "required": [
+          "criterion",
+          "test_file",
+          "red_result",
+          "green_result"
+        ],
+        "properties": {
+          "criterion": {
+            "type": "string"
+          },
+          "test_file": {
+            "type": "string"
+          },
+          "red_result": {
+            "type": "string",
+            "enum": [
+              "fail",
+              "error"
+            ]
+          },
+          "green_result": {
+            "type": "string",
+            "enum": [
+              "pass"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "diagnosis_log": {
+      "type": "array",
+      "description": "Diagnosis Protocol invocations, if any",
+      "items": {
+        "type": "object",
+        "required": [
+          "symptom",
+          "hypotheses_count",
+          "root_cause",
+          "debug_tags_cleaned"
+        ],
+        "properties": {
+          "symptom": {
+            "type": "string"
+          },
+          "hypotheses_count": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "root_cause": {
+            "type": "string"
+          },
+          "debug_tags_cleaned": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false
