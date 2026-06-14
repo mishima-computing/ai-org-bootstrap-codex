@@ -95,7 +95,13 @@ needs semantic flexibility").
   verifier-failure / journal-all-phases / fail-closed contract) all pass; suite 48 → 55. Live
   end-to-end with a real Codex carrier: ok=True, changed=['allowed.txt'], scope_ok, verifier pass,
   zero LLM tokens on orchestration (the LLM authored only the contract).
-- **Phase 3:** the `semantic-decision.json` handoff loop end-to-end.
+- **Phase 3 (done):** `controller_loop.py` — the semantic-decision loop. Each round runs the
+  contract (Phase 2), hands the report to an injected `decider` (the LLM/Activity), validates the
+  returned `SemanticDecision` fail-closed, and ADVANCES: accept/merge_ready/block terminate;
+  revise_contract/run_next_carrier loop with the decider-supplied `next_contract` (or fail closed to
+  block if none); bounded by `max_rounds`. 6 offline tests (accept / revise-then-accept / block /
+  max-rounds / loop-without-next-contract / invalid-decision). The advancing is Python's; the
+  decision is the LLM's. Suite 55 → 61.
 
 This is also the deterministic control plane Shagiri productizes; building it serves both.
 
