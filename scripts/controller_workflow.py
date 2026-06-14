@@ -29,7 +29,8 @@ def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir)
 
 def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin_gates=True,
                  declared=None, carrier_runner=None, clock=None,
-                 quality_gate_enabled=False) -> models.ControllerRunReport:
+                 quality_gate_enabled=False, cache_enabled=False,
+                 output_schema=None, output_path=None) -> models.ControllerRunReport:
     """Execute one contract deterministically and return the report (await_semantic_judgment)."""
     repo = Path(repo)
     contract = contract if isinstance(contract, models.CarrierContract) else \
@@ -46,12 +47,31 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     snapshot = scope.baseline_snapshot(repo)
     journal.append("baseline", {"snapshot_paths": sorted(snapshot)})
 
-    runner = carrier_runner or _default_carrier_runner
-    carrier = runner(repo, contract.prompt, contract.sandbox,
-                     timeout=contract.timeout, retries=contract.retries, out_dir=journal.dir)
+    # content-addressed cache: same contract + same pre-run state → REPLAY the prior change bundle
+    # and SKIP the carrier (the dominant token cost). Conservative: replay verifies, else cache miss.
+    carrier = None
+    cache_hit = False
+    cache_key = cache_state = None
+    if cache_enabled:
+        import controller_cache
+        cache_state = controller_cache.state_hash(repo, snapshot)
+        cache_key = controller_cache.contract_key(contract.to_dict(), cache_state)
+        bundle = controller_cache.lookup(repo, cache_key, cache_state)
+        if bundle and controller_cache.replay(repo, bundle, snapshot):
+            carrier = bundle["carrier_result"]
+            cache_hit = True
+            journal.append("cache_hit", {"key": cache_key})
+
+    if carrier is None:
+        runner = carrier_runner or _default_carrier_runner
+        carrier = runner(repo, contract.prompt, contract.sandbox,
+                         timeout=contract.timeout, retries=contract.retries, out_dir=journal.dir)
     carrier_ok = bool(carrier.get("ok"))
     attempts = carrier.get("attempts", [])
-    journal.append("run_carrier", {"ok": carrier_ok, "attempts": attempts})
+    journal.append("run_carrier", {"ok": carrier_ok, "cache_hit": cache_hit, "attempts": attempts})
+    if cache_enabled and not cache_hit and carrier_ok:
+        import controller_cache
+        controller_cache.store(repo, cache_key, cache_state, snapshot, carrier)
 
     # quality gate (implementer): AFTER the carrier, BEFORE scope (fast_fix mutates the carrier's
     # files — scope must see the post-quality tree). Lint/debug only; no destructive auto-revert.
@@ -61,6 +81,21 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
         carrier_changed = scope.changed_since(repo, snapshot)
         quality = quality_gate.run_quality_gate(carrier_changed, repo)
         journal.append("quality_gate", quality)
+
+    # schema-output gate (producing / verifying carriers): validate the carrier's JSON output against
+    # its role schema, in Python (zero LLM tokens) and fail-closed — a malformed proposal is rejected
+    # before the controller reads it or a downstream carrier is wasted on it.
+    output_gate = None
+    if output_schema and output_path and carrier_ok:
+        import controller_cache
+        import controller_output
+        if not controller_cache._safe_rel(repo, output_path):  # no traversal/escape to a foreign file
+            output_gate = {"output_ok": False, "errors": [f"output_path escapes repo: {output_path}"]}
+        else:
+            op = repo / output_path
+            text = op.read_text(encoding="utf-8", errors="replace") if op.is_file() else ""
+            output_gate = controller_output.gate_output(text, output_schema)
+        journal.append("output_gate", output_gate)
 
     # forbidden classes are controller-owned: contract paths ADD to DEFAULT_FORBIDDEN, never replace
     # it (NN2 — an interested-party contract must not be able to disable the absolute forbidden set).
@@ -100,9 +135,12 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
         unresolved.append(f"quality gate: {quality.get('lint', {}).get('new_error_count')} new lint, "
                           f"{len(quality.get('debug_tags', []))} debug tags, "
                           f"tools_failed={quality.get('tools_failed')}")
+    output_ok = output_gate is None or bool(output_gate.get("output_ok"))
+    if output_gate is not None and not output_ok:
+        unresolved.append(f"schema-output gate: {output_gate.get('errors')}")
 
     ok = (carrier_ok and scope_report.scope_ok and verifiers.all_passed(verifier_runs)
-          and not missing_expected and quality_ok)
+          and not missing_expected and quality_ok and output_ok)
     report = models.ControllerRunReport(
         contract_role=contract.role, ok=ok, sandbox=contract.sandbox, attempts=attempts,
         changed_files=scope_report.changed, scope=scope_report.to_dict(), diff_artifact=diff_art,
