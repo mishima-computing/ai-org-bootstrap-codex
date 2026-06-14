@@ -228,6 +228,66 @@ h2 {
   gap: 10px;
 }
 
+.pull-readout,
+.charge-panel,
+.refusal-flash {
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 2px solid rgba(255,255,255,0.18);
+  background: rgba(0,0,0,0.22);
+}
+
+.pull-readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#pullAffordableState[data-affordable="false"] {
+  color: var(--danger);
+}
+
+.refusal-flash {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #ffbdbd;
+}
+
+.refusal-flash[data-refused="true"] {
+  border-color: var(--danger);
+  background: rgba(239,95,95,0.18);
+}
+
+.charge-panel {
+  display: grid;
+  gap: 7px;
+}
+
+.charge-track {
+  height: 12px;
+  overflow: hidden;
+  border: 2px solid #161114;
+  background: #111c1a;
+}
+
+.charge-meter {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+}
+
+[data-input-state="charging"] .charge-meter {
+  width: 55%;
+}
+
+[data-input-state="held_ready"] .charge-meter,
+[data-input-state="held"] .charge-meter {
+  width: 100%;
+  background: #9df4c8;
+}
+
 button,
 input {
   min-height: 44px;
@@ -263,6 +323,48 @@ button:disabled {
 
 .seed-control {
   grid-column: 1 / -1;
+}
+
+.replay-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#inputRecordOutput {
+  min-height: 5.4em;
+  max-height: 11em;
+  overflow: auto;
+  padding: 8px;
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  color: #c8ffe2;
+  background: #111c1a;
+  border: 2px solid #739b84;
+}
+
+.message-window {
+  min-height: 4.7em;
+  padding: 10px;
+  margin-bottom: 10px;
+  color: #c8ffe2;
+  background:
+    linear-gradient(var(--screen-line) 1px, transparent 1px),
+    #111c1a;
+  background-size: 100% 6px, auto;
+  border: 2px solid #739b84;
+}
+
+.message-window[data-message-state="message_typing"] {
+  border-color: var(--accent);
+}
+
+.message-window[data-message-state="message_pause"] {
+  color: #f5f1df;
+}
+
+.message-window[data-message-state="message_instant_skip"] {
+  color: #b9b09a;
 }
 
 .seed-control input {
