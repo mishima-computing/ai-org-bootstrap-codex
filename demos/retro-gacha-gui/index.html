@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retro Capsule Gacha</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="gacha.js" defer></script>
+</head>
+<body data-state="boot">
+  <main id="app" class="arcade" data-state="boot">
+    <section class="machine-zone" aria-label="Retro gacha machine">
+      <div class="screen">
+        <p class="eyebrow">RETRO CAPSULE TERMINAL</p>
+        <h1>Capsule Gacha</h1>
+        <p id="statusText" class="status-line">Insert a demo ticket and pull.</p>
+      </div>
+
+      <div id="machine" class="machine" data-state="boot" data-render-hook="boot">
+        <div id="rarityFlash" class="rarity-flash" aria-hidden="true"></div>
+        <div class="marquee" aria-hidden="true">
+          <span>COMMON</span><span>RARE</span><span>EPIC</span><span>LEGENDARY</span>
+        </div>
+        <div id="capsule" class="capsule" aria-label="Capsule reveal chamber">
+          <span class="capsule-top"></span>
+          <span class="capsule-band"></span>
+          <span class="capsule-bottom"></span>
+        </div>
+        <img id="itemArt" class="item-art" alt="" hidden>
+        <div id="rarityLabel" class="rarity-label">Awaiting pull</div>
+      </div>
+
+      <div class="controls" aria-label="Gacha controls">
+        <button id="pullButton" type="button">Pull</button>
+        <button id="resetButton" type="button">Reset Run</button>
+        <label class="seed-control" for="seedInput">Seed
+          <input id="seedInput" name="seed" autocomplete="off" inputmode="numeric">
+        </label>
+        <label><input id="reducedMotionToggle" type="checkbox"> Reduced motion</label>
+        <label><input id="silentToggle" type="checkbox"> Silent</label>
+        <label><input id="skipToggle" type="checkbox"> Skip anticipation</label>
+      </div>
+    </section>
+
+    <aside class="panel-zone" aria-label="Gacha state panels">
+      <section class="panel economy-panel">
+        <h2>Tickets</h2>
+        <p><strong id="ticketCount">3</strong> demo tickets available</p>
+        <p id="pityStatus">Legendary pity: 0 / 10</p>
+      </section>
+
+      <section class="panel odds-panel" aria-labelledby="oddsTitle">
+        <h2 id="oddsTitle">Odds disclosed before pull</h2>
+        <dl id="oddsList">
+          <div><dt>Common</dt><dd>70%</dd></div>
+          <div><dt>Rare</dt><dd>23%</dd></div>
+          <div><dt>Epic</dt><dd>6%</dd></div>
+          <div><dt>Legendary</dt><dd>1%</dd></div>
+        </dl>
+        <p>Pity: after 10 non-legendary pulls, the next draw is legendary.</p>
+      </section>
+
+      <section class="panel result-panel">
+        <h2>Latest Result</h2>
+        <p id="latestResult">No committed item yet.</p>
+      </section>
+
+      <section class="panel collection-panel">
+        <h2>Collection</h2>
+        <ul id="collectionList">
+          <li>No inventory committed.</li>
+        </ul>
+      </section>
+
+      <section class="panel credit-panel">
+        <h2>CREDITS</h2>
+        <p id="irasutoyaCredit">イラスト: いらすとや (irasutoya.com)</p>
+        <p>Art credit is provided for the local Irasutoya illustrations; this demo does not claim authorship of the art.</p>
+      </section>
+    </aside>
+  </main>
+</body>
+</html>
