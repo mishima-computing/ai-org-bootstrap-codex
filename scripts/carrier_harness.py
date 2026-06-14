@@ -113,14 +113,20 @@ def diff_artifact(repo: Path, out_path: Path) -> dict:
 
 
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,
-                retries=1, prepend_discipline=True, out_dir=None) -> dict:
+                retries=1, prepend_discipline=True, out_dir=None, output_file=None) -> dict:
     """Launch a Codex carrier deterministically. stdin is ALWAYS closed (the fix for the hang).
-    The run is bounded by timeout; TimeoutExpired kills the process and we retry up to `retries`."""
+    The run is bounded by timeout; TimeoutExpired kills the process and we retry up to `retries`.
+    `output_file` captures the carrier's final message via `-o` (producing carriers emit JSON there;
+    the controller's schema gate validates it in Python — `--output-schema` is avoided since strict
+    OpenAI schemas reject optional properties, F12)."""
     repo = Path(repo).resolve()
     out_dir = Path(out_dir) if out_dir else (repo / ".agent-runs" / "carrier")
     out_dir.mkdir(parents=True, exist_ok=True)
     full_prompt = compose_prompt(prompt, repo_carrier_discipline(repo), prepend_discipline)
-    argv = build_codex_argv(repo, sandbox, model) + [full_prompt]
+    argv = build_codex_argv(repo, sandbox, model)
+    if output_file:
+        argv += ["-o", str(output_file)]
+    argv += [full_prompt]
 
     attempts = []
     for attempt in range(retries + 1):

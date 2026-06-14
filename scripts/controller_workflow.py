@@ -21,10 +21,10 @@ import controller_verifiers as verifiers    # noqa: E402
 from controller_evidence import RunJournal, sha256_text  # noqa: E402
 
 
-def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir, output_file=None):
     import carrier_harness
-    return carrier_harness.run_carrier(repo, prompt, sandbox, timeout=timeout,
-                                       retries=retries, out_dir=out_dir, prepend_discipline=True)
+    return carrier_harness.run_carrier(repo, prompt, sandbox, timeout=timeout, retries=retries,
+                                       out_dir=out_dir, prepend_discipline=True, output_file=output_file)
 
 
 def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin_gates=True,
@@ -63,9 +63,15 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
             journal.append("cache_hit", {"key": cache_key})
 
     if carrier is None:
-        runner = carrier_runner or _default_carrier_runner
-        carrier = runner(repo, contract.prompt, contract.sandbox,
-                         timeout=contract.timeout, retries=contract.retries, out_dir=journal.dir)
+        if carrier_runner is not None:
+            carrier = carrier_runner(repo, contract.prompt, contract.sandbox,
+                                     timeout=contract.timeout, retries=contract.retries,
+                                     out_dir=journal.dir)
+        else:
+            ofile = (repo / output_path) if output_path else None
+            carrier = _default_carrier_runner(repo, contract.prompt, contract.sandbox,
+                                              timeout=contract.timeout, retries=contract.retries,
+                                              out_dir=journal.dir, output_file=ofile)
     carrier_ok = bool(carrier.get("ok"))
     attempts = carrier.get("attempts", [])
     journal.append("run_carrier", {"ok": carrier_ok, "cache_hit": cache_hit, "attempts": attempts})
