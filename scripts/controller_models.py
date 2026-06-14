@@ -41,8 +41,9 @@ class CarrierContract:
             raise ContractError("timeout must be positive")
         if int(self.retries) < 0:
             raise ContractError("retries must be >= 0")
-        if self.sandbox == "workspace-write" and not self.files_allowed_to_change:
-            raise ContractError("workspace-write requires a non-empty files_allowed_to_change")
+        # Any write-capable sandbox must declare an explicit allow-list (empty = allow nothing).
+        if self.sandbox in ("workspace-write", "danger-full-access") and not self.files_allowed_to_change:
+            raise ContractError(f"{self.sandbox} requires a non-empty files_allowed_to_change")
         return self
 
     def to_dict(self) -> dict:
@@ -87,7 +88,15 @@ class SemanticDecision:
     def from_dict(cls, d: dict) -> "SemanticDecision":
         if "decision" not in d:
             raise ContractError("decision is required")
-        return cls(decision=d["decision"], rationale=d.get("rationale", "")).validate()
+        # next_contract is consumed by the loop, not part of the decision object; allow it + the two
+        # decision fields, reject anything else (fail-closed on malformed decider output).
+        unknown = set(d) - {"decision", "rationale", "next_contract"}
+        if unknown:
+            raise ContractError(f"unknown decision fields: {sorted(unknown)}")
+        rationale = d.get("rationale", "")
+        if not isinstance(rationale, str):
+            raise ContractError("rationale must be a string")
+        return cls(decision=d["decision"], rationale=rationale).validate()
 
 
 if __name__ == "__main__":

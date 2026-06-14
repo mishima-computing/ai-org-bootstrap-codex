@@ -50,7 +50,9 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     attempts = carrier.get("attempts", [])
     journal.append("run_carrier", {"ok": carrier_ok, "attempts": attempts})
 
-    forbidden = contract.forbidden_paths or scope.DEFAULT_FORBIDDEN
+    # forbidden classes are controller-owned: contract paths ADD to DEFAULT_FORBIDDEN, never replace
+    # it (NN2 — an interested-party contract must not be able to disable the absolute forbidden set).
+    forbidden = tuple(scope.DEFAULT_FORBIDDEN) + tuple(contract.forbidden_paths or ())
     scope_report = scope.enforce(repo, contract.files_allowed_to_change, baseline=baseline,
                                  forbidden=forbidden, declared=declared)
     journal.append("enforce_scope", scope_report.to_dict())
@@ -61,6 +63,15 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     verifier_runs = verifiers.run_all(specs, evidence_dir=journal.dir) if specs else []
     journal.append("run_verifiers", {"results": [v.to_dict() for v in verifier_runs]})
 
+    # expected_verifiers must all have run AND passed (NN3 — a required guard that never ran is a fail)
+    ran_pass = {v.name for v in verifier_runs if v.status == "pass"}
+    missing_expected = [n for n in contract.expected_verifiers if n not in ran_pass]
+
+    # content-addressed diff artifact (includes untracked carrier deliverables) attached to the report
+    import carrier_harness
+    diff_art = carrier_harness.diff_artifact(repo, journal.dir / "diff.patch") \
+        if scope_report.changed else None
+
     unresolved = []
     if not carrier_ok:
         unresolved.append("carrier did not complete (timeout/hang/nonzero)")
@@ -70,11 +81,14 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     for v in verifier_runs:
         if v.status != "pass":
             unresolved.append(f"verifier {v.name}: {v.status} (exit {v.exit_code})")
+    if missing_expected:
+        unresolved.append(f"expected verifiers missing or not passed: {missing_expected}")
 
-    ok = carrier_ok and scope_report.scope_ok and verifiers.all_passed(verifier_runs)
+    ok = (carrier_ok and scope_report.scope_ok and verifiers.all_passed(verifier_runs)
+          and not missing_expected)
     report = models.ControllerRunReport(
         contract_role=contract.role, ok=ok, sandbox=contract.sandbox, attempts=attempts,
-        changed_files=scope_report.changed, scope=scope_report.to_dict(),
+        changed_files=scope_report.changed, scope=scope_report.to_dict(), diff_artifact=diff_art,
         verifier_results=[v.to_dict() for v in verifier_runs], unresolved_failures=unresolved,
     )
     journal.append("package_evidence", {"ok": ok, "report": report.to_dict()})

@@ -86,11 +86,30 @@ def scope_deviations(changed: list[str], allowed_globs: list[str]) -> list[str]:
 
 
 def diff_artifact(repo: Path, out_path: Path) -> dict:
-    diff = _git(repo, "diff")
+    repo = Path(repo)
+    diff = _git(repo, "diff")  # tracked changes
+    # `git diff` omits untracked files; a carrier's new deliverables would be invisible in the
+    # artifact/hash. Append an untracked manifest (path + sha256) so the artifact covers them too.
+    untracked = [ln[3:].strip() for ln in _git(repo, "status", "--porcelain").splitlines()
+                 if ln.startswith("??")]
+    untracked = [u for u in untracked if not (u == ".agent-runs" or u.startswith(".agent-runs/"))]
+    manifest_lines = []
+    for u in sorted(untracked):
+        p = repo / u
+        if p.is_file():
+            manifest_lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {u}")
+        elif p.is_dir():
+            for f in sorted(p.rglob("*")):
+                if f.is_file():
+                    rel = f.relative_to(repo).as_posix()
+                    manifest_lines.append(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {rel}")
+    body = diff + ("\n--UNTRACKED (sha256  path)--\n" + "\n".join(manifest_lines) + "\n"
+                   if manifest_lines else "")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(diff, encoding="utf-8")
-    sha = hashlib.sha256(diff.encode("utf-8")).hexdigest()
-    return {"path": str(out_path), "sha256": sha, "bytes": len(diff.encode("utf-8"))}
+    out_path.write_text(body, encoding="utf-8")
+    sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return {"path": str(out_path), "sha256": sha, "bytes": len(body.encode("utf-8")),
+            "untracked_count": len(manifest_lines)}
 
 
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,

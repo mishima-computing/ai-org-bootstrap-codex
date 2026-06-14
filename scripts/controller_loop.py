@@ -43,8 +43,17 @@ def run_loop(repo, contract, run_id, *, decider, carrier_runner=None, verifier_s
             carrier_runner=carrier_runner, clock=clock)
         raw = decider(report.to_dict(), r)                 # the Activity (LLM)
         decision = models.SemanticDecision.from_dict(raw)  # fail-closed shape validation
+        # Mechanical failure overrides semantic acceptance: the LLM may not accept/merge a run whose
+        # deterministic report is not ok (carrier failure / scope violation / failed verifier).
+        overridden = None
+        if decision.decision in ("accept", "merge_ready") and not report.ok:
+            overridden = decision.decision
+            decision = models.SemanticDecision(
+                decision="block",
+                rationale=f"mechanical override: report not ok, '{overridden}' rejected — {report.unresolved_failures}")
         journal.append("semantic_decision", {"round": r, "report_ok": report.ok,
                                               "decision": decision.decision,
+                                              "overridden_decision": overridden,
                                               "rationale": decision.rationale})
         rounds.append({"round": r, "report": report.to_dict(),
                        "decision": decision.decision, "rationale": decision.rationale})
