@@ -33,6 +33,7 @@ from pathlib import Path
 # Sibling modules — same scripts/ directory, no package install needed.
 import carrier_harness
 import quality_gate
+import tq_client
 
 
 def cmd_run(args) -> int:
@@ -48,6 +49,18 @@ def cmd_run(args) -> int:
 
     # ── 1. Pre-flight: record worktree baseline ──────────────────────
     pre_changed = carrier_harness.changed_files(repo)
+
+    # ── 1b. TQ context injection (implementer-specific) ──────────────
+    tq_context = ""
+    if args.tq_server:
+        tq_context = tq_client.retrieve_context(
+            prompt, base_url=args.tq_server, top_k=5,
+        )
+        if tq_context:
+            prompt = tq_context + "\n\n" + prompt
+            print(f"  TQ context injected ({len(tq_context)} chars from {args.tq_server})")
+        else:
+            print(f"  TQ server at {args.tq_server} unavailable, proceeding without context")
 
     # ── 2. Carrier execution (delegated to carrier_harness) ──────────
     result = carrier_harness.run_carrier(
@@ -89,6 +102,8 @@ def cmd_run(args) -> int:
         "scope_deviations": deviations,
         "scope_ok": not deviations,
         "quality_gate": quality,
+        "tq_context": {"injected": bool(tq_context), "chars": len(tq_context),
+                       "server": args.tq_server or None},
         "diff_artifact": artifact,
         "attempts": result["attempts"],
     }
@@ -173,6 +188,9 @@ def main(argv=None) -> int:
     r.add_argument("--allowed", action="append")
     r.add_argument("--test-cmd", default=None,
                    help="Test command for TCR gate (e.g. 'pytest tests/')")
+    r.add_argument("--tq-server", default=None,
+                   help="TQ-MCP server URL for episodic context injection "
+                        "(e.g. 'http://127.0.0.1:8000')")
     r.add_argument("--out")
     args = p.parse_args(argv)
     if args.self_test:
