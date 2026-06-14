@@ -38,6 +38,8 @@ Truncation priority is safety-first: preserve selector `knowledge_gaps` 6-to-6, 
 
 Selected-profiles vocabulary includes `htmlcss-computable-spatial`, `htmlcss-modern-layout`, `htmlcss-motion-implementation`, `python`, `python-testing`, and `rust` when objective-declared or mechanically selected.
 
+Game Designer is a loadable console: when an objective declares `game-designer` or a named cartridge, load the console language (`game-designer.md`) plus the matching cartridge(s) — `cartridge:retro-gamer` (`ui-retro-gamer`), `cartridge:gacha` (`ui-gacha-genre`), `cartridge:result-screen` (`ui-result-screen`) — selecting objective-declared cartridges first, then selector output, then repo-local cards. Never invent a cartridge for an unmatched game profile; declare it a `continuity.knowledge_gaps` entry.
+
 ## Stop Conditions
 Proceed degraded when continuity is partially evaluable. Non-empty `continuity.knowledge_gaps` means affected proposal claims must be placed in `confidence.speculative_claims`, not `confidence.grounded_claims`.
 
