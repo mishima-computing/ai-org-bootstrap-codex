@@ -31,7 +31,16 @@
       </div>
 
       <div class="controls" aria-label="Gacha controls">
-        <button id="pullButton" type="button">Pull</button>
+        <button id="pullButton" type="button" data-render-hook="pull_button">Pull</button>
+        <div class="pull-readout" data-render-hook="pull_cost_label">
+          <span id="pullCostLabel">Cost: 1 ticket</span>
+          <strong id="pullAffordableState" data-affordable="true">Affordable</strong>
+        </div>
+        <p id="pullRefusalFlash" class="refusal-flash" data-render-hook="pull_refusal_flash" aria-live="polite"></p>
+        <div class="charge-panel" data-render-hook="charge_meter">
+          <span id="chargeLabel">Press or hold to pull</span>
+          <span class="charge-track" aria-hidden="true"><span id="chargeMeter" class="charge-meter"></span></span>
+        </div>
         <button id="resetButton" type="button">Reset Run</button>
         <label class="seed-control" for="seedInput">Seed
           <input id="seedInput" name="seed" autocomplete="off" inputmode="numeric">
@@ -62,7 +71,18 @@
 
       <section class="panel result-panel">
         <h2>Latest Result</h2>
+        <div id="messageWindow" class="message-window" data-render-hook="message_window" data-message-state="idle" aria-live="polite">Ready.</div>
         <p id="latestResult">No committed item yet.</p>
+      </section>
+
+      <section id="replayPanel" class="panel replay-panel" data-render-hook="replay_panel">
+        <h2>Input Replay</h2>
+        <p id="replayStatus" data-replay-state="idle">No input record exported.</p>
+        <div class="replay-actions">
+          <button id="exportRecordButton" type="button">Export Record</button>
+          <button id="replayRecordButton" type="button">Replay Record</button>
+        </div>
+        <pre id="inputRecordOutput" aria-label="Normalized input record"></pre>
       </section>
 
       <section class="panel collection-panel">
