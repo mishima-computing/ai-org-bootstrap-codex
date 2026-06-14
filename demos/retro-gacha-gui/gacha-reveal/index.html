@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Summon — SSR Reveal</title>
+<style>
+  :root{
+    --gold:#f6d77a; --gold-deep:#b88a2e; --gold-light:#fff3c8;
+    --ink:#05060c; --holo1:#7af0ff; --holo2:#ff8ad8; --holo3:#b69bff;
+  }
+  *{margin:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#000;overflow:hidden;font-family:"Hiragino Mincho ProN","Times New Roman",Georgia,serif;}
+  .wrap{position:absolute;inset:0;display:grid;place-items:center;background:#000;}
+  .stage{position:relative;width:1920px;height:1080px;transform-origin:center;overflow:hidden;
+    /* dark theatre: near-black, with colour concentrated as a glow behind the card */
+    background:
+      radial-gradient(58% 62% at 50% 47%, #2a2150 0%, #15113a 26%, #0a0a22 48%, #050510 70%, #010103 100%),
+      #010103;
+  }
+
+  /* deep nebula wash — concentrated, not a full-screen blue */
+  .nebula{position:absolute;inset:0;mix-blend-mode:screen;opacity:.5;
+    background:
+      radial-gradient(34% 26% at 33% 36%, rgba(120,86,210,.40), transparent 70%),
+      radial-gradient(30% 24% at 70% 34%, rgba(40,150,210,.34), transparent 72%),
+      radial-gradient(40% 30% at 50% 70%, rgba(150,60,150,.24), transparent 75%);
+    filter:blur(10px);}
+
+  /* god-rays radiating from the focal point — brighter, longer, more contrast */
+  .rays{position:absolute;left:50%;top:44%;width:2600px;height:2600px;transform:translate(-50%,-50%);
+    background:repeating-conic-gradient(from 0deg,
+      rgba(255,230,170,0) 0deg, rgba(255,232,175,.22) 1.6deg, rgba(255,230,170,0) 4.6deg);
+    -webkit-mask:radial-gradient(closest-side, transparent 5%, #000 16%, #000 46%, transparent 72%);
+            mask:radial-gradient(closest-side, transparent 5%, #000 16%, #000 46%, transparent 72%);
+    mix-blend-mode:screen;opacity:.85;}
+
+  /* core bloom — the light is the protagonist: hot white-gold core, big falloff */
+  .bloom{position:absolute;left:50%;top:47%;width:1700px;height:1700px;transform:translate(-50%,-50%);
+    background:
+      radial-gradient(circle at center, rgba(255,252,235,1) 0%, rgba(255,240,190,.85) 5%,
+        rgba(255,210,120,.55) 13%, rgba(246,160,60,.30) 26%, rgba(120,70,40,.12) 44%, transparent 64%);
+    mix-blend-mode:screen;filter:blur(3px);}
+
+  /* frontal halo ring glowing behind the card */
+  .halo{position:absolute;left:50%;top:48%;width:760px;height:760px;transform:translate(-50%,-50%);
+    border-radius:50%;mix-blend-mode:screen;
+    background:radial-gradient(closest-side, transparent 60%, rgba(255,222,150,.0) 66%, rgba(255,226,150,.5) 73%, rgba(255,210,120,.12) 80%, transparent 88%);
+    filter:blur(2px);}
+
+  /* anamorphic horizontal flare through the focal point */
+  .flare{position:absolute;left:50%;top:46.5%;width:1600px;height:6px;transform:translate(-50%,-50%);
+    background:linear-gradient(90deg, transparent, rgba(150,210,255,.0) 12%, rgba(180,225,255,.8) 50%, rgba(150,210,255,0) 88%, transparent);
+    box-shadow:0 0 40px 8px rgba(150,210,255,.5);mix-blend-mode:screen;filter:blur(.5px);}
+  .flare.v{width:6px;height:760px;background:linear-gradient(180deg,transparent,rgba(180,225,255,.55) 50%,transparent);}
+
+  /* ornate summoning circle */
+  .circle{position:absolute;left:50%;top:48%;width:980px;height:980px;transform:translate(-50%,-50%) rotateX(62deg);
+    transform-style:preserve-3d;opacity:.85;filter:drop-shadow(0 0 18px rgba(246,200,110,.55));}
+  .circle svg{width:100%;height:100%}
+
+  /* vertical light column behind the card */
+  .column{position:absolute;left:50%;top:0;width:520px;height:100%;transform:translateX(-50%);
+    background:linear-gradient(to top, transparent 0%, rgba(255,225,150,.10) 30%, rgba(255,238,190,.22) 55%, rgba(255,225,150,.08) 78%, transparent 100%);
+    -webkit-mask:linear-gradient(to right, transparent, #000 30%, #000 70%, transparent);
+            mask:linear-gradient(to right, transparent, #000 30%, #000 70%, transparent);
+    mix-blend-mode:screen;filter:blur(6px);}
+
+  /* holographic card */
+  .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-52%);
+    width:392px;height:556px;border-radius:18px;
+    background:linear-gradient(160deg,#15172b,#0c0e1d 60%,#080a16);
+    box-shadow:
+      0 0 0 2px rgba(255,243,200,.18),
+      0 0 60px 6px rgba(246,200,110,.45),
+      0 30px 80px rgba(0,0,0,.7),
+      inset 0 0 40px rgba(80,60,120,.25);
+    padding:14px;}
+  .card .frame{position:absolute;inset:0;border-radius:18px;padding:2px;
+    background:linear-gradient(135deg,var(--gold-light),var(--gold) 25%,var(--gold-deep) 50%,var(--gold) 72%,var(--gold-light));
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;}
+  .card .art{position:absolute;inset:58px 14px 132px;border-radius:12px;overflow:hidden;
+    background:radial-gradient(115% 95% at 50% 42%, #20254e 0%, #0c0f2a 52%, #05071a 100%);
+    display:grid;place-items:center;box-shadow:inset 0 0 60px rgba(0,0,0,.72);}
+  /* bright halo directly behind the subject so it reads as emerging from light */
+  .card .art::before{content:"";position:absolute;left:50%;top:46%;width:300px;height:300px;transform:translate(-50%,-50%);
+    background:radial-gradient(circle, rgba(255,236,190,.85) 0%, rgba(255,205,120,.45) 28%, rgba(246,170,70,.18) 50%, transparent 70%);
+    mix-blend-mode:screen;filter:blur(2px);}
+  .card .art::after{content:"";position:absolute;inset:0;mix-blend-mode:screen;
+    background:linear-gradient(115deg, transparent 30%, rgba(122,240,255,.10) 46%, rgba(255,138,216,.10) 56%, transparent 70%);}
+  .card .art img{position:relative;width:80%;transform:translateY(4px);
+    filter:contrast(1.12) saturate(1.18) brightness(1.04)
+      drop-shadow(0 10px 28px rgba(0,0,0,.55)) drop-shadow(0 0 22px rgba(255,214,140,.6));}
+  /* holo sheen */
+  .card .sheen{position:absolute;inset:0;border-radius:18px;pointer-events:none;
+    background:linear-gradient(115deg, transparent 18%, rgba(122,240,255,.16) 33%, rgba(255,138,216,.16) 45%,
+      rgba(182,155,255,.16) 56%, transparent 72%);
+    mix-blend-mode:screen;opacity:.9;}
+  .card .stars{position:absolute;left:0;right:0;top:18px;height:34px;text-align:center;font-size:30px;letter-spacing:8px;text-indent:8px;
+    color:var(--gold-light);
+    text-shadow:0 0 14px rgba(255,206,110,1),0 0 26px rgba(246,170,70,.85),0 1px 0 var(--gold-deep);}
+  .card .plate{position:absolute;left:14px;right:14px;bottom:14px;height:104px;border-radius:12px;
+    background:linear-gradient(180deg, rgba(20,22,40,.2), rgba(8,9,18,.86));
+    border:1px solid rgba(246,215,130,.35);display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;}
+  .card .rarity{font-family:"Helvetica Neue",Arial,sans-serif;font-weight:800;font-size:13px;letter-spacing:.42em;
+    color:#0a0a12;background:linear-gradient(90deg,var(--gold-light),var(--gold),var(--gold-light));
+    padding:2px 12px 2px 14px;border-radius:999px;text-indent:.42em;}
+  .card .name{font-size:30px;color:#fff;letter-spacing:.06em;text-shadow:0 2px 12px rgba(0,0,0,.7);}
+  .card .sub{font-family:"Helvetica Neue",Arial,sans-serif;font-size:12px;letter-spacing:.34em;color:#b9a36a;text-transform:uppercase;}
+
+  /* floating motes */
+  .motes{position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen}
+  .mote{position:absolute;border-radius:50%;background:radial-gradient(circle,#fff,rgba(255,225,160,.6) 40%,transparent 70%);}
+
+  /* headline + chrome */
+  .headline{position:absolute;left:0;right:0;top:92px;text-align:center;}
+  .headline .kicker{font-family:"Helvetica Neue",Arial,sans-serif;font-size:15px;letter-spacing:.7em;
+    color:#cdb878;text-indent:.7em;opacity:.9;}
+  .headline .title{margin-top:10px;font-size:78px;letter-spacing:.14em;line-height:1;
+    background:linear-gradient(180deg,var(--gold-light) 0%,var(--gold) 42%,var(--gold-deep) 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    filter:drop-shadow(0 2px 1px rgba(0,0,0,.55)) drop-shadow(0 0 26px rgba(246,200,110,.45));text-indent:.14em;}
+
+  .chrome{position:absolute;left:0;right:0;bottom:54px;display:flex;justify-content:center;}
+  .chrome .cta{font-family:"Helvetica Neue",Arial,sans-serif;font-size:16px;letter-spacing:.5em;color:#e9ddba;text-indent:.5em;
+    position:relative;padding-bottom:14px;}
+  .chrome .cta::after{content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);width:120px;height:1px;
+    background:linear-gradient(90deg,transparent,var(--gold),transparent);}
+  .counter{position:absolute;left:64px;bottom:52px;font-family:"Helvetica Neue",Arial,sans-serif;color:#9aa0c0;
+    font-size:15px;letter-spacing:.28em;}
+  .counter b{color:var(--gold-light);font-weight:700}
+  .skip{position:absolute;right:64px;bottom:52px;font-family:"Helvetica Neue",Arial,sans-serif;color:#9aa0c0;
+    font-size:14px;letter-spacing:.34em;border:1px solid rgba(154,160,192,.4);padding:8px 18px;border-radius:999px;}
+
+  /* cinematic vignette — heavy, crushes corners to black */
+  .vignette{position:absolute;inset:0;pointer-events:none;
+    background:
+      radial-gradient(78% 66% at 50% 46%, transparent 32%, rgba(0,0,0,.5) 68%, rgba(0,0,0,.86) 88%, rgba(0,0,0,.98) 100%);}
+
+  .credit{position:absolute;right:14px;bottom:14px;font-family:sans-serif;font-size:12px;color:#5a5e78;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage" id="stage">
+    <div class="nebula"></div>
+    <div class="rays"></div>
+    <div class="column"></div>
+    <div class="circle">
+      <svg viewBox="0 0 980 980" fill="none" stroke="#f6d77a" stroke-width="1.4">
+        <circle cx="490" cy="490" r="470" stroke-opacity=".55"/>
+        <circle cx="490" cy="490" r="438" stroke-opacity=".85" stroke-width="2.4"/>
+        <circle cx="490" cy="490" r="360" stroke-opacity=".4"/>
+        <circle cx="490" cy="490" r="250" stroke-opacity=".7"/>
+        <circle cx="490" cy="490" r="120" stroke-opacity=".5"/>
+        <g stroke-opacity=".8">
+          <!-- hexagram -->
+          <polygon points="490,120 810,675 170,675" stroke-opacity=".7"/>
+          <polygon points="490,860 170,305 810,305" stroke-opacity=".7"/>
+        </g>
+        <g stroke="#f6d77a" stroke-opacity=".6">
+          <!-- tick ring -->
+          <g id="ticks"></g>
+        </g>
+      </svg>
+    </div>
+    <div class="bloom"></div>
+    <div class="halo"></div>
+    <div class="flare"></div>
+    <div class="flare v"></div>
+
+    <div class="headline">
+      <div class="kicker">SUMMONING</div>
+      <div class="title">LEGENDARY</div>
+    </div>
+
+    <div class="card">
+      <div class="frame"></div>
+      <div class="stars">★★★★★</div>
+      <div class="art"><img src="../assets/legendary_dragon.png" alt="Ancient Dragon"></div>
+      <div class="plate">
+        <span class="rarity">SSR</span>
+        <span class="name">Ancient Dragon</span>
+        <span class="sub">Mythic · Astral Wyrm</span>
+      </div>
+      <div class="sheen"></div>
+    </div>
+
+    <div class="motes" id="motes"></div>
+
+    <div class="counter">PULL <b>1</b> / 10</div>
+    <div class="skip">SKIP ▸</div>
+    <div class="chrome"><div class="cta">TAP TO CONTINUE</div></div>
+
+    <div class="vignette"></div>
+    <p class="credit">イラスト: いらすとや (irasutoya.com)</p>
+  </div>
+</div>
+<script>
+  // fit to viewport
+  function fit(){var s=document.getElementById('stage');s.style.transform='scale('+Math.min(innerWidth/1920,innerHeight/1080)+')';}
+  addEventListener('resize',fit);fit();
+  // tick ring
+  var ticks=document.getElementById('ticks'),cx=490,cy=490,r1=438,r2=410;var n=72,s='';
+  for(var i=0;i<n;i++){var a=i/n*Math.PI*2;var big=i%6===0;var rr=big?396:418;
+    s+='<line x1="'+(cx+Math.cos(a)*r1)+'" y1="'+(cy+Math.sin(a)*r1)+'" x2="'+(cx+Math.cos(a)*rr)+'" y2="'+(cy+Math.sin(a)*rr)+'" stroke-width="'+(big?2.4:1)+'"/>';}
+  ticks.innerHTML=s;
+  // motes (static scatter)
+  var m=document.getElementById('motes'),h='';
+  var seed=7;function rnd(){seed=(seed*1103515245+12345)&0x7fffffff;return seed/0x7fffffff;}
+  for(var j=0;j<70;j++){var x=rnd()*1920,y=rnd()*1080;var d=Math.hypot(x-960,y-500);
+    var sz=1+rnd()*4*(1-Math.min(d/900,1))+rnd()*2;var op=.2+.7*(1-Math.min(d/1000,1))*rnd();
+    h+='<span class="mote" style="left:'+x+'px;top:'+y+'px;width:'+sz+'px;height:'+sz+'px;opacity:'+op.toFixed(2)+'"></span>';}
+  m.innerHTML=h;
+</script>
+</body>
+</html>
