@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "aesthetic-review",
+  "description": "Stefan's aesthetic review of a rendered human-facing surface: measured, located findings against an exemplar, with a verdict that drives re-implementation. The owner taste-gate is always final; a measured metric is a correlate of beauty, not taste.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate", "instrument", "verdict", "findings"],
+  "properties": {
+    "candidate": { "type": "string", "description": "path to the rendered screenshot under review" },
+    "exemplar": { "type": ["string", "null"], "description": "path to the owner-approved exemplar the candidate is measured against, or null for absolute-band review" },
+    "instrument": { "type": "string", "description": "measured backbone (e.g. scripts/stefan-aesthetic-review.py — AIM / Aesthetics-Toolbox QIP / visual-clutter)" },
+    "verdict": { "enum": ["REWORK", "PASS-subject-to-owner"] },
+    "owner_taste_gate": { "const": "final" },
+    "genre": { "type": ["string", "null"], "description": "cartridge/genre band applied (e.g. gacha, dashboard); null until per-genre calibration exists" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["axis", "severity", "claim"],
+        "properties": {
+          "axis": { "type": "string", "description": "measured axis (balance, mirror_symmetry, rms_contrast, figure_ground, palette_cohesion, phog_self_sim) or band" },
+          "severity": { "enum": ["critical", "major", "minor"] },
+          "claim": { "type": "string", "description": "measured shortfall, e.g. 'balance 27.8 is 33% below the exemplar 41.6'" },
+          "fix": { "type": "string", "description": "located, actionable design direction to close the shortfall" },
+          "candidate_value": { "type": "number" },
+          "exemplar_value": { "type": "number" },
+          "ratio": { "type": "number" }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "disclosed limits: genre-band mismatch, proxy-not-perceptual, instrument trusts self-reported geometry, learned-calibration deferred"
+    }
+  }
+}

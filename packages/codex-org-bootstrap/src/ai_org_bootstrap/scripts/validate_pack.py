@@ -56,6 +56,7 @@ def validate(root: Path) -> list[str]:
         "aufheben-designer",
         "implementer",
         "linon",
+        "stefan",
     }
     if agent_ids != expected_agents:
         errors.append(f"runtime registry agents mismatch: {sorted(agent_ids)}")
