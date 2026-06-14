@@ -49,13 +49,23 @@ class ScopeReport:
         }
 
 
+class ScopeError(RuntimeError):
+    pass
+
+
 def _git(repo: Path, *args: str) -> bytes:
     return subprocess.run(["git", "-C", str(repo), *args], check=False, capture_output=True).stdout
 
 
 def porcelain_touched(repo: Path) -> set[str]:
-    """Touched paths from `git status --porcelain=v1 -z`. Rename/copy → both old and new counted."""
-    raw = _git(repo, "status", "--porcelain=v1", "-z").decode("utf-8", "replace")
+    """Touched paths from `git status --porcelain=v1 -z`. Rename/copy → both old and new counted.
+    A failed `git status` is a hard scope failure (NN4: never silently degrade to "no changes")."""
+    cp = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z"],
+                        check=False, capture_output=True)
+    if cp.returncode != 0:
+        raise ScopeError(f"git status failed (rc={cp.returncode}): "
+                         f"{cp.stderr.decode('utf-8', 'replace')[:200]}")
+    raw = cp.stdout.decode("utf-8", "replace")
     fields = raw.split("\0")
     touched: set[str] = set()
     i = 0
@@ -80,10 +90,17 @@ def enforce(repo, allowed_globs, *, baseline=None, forbidden=DEFAULT_FORBIDDEN,
     repo = Path(repo)
     post = porcelain_touched(repo)
     changed = sorted(post - set(baseline or set()))
-    forbidden_hits = [f for f in changed if any(fnmatch.fnmatch(f, g) for g in forbidden)]
-    deviations = []
-    if allowed_globs:
-        deviations = [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in allowed_globs)]
+    # forbidden is checked against the FULL touched set (not post-baseline): a forbidden path that
+    # was already dirty and is touched again must still be caught (NN3 — baseline must not hide it).
+    forbidden_hits = sorted(f for f in post if any(fnmatch.fnmatch(f, g) for g in forbidden))
+    # deviations: a change matches NO allowed glob. An EMPTY allow-list allows nothing (fail-closed):
+    # every change is then a deviation. (Previously empty meant "allow everything" — a scope hole.)
+    deviations = [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in allowed_globs)]
+    # nested submodule changes escape the superproject status → treat any dirty submodule as a
+    # deviation (its internals were not scope-checked).
+    for sm in dirty_submodules(repo):
+        if sm not in deviations:
+            deviations.append(sm)
     undeclared, declared_not_touched = [], []
     if declared is not None:
         decl = set(declared)
@@ -94,6 +111,19 @@ def enforce(repo, allowed_globs, *, baseline=None, forbidden=DEFAULT_FORBIDDEN,
                        deviations=deviations, forbidden_hits=forbidden_hits,
                        undeclared=undeclared, declared_not_touched=declared_not_touched,
                        scope_ok=scope_ok)
+
+
+def dirty_submodules(repo: Path) -> list[str]:
+    """Submodule paths whose internals changed. `git status` collapses these to the submodule path,
+    so the inner files escape scope checks; flag them as deviations (NN3 — don't hide nested changes)."""
+    out = _git(Path(repo), "submodule", "status").decode("utf-8", "replace")
+    dirty = []
+    for line in out.splitlines():
+        if line[:1] in ("+", "U"):  # + = checked-out commit differs (dirty), U = merge conflict
+            parts = line[1:].split()
+            if len(parts) >= 2:
+                dirty.append(parts[1])
+    return dirty
 
 
 def baseline_of(repo) -> set[str]:

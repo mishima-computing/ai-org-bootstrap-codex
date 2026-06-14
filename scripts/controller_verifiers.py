@@ -10,6 +10,7 @@ to the run's evidence dir so the report is content-addressable, not a transient 
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -57,13 +58,14 @@ def builtin_gate_specs(repo) -> list[dict]:
     """The input-free deterministic gates that apply to any pack change."""
     repo = Path(repo)
     pkg = "packages/codex-org-bootstrap/src"
-    import os
-    env_py = os.environ.get("CONTROLLER_PYTHON", "python3")
+    # the running interpreter, not an env-overridable name — an env var must not be able to point the
+    # mandatory gates at /bin/true and turn them into no-ops (NN2/NN3).
+    py = sys.executable or "python3"
     return [
-        {"name": "residue", "argv": [env_py, "scripts/check-codex-private-residue.py", "--root", "."],
+        {"name": "residue", "argv": [py, "scripts/check-codex-private-residue.py", "--root", "."],
          "cwd": repo},
         {"name": "validate_pack",
-         "argv": [env_py, f"{pkg}/ai_org_bootstrap/scripts/validate_pack.py", "--root", "."],
+         "argv": [py, f"{pkg}/ai_org_bootstrap/scripts/validate_pack.py", "--root", "."],
          "cwd": repo},
     ]
 
