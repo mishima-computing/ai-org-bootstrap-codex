@@ -88,7 +88,13 @@ needs semantic flexibility").
   (`CarrierContract` / `ControllerRunReport` / `SemanticDecision`, fail-closed validation) +
   `controller_evidence.py` (append-only content-addressed run journal). 12 tests over a temp git
   repo (add/modify/delete/rename/untracked/baseline/forbidden/allowed/declared) — all pass.
-- **Phase 2:** `controller_verifiers.py` (gate normalization) + `controller_workflow.py` runner.
+- **Phase 2 (done):** `controller_verifiers.py` (gate normalization to one `VerifierRun` shape) +
+  `controller_workflow.py` (the Workflow-side runner: prepare → validate_contract → run_carrier →
+  enforce_scope → run_verifiers → package_evidence → await_semantic_judgment, with an injectable
+  carrier runner). 7 offline wiring tests (happy / scope-violation / carrier-failure /
+  verifier-failure / journal-all-phases / fail-closed contract) all pass; suite 48 → 55. Live
+  end-to-end with a real Codex carrier: ok=True, changed=['allowed.txt'], scope_ok, verifier pass,
+  zero LLM tokens on orchestration (the LLM authored only the contract).
 - **Phase 3:** the `semantic-decision.json` handoff loop end-to-end.
 
 This is also the deterministic control plane Shagiri productizes; building it serves both.
