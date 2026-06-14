@@ -60,3 +60,9 @@ agents:
     schema: schemas/linon-review.schema.json
     output_to:
     write_scope: []
+  stefan:
+    role: roles/stefan.md
+    adapter: .codex/agents/stefan.toml
+    schema: schemas/aesthetic-review.schema.json
+    output_to:
+    write_scope: []
