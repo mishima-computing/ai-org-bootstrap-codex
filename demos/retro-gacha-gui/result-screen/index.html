@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Result Screen — Game Designer cartridge:result-screen</title>
+  <link rel="stylesheet" href="result.css">
+  <script src="result.js" defer></script>
+</head>
+<body data-state="boot">
+  <!-- Fixed 1920x1080 console stage; every element below uses the spec's SCREEN coordinates and is a
+       direct child of the stage, so 1 stage px == 1 spec px == 1 screenshot px (native mode). -->
+  <div id="stage" class="stage" role="group" aria-label="Battle result">
+    <!-- Background scene: composited, then dimmed by a DERIVED alpha so every text rect clears its floor. -->
+    <canvas id="bgScene" class="bg-scene" width="1920" height="1080" aria-hidden="true"></canvas>
+    <img id="bgChar" class="bg-char" alt="" aria-hidden="true" hidden>
+    <div id="bgFaceDim" class="bg-face-dim" aria-hidden="true"></div>
+    <div id="bgDim" class="bg-dim" aria-hidden="true"></div>
+
+    <!-- Translucent panel: a background rectangle only; content is positioned against the stage. -->
+    <div class="panel" aria-hidden="true"></div>
+
+    <p id="stageName" class="stage-name" data-text-role="secondary">STAGE 03-05 / HARD</p>
+    <h1 id="resultTitle" class="result-title" data-text-role="title">WIN</h1>
+
+    <section id="featuredCard" class="featured-card" aria-label="Featured reward">
+      <div class="featured-icon-bg"><img id="featuredIcon" class="featured-icon" alt=""></div>
+      <p id="featuredName" class="featured-name" data-text-role="primary">Ancient Flame Sword</p>
+      <p id="featuredRarity" class="featured-rarity" data-text-role="rarity">SSR</p>
+    </section>
+
+    <div class="stat-box" id="statExp">
+      <span class="stat-label" data-text-role="secondary">ESSENCE</span>
+      <span id="statExpValue" class="stat-value stat-value--gain" data-text-role="value">+12,400</span>
+    </div>
+    <div class="stat-box" id="statGold">
+      <span class="stat-label" data-text-role="secondary">COINS</span>
+      <span id="statGoldValue" class="stat-value stat-value--gold" data-text-role="value">+8,900</span>
+    </div>
+
+    <ul id="rewardList" class="reward-list" aria-label="Bonus rewards"></ul>
+    <p id="noRewards" class="no-rewards" data-text-role="secondary" hidden>追加報酬はありません</p>
+
+    <button id="detailBtn" type="button" class="btn btn-secondary" data-text-role="button-secondary">詳細</button>
+    <button id="nextBtn" type="button" class="btn btn-primary" data-text-role="button-primary">次へ</button>
+
+    <div id="errorModal" class="error-modal" role="dialog" aria-modal="true" aria-labelledby="errorTitle" hidden>
+      <div class="modal-scrim"></div>
+      <div class="modal-box">
+        <p id="errorTitle" class="modal-title" data-text-role="title-modal">通信に失敗しました</p>
+        <p class="modal-body" data-text-role="body">ネットワーク接続を確認して、もう一度お試しください。</p>
+        <button id="retryBtn" type="button" class="btn btn-primary" data-text-role="button-primary">リトライ</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="credit" id="credit">イラスト: いらすとや (irasutoya.com)</p>
+</body>
+</html>

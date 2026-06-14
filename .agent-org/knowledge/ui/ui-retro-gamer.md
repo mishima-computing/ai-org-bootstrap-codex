@@ -7,7 +7,8 @@ supersede_trigger: Supersede on Stage-A pilot contradiction or current platform-
 evidence_refs: anchor:genre-gacha#yin-xiao-chi2022-rrm; anchor:motion#wcag22-motion-criteria; anchor:motion#apple-hig-motion; anchor:motion#nng-animation-duration
 ---
 
-Apply-only: applies solely when an objective explicitly declares ui-retro-gamer; never inferred from nostalgia, pixels, or RPG labels.
+Cartridge: this card is `cartridge:retro-gamer` under the `game-designer` console (`game-designer.md`); it specializes the console for retro game-feel and never relaxes a console value class or the measured-on-render rule.
+Apply-only: applies solely when an objective explicitly declares ui-retro-gamer (or game-designer with the retro-gamer cartridge); never inferred from nostalgia, pixels, or RPG labels.
 Admissibility: a retro/game-feel term is admissible only when mapped to an observable event trigger, the state/proof it establishes, a guard/failure path, a render or scene-command hook, a timing cadence band, a sound-or-silence fallback, and a verification or explicit gap.
 Contract-form: each kept term names (event, state-it-proves, guard, render-hook, cadence-band, silent-fallback, verification). A bare adjective ("punchy", "juicy", "nostalgic") with no observable mapping is rejected, not implemented.
 Input: input/message cadence must be bounded, replayable, or explicitly marked as a gap; cite anchor:motion#nng-animation-duration for duration bands.

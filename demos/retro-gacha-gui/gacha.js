@@ -102,6 +102,7 @@
     ticketCount: document.getElementById("ticketCount"),
     pityStatus: document.getElementById("pityStatus"),
     latestResult: document.getElementById("latestResult"),
+    resultScreenLink: document.getElementById("resultScreenLink"),
     messageWindow: document.getElementById("messageWindow"),
     collectionList: document.getElementById("collectionList"),
     seedInput: document.getElementById("seedInput"),
@@ -255,6 +256,34 @@
     }
   }
 
+  // Wire the committed pull into the 1920x1080 result-screen cartridge: the pulled item becomes the
+  // featured reward and the owned collection becomes the bonus list. Asset paths are re-based to the
+  // result-screen subdirectory. This makes the result screen an integration view of a real pull.
+  function wireResultScreenLink(record) {
+    if (!els.resultScreenLink) return;
+    const rebase = (p) => (p && p.indexOf("assets/") === 0 ? "../" + p : p);
+    const essenceByRarity = { common: 600, rare: 2400, epic: 12000, legendary: 38000 };
+    const coinByRarity = { common: 300, rare: 1200, epic: 6000, legendary: 18000 };
+    const owned = ITEMS.filter((item) => game.inventory[item.id]);
+    const data = {
+      outcome: "win",
+      stageName: `PULL / ${record.rarity ? record.rarity.toUpperCase() : "RESULT"}`,
+      featured: { icon: rebase(record.item_image), name: record.item_name, rarity: record.rarity },
+      exp: essenceByRarity[record.rarity] || 600,
+      gold: coinByRarity[record.rarity] || 300,
+      char: "../assets/rare_hero_m.png",
+      rewards: owned.map((item) => ({ icon: rebase(item.image), count: game.inventory[item.id] }))
+    };
+    let encoded;
+    try {
+      encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+    } catch (err) {
+      return;
+    }
+    els.resultScreenLink.setAttribute("href", `result-screen/?data=${encoded}`);
+    els.resultScreenLink.hidden = false;
+  }
+
   function setControlsEnabled(enabled) {
     els.pullButton.disabled = !enabled;
     els.resetButton.disabled = !enabled;
@@ -350,6 +379,7 @@
       renderCollection();
       renderEconomy();
       els.statusText.textContent = "Inventory commit complete.";
+      wireResultScreenLink(record);
     }
 
     if (record.state === "missing_draw_commit") {
