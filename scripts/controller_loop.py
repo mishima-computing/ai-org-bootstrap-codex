@@ -29,7 +29,7 @@ LOOPING = {"revise_contract", "run_next_carrier"}
 
 def run_loop(repo, contract, run_id, *, decider, carrier_runner=None, verifier_specs=None,
              include_builtin_gates=True, declared=None, max_rounds=3, clock=None,
-             quality_gate_enabled=False) -> dict:
+             quality_gate_enabled=False, cache_enabled=False) -> dict:
     """Run contract → report → semantic decision → advance, until terminal or max_rounds."""
     repo = Path(repo)
     current = contract if isinstance(contract, models.CarrierContract) else \
@@ -42,7 +42,7 @@ def run_loop(repo, contract, run_id, *, decider, carrier_runner=None, verifier_s
             repo, current, f"{run_id}-r{r}", verifier_specs=verifier_specs,
             include_builtin_gates=include_builtin_gates, declared=declared,
             carrier_runner=carrier_runner, clock=clock,
-            quality_gate_enabled=quality_gate_enabled)
+            quality_gate_enabled=quality_gate_enabled, cache_enabled=cache_enabled)
         raw = decider(report.to_dict(), r)                 # the Activity (LLM)
         decision = models.SemanticDecision.from_dict(raw)  # fail-closed shape validation
         # Mechanical failure overrides semantic acceptance: the LLM may not accept/merge a run whose
