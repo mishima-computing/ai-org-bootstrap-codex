@@ -89,6 +89,33 @@ class ContentBaselineTests(unittest.TestCase):
             self.assertIn("f.txt", rep.changed)
             self.assertFalse(rep.scope_ok)
 
+    def test_changed_since_catches_revert_of_tracked(self):
+        # carrier reverting a pre-dirty tracked file to HEAD must still be attributed (it leaves the
+        # post-run touched set, so path-only iteration would miss it — Linon re-review #1)
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            (r / "seed.txt").write_text("dirtied")        # pre-dirty tracked
+            snap = scope.baseline_snapshot(r)
+            (r / "seed.txt").write_text("s")              # carrier reverts to HEAD content
+            self.assertIn("seed.txt", scope.changed_since(r, snap))
+
+    def test_changed_since_catches_delete_of_dirty_untracked(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            (r / "u.txt").write_text("untracked dirty")   # pre-dirty untracked
+            snap = scope.baseline_snapshot(r)
+            (r / "u.txt").unlink()                         # carrier deletes it
+            self.assertIn("u.txt", scope.changed_since(r, snap))
+
+    def test_untracked_dir_expanded_not_collapsed(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _repo(d)
+            (r / "pkg").mkdir(); (r / "pkg" / "a.txt").write_text("1")  # pre-existing untracked dir
+            snap = scope.baseline_snapshot(r)
+            (r / "pkg" / "b.txt").write_text("carrier added inside")    # new file inside the dir
+            changed = scope.changed_since(r, snap)
+            self.assertIn("pkg/b.txt", changed)           # -uall expands; not hidden behind pkg/
+
 
 class WorkflowQualityTests(unittest.TestCase):
     def test_disabled_by_default(self):

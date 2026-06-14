@@ -53,8 +53,9 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _changed_line_ranges(repo: Path) -> dict[str, list[tuple[int, int]]]:
-    """Changed line ranges per tracked file from `git diff HEAD --unified=0` (staged + unstaged)."""
-    out = _git(repo, "diff", "HEAD", "--unified=0", "--no-color")
+    """Changed line ranges per tracked file from `git diff HEAD --unified=0` (staged + unstaged).
+    `core.quotepath=false` keeps non-ASCII paths literal so `+++ b/<path>` parses reliably."""
+    out = _git(repo, "-c", "core.quotepath=false", "diff", "HEAD", "--unified=0", "--no-color")
     ranges: dict[str, list[tuple[int, int]]] = {}
     cur = None
     hunk = re.compile(r"^@@ .+\+(\d+)(?:,(\d+))? @@")
@@ -73,7 +74,8 @@ def _changed_line_ranges(repo: Path) -> dict[str, list[tuple[int, int]]]:
 
 
 def _untracked(repo: Path) -> set[str]:
-    return {l for l in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines() if l}
+    # -z so paths with newlines/spaces/quotes are not mangled (they must match linter filenames).
+    return {p for p in _git(repo, "ls-files", "-z", "--others", "--exclude-standard").split("\0") if p}
 
 
 def debug_tag_check(changed_files: list[str], repo: Path) -> dict:
@@ -128,8 +130,8 @@ def _collect(tool: str, argv, repo, parse, errors, used, failed,
     if out.strip():
         try:
             parse(out, errors)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            failed.append(tool)  # invoked but unparseable → fail closed
+        except Exception:  # noqa: BLE001 — any parser failure on invoked tool output → fail closed
+            failed.append(tool)
 
 
 def lint_check(changed_files: list[str], repo: Path) -> dict:
@@ -176,7 +178,12 @@ def lint_check(changed_files: list[str], repo: Path) -> dict:
         if rel in untracked:
             kept.append(e)
             continue
-        if any(s <= e.get("line", 0) <= en for s, en in ranges.get(rel, [])):
+        file_ranges = ranges.get(rel)
+        if file_ranges is None:
+            # a linted tracked file with an error but NO parseable changed-line data → keep it
+            # (fail-closed: never silently drop a diagnostic when ranges are uncertain).
+            kept.append(e)
+        elif any(s <= e.get("line", 0) <= en for s, en in file_ranges):
             kept.append(e)
     return {"errors": kept, "all_error_count": len(errors), "tools_used": used,
             "tools_unavailable": unavail, "tools_failed": failed}
