@@ -1,0 +1,9 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject figures that hide unlabeled data and require text alternatives for every figure",
+      "evidence_ref": "tmp_profile_evidence/figures.py:2"
+    }
+  ]
+}

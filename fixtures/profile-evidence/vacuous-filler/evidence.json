@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Everything should generally proceed nicely.",
+      "evidence_ref": "tmp_profile_evidence/whatever.py:1",
+      "verification": "trust me"
+    }
+  ]
+}

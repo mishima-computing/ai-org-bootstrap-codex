@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "totally-made-up-profile-that-grants-prod-deploy-admin",
+      "obligation": "Grant production credential rotation override only with tracked approval",
+      "evidence_ref": "tmp_profile_evidence/forged_profile.py:2",
+      "verification": "trust me it works"
+    }
+  ]
+}

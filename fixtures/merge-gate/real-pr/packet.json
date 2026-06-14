@@ -1,0 +1,47 @@
+{
+  "packet_id": "merge-readiness-real-fixture",
+  "profile_id": "linon-review",
+  "target_repo": "/fixture/target-repo",
+  "head_sha": "fixture-real-head",
+  "diff_artifact": {
+    "path": "fixtures/merge-gate/real-pr/diff.patch",
+    "sha256": "092ac27bae20438e0362c7f2363c79465c5e22e4b31f0c4150c9a99648fca789"
+  },
+  "implementation_contract": {
+    "path": "fixtures/merge-gate/real-pr/contract.json",
+    "sha256": "1864644c2b51eb19346d624936b84ff77575665af96714c6b480bdfa6113cf7d",
+    "ratification_status": "fixture-ratified",
+    "embedded_contract": {
+      "role_id": "aufheben-designer",
+      "contract_id": "merge-readiness-real-fixture",
+      "objective": "Provide a minimal content-bound merge readiness fixture.",
+      "selected_direction": "Require a matching diff hash and a re-verifiable Linon packet before merge.",
+      "rejected_parts": [],
+      "implementation_summary": "Fixture only: demonstrate a real readiness record bound to its diff.",
+      "acceptance_criteria": [
+        "A readiness record with a matching diff hash, clear Linon review, and valid packet passes."
+      ],
+      "files_allowed_to_change": [
+        "src/example.ts"
+      ],
+      "files_not_allowed_to_change": [
+        ".github/workflows/**"
+      ],
+      "required_checks": [
+        "python3 scripts/verify-merge-readiness.py --self-test"
+      ],
+      "security_requirements": [],
+      "nonfunctional_requirements": [],
+      "non_goals": [
+        "No real GitHub network calls in fixture verification."
+      ],
+      "risks": [],
+      "fallback_plan": "Fail closed if hashes or review evidence drift.",
+      "handoff_to_implementer": "Fixture contract for content-bound merge readiness only."
+    }
+  },
+  "sha256_pair": {
+    "diff_sha256": "092ac27bae20438e0362c7f2363c79465c5e22e4b31f0c4150c9a99648fca789",
+    "contract_sha256": "1864644c2b51eb19346d624936b84ff77575665af96714c6b480bdfa6113cf7d"
+  }
+}

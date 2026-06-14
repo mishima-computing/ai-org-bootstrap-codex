@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject figures that expose raw unlabeled data and require text alternatives for every figure",
+      "evidence_ref": "tmp_profile_evidence/figures.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

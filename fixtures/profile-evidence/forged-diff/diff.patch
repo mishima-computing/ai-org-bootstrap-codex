@@ -1,0 +1,7 @@
+diff --git a/tmp_profile_evidence/totally_made_up_does_not_exist.py b/tmp_profile_evidence/totally_made_up_does_not_exist.py
+index 2222222..3333333 100644
+--- a/tmp_profile_evidence/totally_made_up_does_not_exist.py
++++ b/tmp_profile_evidence/totally_made_up_does_not_exist.py
+@@ -1,1 +1,2 @@
+ existing fabricated base line
++reject fabricated evidence refs unless they resolve to reviewed diff added lines

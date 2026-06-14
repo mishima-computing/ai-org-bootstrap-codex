@@ -122,6 +122,46 @@
     },
     "handoff_to_implementer": {
       "type": "string"
+    },
+    "profile_applications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "source_proposal",
+          "contract_obligations",
+          "acceptance_criteria_refs",
+          "required_evidence"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "source_proposal": {
+            "type": "string"
+          },
+          "contract_obligations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "acceptance_criteria_refs": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "required_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false

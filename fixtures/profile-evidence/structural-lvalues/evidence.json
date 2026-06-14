@@ -1,0 +1,22 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Accept subscript assignment evidence",
+      "evidence_ref": "tmp_profile_evidence/lvalues.py:1",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    },
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Accept attribute subscript assignment evidence",
+      "evidence_ref": "tmp_profile_evidence/lvalues.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    },
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Accept annotated assignment evidence",
+      "evidence_ref": "tmp_profile_evidence/lvalues.py:3",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

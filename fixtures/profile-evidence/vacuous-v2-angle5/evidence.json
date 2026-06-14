@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Verify settings reflect configured preferences appropriately",
+      "evidence_ref": "tmp_profile_evidence/prefs.py:2",
+      "verification": "trust me"
+    }
+  ]
+}

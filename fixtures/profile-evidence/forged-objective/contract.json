@@ -1,0 +1,20 @@
+{
+  "acceptance_criteria": [
+    "The deploy admin profile grants restricted production credential rotation override only with tracked approval."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "totally-made-up-profile-that-grants-prod-deploy-admin",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Grant production credential rotation override only with tracked approval"
+      ],
+      "acceptance_criteria_refs": [
+        0
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

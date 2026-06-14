@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/corporate_trust.py b/tmp_profile_evidence/corporate_trust.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/tmp_profile_evidence/corporate_trust.py
+@@ -0,0 +1,2 @@
++def verify_disclosure_register():
++    return "verify the disclosure register and require sober audit-friendly hierarchy"

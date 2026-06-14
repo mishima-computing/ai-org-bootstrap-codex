@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.implementation-evidence.v1",
+  "type": "object",
+  "required": [
+    "profile_id",
+    "obligation",
+    "evidence_ref",
+    "verification"
+  ],
+  "properties": {
+    "profile_id": {
+      "type": "string"
+    },
+    "obligation": {
+      "type": "string"
+    },
+    "evidence_ref": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "verification": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

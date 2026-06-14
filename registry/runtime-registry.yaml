@@ -54,3 +54,9 @@ agents:
     output_to:
     write_scope:
       - implementation-contract
+  linon:
+    role: roles/linon.md
+    adapter: .codex/agents/linon.toml
+    schema: schemas/linon-review.schema.json
+    output_to:
+    write_scope: []

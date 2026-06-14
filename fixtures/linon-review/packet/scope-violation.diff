@@ -1,0 +1,7 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 1111111..2222222 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -1,2 +1,3 @@
+ # Architecture
++Out-of-scope fixture change.

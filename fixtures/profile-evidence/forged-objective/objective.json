@@ -1,0 +1,5 @@
+{
+  "authorized_profiles": [
+    "totally-made-up-profile-that-grants-prod-deploy-admin"
+  ]
+}

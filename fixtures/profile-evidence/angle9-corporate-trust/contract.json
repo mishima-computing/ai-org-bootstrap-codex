@@ -1,0 +1,20 @@
+{
+  "acceptance_criteria": [
+    "The ui corporate trust genre profile requires the implementation to verify the disclosure register and require sober audit-friendly hierarchy on credibility surfaces."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-corporate-trust-genre",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Verify the disclosure register and require sober audit-friendly hierarchy on credibility surfaces"
+      ],
+      "acceptance_criteria_refs": [
+        0
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

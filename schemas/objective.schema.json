@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.objective.v1",
+  "type": "object",
+  "required": [
+    "authorized_profiles"
+  ],
+  "properties": {
+    "authorized_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

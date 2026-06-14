@@ -1,0 +1,15 @@
+{
+  "acceptance_criteria": [
+    "The ui information design profile requires the implementation to reject figures that hide unlabeled data and require text alternatives for every figure."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-information-design",
+      "contract_obligations": [
+        "Reject figures that hide unlabeled data and require text alternatives for every figure"
+      ],
+      "acceptance_criteria_refs": [0],
+      "required_evidence": ["implementation_evidence"]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+diff --git a/src/profile_evidence_demo.py b/src/profile_evidence_demo.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/profile_evidence_demo.py
+@@ -0,0 +1,2 @@
++def enforce_grounded_profile_evidence():
++    return "fabricated evidence refs are rejected against reviewed diff added lines"

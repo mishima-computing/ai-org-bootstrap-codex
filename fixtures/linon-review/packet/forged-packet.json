@@ -1,0 +1,47 @@
+{
+  "packet_id": "linon-review-forged-sha256-fixture",
+  "profile_id": "linon-review",
+  "target_repo": "/fixture/target-repo",
+  "head_sha": "0000000000000000000000000000000000000000",
+  "diff_artifact": {
+    "path": "fixtures/linon-review/packet/example.diff",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "implementation_contract": {
+    "path": "fixtures/linon-review/packet/example-contract.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ratification_status": "committed-0000000000000000000000000000000000000000",
+    "embedded_contract": {
+      "role_id": "aufheben-designer",
+      "contract_id": "linon-packet-fixture-contract",
+      "objective": "Provide a minimal tracked contract for Linon packet shape validation.",
+      "selected_direction": "Use controller-owned packet artifacts with recorded sha256 values.",
+      "rejected_parts": [],
+      "implementation_summary": "Fixture only: demonstrate the contract bytes included in a Linon packet.",
+      "acceptance_criteria": [
+        "The Linon packet records sha256 values for the diff artifact and embedded contract."
+      ],
+      "files_allowed_to_change": [
+        "src/example.ts"
+      ],
+      "files_not_allowed_to_change": [
+        ".github/workflows/**"
+      ],
+      "required_checks": [
+        "python3 scripts/validate-bootstrap-pack.py"
+      ],
+      "security_requirements": [],
+      "nonfunctional_requirements": [],
+      "non_goals": [
+        "Do not treat this fixture as runtime evidence."
+      ],
+      "risks": [],
+      "fallback_plan": "Fail closed if packet hashes drift.",
+      "handoff_to_implementer": "Fixture contract for Linon packet validation only."
+    }
+  },
+  "sha256_pair": {
+    "diff_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "contract_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

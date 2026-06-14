@@ -1,0 +1,26 @@
+{
+  "acceptance_criteria": [
+    "The ui information design profile requires subscript assignment evidence.",
+    "The ui information design profile requires attribute subscript assignment evidence.",
+    "The ui information design profile requires annotated assignment evidence."
+  ],
+  "profile_applications": [
+    {
+      "profile_id": "ui-information-design",
+      "source_proposal": "conservative",
+      "contract_obligations": [
+        "Accept subscript assignment evidence",
+        "Accept attribute subscript assignment evidence",
+        "Accept annotated assignment evidence"
+      ],
+      "acceptance_criteria_refs": [
+        0,
+        1,
+        2
+      ],
+      "required_evidence": [
+        "implementation_evidence"
+      ]
+    }
+  ]
+}

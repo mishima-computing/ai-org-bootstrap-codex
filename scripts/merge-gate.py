@@ -21,6 +21,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = ROOT / "fixtures/merge-gate"
+READINESS_VERIFIER = ROOT / "scripts" / "verify-merge-readiness.py"
 PASSING_CHECK_CONCLUSIONS = {"success", "neutral", "skipped"}
 FAILING_CHECK_CONCLUSIONS = {
     "action_required",
@@ -93,15 +94,19 @@ def infer_repo() -> str:
 
 
 def pr_head(repo: str, pr: str) -> dict[str, Any]:
-    parsed = gh_json(["pr", "view", pr, "--repo", repo, "--json", "number,headRefOid,url"])
+    parsed = gh_json(["pr", "view", pr, "--repo", repo, "--json", "number,baseRefOid,headRefOid,url"])
     head_sha = parsed.get("headRefOid")
+    base_sha = parsed.get("baseRefOid")
     number = parsed.get("number")
     if not isinstance(head_sha, str) or not head_sha:
         raise GhError("gh pr view did not return headRefOid")
+    if not isinstance(base_sha, str) or not base_sha:
+        raise GhError("gh pr view did not return baseRefOid")
     if not isinstance(number, int):
         raise GhError("gh pr view did not return numeric PR number")
     return {
         "number": number,
+        "base_sha": base_sha,
         "head_sha": head_sha,
         "url": parsed.get("url") if isinstance(parsed.get("url"), str) else None,
     }
@@ -287,6 +292,48 @@ def write_evidence(path: Path | None, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def run_readiness_gate(
+    record: Path | None,
+    *,
+    diff: Path | None = None,
+    base: str | None = None,
+    head: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if record is None:
+        return 1, {
+            "status": "blocked",
+            "exit_code": 1,
+            "error": "readiness record is required",
+        }
+    command = [sys.executable, str(READINESS_VERIFIER), "--record", str(record)]
+    if diff is not None:
+        command.extend(["--diff", str(diff)])
+    if base:
+        command.extend(["--base", base])
+    if head:
+        command.extend(["--head", head])
+    proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    raw = proc.stdout if proc.returncode == 0 else proc.stderr or proc.stdout
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {
+            "status": "pass" if proc.returncode == 0 else "blocked",
+            "exit_code": proc.returncode,
+            "raw_output": raw.strip(),
+        }
+    if isinstance(parsed, dict):
+        parsed["command"] = " ".join(command)
+        parsed["exit_code"] = proc.returncode
+        return proc.returncode, parsed
+    return proc.returncode, {
+        "status": "pass" if proc.returncode == 0 else "blocked",
+        "exit_code": proc.returncode,
+        "command": " ".join(command),
+        "raw_output": raw.strip(),
+    }
+
+
 def fixture_payload(path: Path) -> tuple[dict[str, Any], dict[str, Any], int | None, str]:
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
@@ -368,6 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Check gate readiness and report the merge command without executing it.")
     parser.add_argument("--out", type=Path, help="Write evidence JSON to this path.")
     parser.add_argument("--fixture", type=Path, help="Classify a recorded check-set fixture offline without gh.")
+    parser.add_argument("--readiness-record", type=Path, help="Content-bound merge readiness record. Required for real PR runs.")
+    parser.add_argument("--readiness-diff", type=Path, help="Fixture/offline PR diff artifact for readiness verification.")
     parser.add_argument("--self-test", action="store_true", help="Run offline classifier fixtures without network or gh.")
     return parser
 
@@ -388,7 +437,29 @@ def main(argv: list[str] | None = None) -> int:
             return code
 
         if args.fixture:
+            readiness_code: int | None = None
+            readiness_payload: dict[str, Any] | None = None
+            if args.readiness_record is not None:
+                readiness_code, readiness_payload = run_readiness_gate(
+                    args.readiness_record,
+                    diff=args.readiness_diff,
+                )
+                if readiness_code != 0:
+                    payload = {
+                        "status": "blocked",
+                        "exit_code": 1,
+                        "fixture": str(args.fixture),
+                        "mode": "fixture",
+                        "readiness": readiness_payload,
+                        "ci_checks": "not evaluated; readiness blocked first",
+                        "merged": False,
+                    }
+                    write_evidence(args.out, payload)
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                    return 1
             code, payload = run_fixture(args.fixture)
+            if readiness_payload is not None:
+                payload["readiness"] = readiness_payload
             write_evidence(args.out, payload)
             print(json.dumps(payload, indent=2, sort_keys=True))
             return code
@@ -398,14 +469,39 @@ def main(argv: list[str] | None = None) -> int:
 
         repo = args.repo or infer_repo()
         pr_info = pr_head(repo, args.pr)
+        readiness_code, readiness = run_readiness_gate(
+            args.readiness_record,
+            base=pr_info["base_sha"],
+            head=pr_info["head_sha"],
+        )
+        if readiness_code != 0:
+            evidence = {
+                "mode": "check-only" if args.check_only else "dry-run" if args.dry_run else "merge",
+                "repo": repo,
+                "pr": pr_info["number"],
+                "pr_url": pr_info["url"],
+                "base_sha": pr_info["base_sha"],
+                "head_sha": pr_info["head_sha"],
+                "merge_method": args.method,
+                "status": "blocked",
+                "exit_code": 1,
+                "gate_class": "readiness-blocked",
+                "readiness": readiness,
+                "merged": False,
+            }
+            write_evidence(args.out, evidence)
+            print(json.dumps(evidence, indent=2, sort_keys=True))
+            return 1
         code, evidence = poll_gate(repo, pr_info["head_sha"], args.timeout, args.interval)
         evidence.update({
             "mode": "check-only" if args.check_only else "dry-run" if args.dry_run else "merge",
             "repo": repo,
             "pr": pr_info["number"],
             "pr_url": pr_info["url"],
+            "base_sha": pr_info["base_sha"],
             "head_sha": pr_info["head_sha"],
             "merge_method": args.method,
+            "readiness": readiness,
             "merged": False,
         })
 

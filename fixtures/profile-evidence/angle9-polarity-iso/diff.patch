@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/figures.py b/tmp_profile_evidence/figures.py
+new file mode 100644
+index 0000000..4444444
+--- /dev/null
++++ b/tmp_profile_evidence/figures.py
+@@ -0,0 +1,2 @@
++def reject_unlabeled_figures():
++    return "reject figures that hide unlabeled data and require text alternatives"

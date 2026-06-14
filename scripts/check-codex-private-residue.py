@@ -21,7 +21,10 @@ BAD_TEXT = [
 def scan(root: Path) -> list[str]:
     errors: list[str] = []
     for path in root.rglob("*"):
-        if ".git" in path.parts:
+        # .agent-runs/ is gitignored runtime scratch (carrier stdout/stderr legitimately
+        # records carrier/model names); it is never published, so it is out of scope for
+        # this tracked-pack purity scan. Excluding it is scoping, not a ban relaxation.
+        if ".git" in path.parts or ".agent-runs" in path.parts:
             continue
         rel = path.relative_to(root).as_posix()
         if any(part in BAD_PATH_PARTS for part in path.parts):

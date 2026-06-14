@@ -1,0 +1,17 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject fabricated evidence refs unless they resolve to reviewed diff added lines",
+      "evidence_ref": "tmp_profile_evidence/required_evidence_demo.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    },
+    {
+      "profile_id": "ui-information-design",
+      "obligation": "Reject fabricated evidence refs unless they resolve to reviewed diff added lines",
+      "evidence_ref": "tmp_profile_evidence/required_evidence_demo.py:2",
+      "kind": "security_review_report",
+      "verification": "I pinky-promise a security review happened (it did not)."
+    }
+  ]
+}

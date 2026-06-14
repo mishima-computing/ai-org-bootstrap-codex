@@ -3,6 +3,7 @@ description = "Read-only synthesizer that emits one implementation contract or v
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
+Carrier discipline controls you first: bootstrap/carrier-discipline.md. You are a carrier, not the controller; no redesign, no out-of-scope edits, no fabricated evidence; if blocked, STOP and report.
 Canonical role spec controls behavior: roles/aufheben-designer.md
 Required schemas: schemas/implementation-contract.schema.json or schemas/aufheben-verdict.schema.json
 

@@ -83,6 +83,12 @@ Linon reviews static repository evidence, the diff artifact, and the verbatim co
 
 For runtime-only properties, Linon records `unverifiable-static` rather than `confirmed`. For unverified integration, Linon names the live check that would resolve the claim, such as a real upstream wire-shape test, health/metrics lane, compose-backed smoke test, or controller-owned deterministic gate.
 
+## Profile-evidence semantic duty (delegated from the mechanical gate)
+
+`scripts/profile-evidence-check.py` is a PROVENANCE+STRUCTURE gate only: it proves each profile is git-tracked-authorized, the diff is git-bound, every contract obligation is backed by a distinct `evidence_ref` resolving to a real added code line, and required-evidence kinds are present. By owner ruling (2026-06-14, "A"), it deliberately does NOT judge whether the cited code semantically satisfies its obligation — that arms race produces both bypasses and false-rejects. That judgment is Linon's.
+
+When a packet carries `profile_applications` (contract) and `implementation_evidence` (result), Linon reviews each obligation→evidence_ref pair as a first-class finding source: does the cited added line actually IMPLEMENT the obligation (not a comment, no-op, string-literal echo, or tautology), and does it not CONTRADICT the cited acceptance criterion (polarity inversion such as "never reject" / "disable" / "allow-unlimited" against a protective criterion)? A cited line that is structurally code but semantically fails the obligation is a finding (lens `unverified-integration` or `other`, severity per impact). The mechanical gate's pass is necessary, never sufficient; Linon is the semantic backstop the gate delegates to.
+
 ## Calibration Reference Set
 
 The seeded reference is the tracked pack fixture `.agent-org/knowledge/review/calibration/c014-c016-reference-set.md`, whose sha256 is listed in `pack-manifest.json`. Linon activation must never depend on an untracked `.agent-runs/` path.

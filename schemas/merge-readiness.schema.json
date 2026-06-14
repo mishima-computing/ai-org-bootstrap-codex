@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-quality-bootstrap.merge-readiness.v1",
+  "type": "object",
+  "required": [
+    "pr",
+    "head_sha",
+    "diff_sha256",
+    "linon",
+    "packet_path"
+  ],
+  "properties": {
+    "pr": {
+      "type": "object",
+      "required": [
+        "id",
+        "ref"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 1
+    },
+    "diff_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "linon": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "review_path",
+        "blocking_findings"
+      ],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blocking_findings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "packet_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "profile_evidence": {
+      "type": "object",
+      "required": [
+        "objective_path",
+        "contract_path",
+        "evidence_path"
+      ],
+      "properties": {
+        "objective_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

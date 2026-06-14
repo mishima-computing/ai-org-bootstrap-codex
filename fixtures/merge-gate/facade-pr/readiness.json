@@ -1,0 +1,14 @@
+{
+  "pr": {
+    "id": "fixture-facade-pr",
+    "ref": "refs/pull/facade/head"
+  },
+  "head_sha": "fixture-facade-head",
+  "diff_sha256": "092ac27bae20438e0362c7f2363c79465c5e22e4b31f0c4150c9a99648fca789",
+  "linon": {
+    "verdict": "clear",
+    "review_path": "fixtures/merge-gate/real-pr/review.json",
+    "blocking_findings": 0
+  },
+  "packet_path": "fixtures/merge-gate/real-pr/packet.json"
+}

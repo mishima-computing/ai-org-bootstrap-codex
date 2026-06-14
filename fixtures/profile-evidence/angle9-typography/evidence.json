@@ -1,0 +1,10 @@
+{
+  "implementation_evidence": [
+    {
+      "profile_id": "ui-bilingual-typography",
+      "obligation": "Validate per-script measure token budgets and enforce contrast floors for bilingual typography",
+      "evidence_ref": "tmp_profile_evidence/typography.py:2",
+      "verification": "python3 scripts/profile-evidence-check.py --self-test"
+    }
+  ]
+}

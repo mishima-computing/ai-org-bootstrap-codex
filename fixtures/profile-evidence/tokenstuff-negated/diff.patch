@@ -1,0 +1,8 @@
+diff --git a/tmp_profile_evidence/negated.py b/tmp_profile_evidence/negated.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/tmp_profile_evidence/negated.py
+@@ -0,0 +1,2 @@
++# we do NOT reject excess login attempts; rate limiter intentionally disabled
++ALLOW_UNLIMITED_LOGIN = True

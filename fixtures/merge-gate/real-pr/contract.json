@@ -1,0 +1,28 @@
+{
+  "role_id": "aufheben-designer",
+  "contract_id": "merge-readiness-real-fixture",
+  "objective": "Provide a minimal content-bound merge readiness fixture.",
+  "selected_direction": "Require a matching diff hash and a re-verifiable Linon packet before merge.",
+  "rejected_parts": [],
+  "implementation_summary": "Fixture only: demonstrate a real readiness record bound to its diff.",
+  "acceptance_criteria": [
+    "A readiness record with a matching diff hash, clear Linon review, and valid packet passes."
+  ],
+  "files_allowed_to_change": [
+    "src/example.ts"
+  ],
+  "files_not_allowed_to_change": [
+    ".github/workflows/**"
+  ],
+  "required_checks": [
+    "python3 scripts/verify-merge-readiness.py --self-test"
+  ],
+  "security_requirements": [],
+  "nonfunctional_requirements": [],
+  "non_goals": [
+    "No real GitHub network calls in fixture verification."
+  ],
+  "risks": [],
+  "fallback_plan": "Fail closed if hashes or review evidence drift.",
+  "handoff_to_implementer": "Fixture contract for content-bound merge readiness only."
+}
