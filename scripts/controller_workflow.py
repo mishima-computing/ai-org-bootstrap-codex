@@ -28,7 +28,8 @@ def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir)
 
 
 def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin_gates=True,
-                 declared=None, carrier_runner=None, clock=None) -> models.ControllerRunReport:
+                 declared=None, carrier_runner=None, clock=None,
+                 quality_gate_enabled=False) -> models.ControllerRunReport:
     """Execute one contract deterministically and return the report (await_semantic_judgment)."""
     repo = Path(repo)
     contract = contract if isinstance(contract, models.CarrierContract) else \
@@ -40,8 +41,10 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
                                          "prompt_sha256": sha256_text(contract.prompt),
                                          "files_allowed_to_change": contract.files_allowed_to_change})
 
-    baseline = scope.baseline_of(repo)
-    journal.append("baseline", {"touched": sorted(baseline)})
+    # content-hash baseline: a pre-dirty file the carrier edits further is caught by content, not
+    # just path (NN3 — path-set subtraction would hide it).
+    snapshot = scope.baseline_snapshot(repo)
+    journal.append("baseline", {"snapshot_paths": sorted(snapshot)})
 
     runner = carrier_runner or _default_carrier_runner
     carrier = runner(repo, contract.prompt, contract.sandbox,
@@ -50,10 +53,19 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     attempts = carrier.get("attempts", [])
     journal.append("run_carrier", {"ok": carrier_ok, "attempts": attempts})
 
+    # quality gate (implementer): AFTER the carrier, BEFORE scope (fast_fix mutates the carrier's
+    # files — scope must see the post-quality tree). Lint/debug only; no destructive auto-revert.
+    quality = None
+    if quality_gate_enabled and carrier_ok:
+        import quality_gate
+        carrier_changed = scope.changed_since(repo, snapshot)
+        quality = quality_gate.run_quality_gate(carrier_changed, repo)
+        journal.append("quality_gate", quality)
+
     # forbidden classes are controller-owned: contract paths ADD to DEFAULT_FORBIDDEN, never replace
     # it (NN2 — an interested-party contract must not be able to disable the absolute forbidden set).
     forbidden = tuple(scope.DEFAULT_FORBIDDEN) + tuple(contract.forbidden_paths or ())
-    scope_report = scope.enforce(repo, contract.files_allowed_to_change, baseline=baseline,
+    scope_report = scope.enforce(repo, contract.files_allowed_to_change, baseline_snapshot=snapshot,
                                  forbidden=forbidden, declared=declared)
     journal.append("enforce_scope", scope_report.to_dict())
 
@@ -83,13 +95,19 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
             unresolved.append(f"verifier {v.name}: {v.status} (exit {v.exit_code})")
     if missing_expected:
         unresolved.append(f"expected verifiers missing or not passed: {missing_expected}")
+    quality_ok = quality is None or bool(quality.get("quality_pass"))
+    if quality is not None and not quality_ok:
+        unresolved.append(f"quality gate: {quality.get('lint', {}).get('new_error_count')} new lint, "
+                          f"{len(quality.get('debug_tags', []))} debug tags, "
+                          f"tools_failed={quality.get('tools_failed')}")
 
     ok = (carrier_ok and scope_report.scope_ok and verifiers.all_passed(verifier_runs)
-          and not missing_expected)
+          and not missing_expected and quality_ok)
     report = models.ControllerRunReport(
         contract_role=contract.role, ok=ok, sandbox=contract.sandbox, attempts=attempts,
         changed_files=scope_report.changed, scope=scope_report.to_dict(), diff_artifact=diff_art,
-        verifier_results=[v.to_dict() for v in verifier_runs], unresolved_failures=unresolved,
+        quality=quality, verifier_results=[v.to_dict() for v in verifier_runs],
+        unresolved_failures=unresolved,
     )
     journal.append("package_evidence", {"ok": ok, "report": report.to_dict()})
     # await_semantic_judgment: the report is returned; the LLM/owner decides. The workflow does not.

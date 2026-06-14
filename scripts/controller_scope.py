@@ -18,6 +18,7 @@ is a deviation.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,12 +85,20 @@ def porcelain_touched(repo: Path) -> set[str]:
     return {p for p in touched if p and not any(p == s.rstrip("/") or p.startswith(s) for s in SCRATCH_PREFIXES)}
 
 
-def enforce(repo, allowed_globs, *, baseline=None, forbidden=DEFAULT_FORBIDDEN,
-            declared=None) -> ScopeReport:
-    """Compute the scope report. `baseline` = touched set captured BEFORE the carrier ran."""
+def enforce(repo, allowed_globs, *, baseline=None, baseline_snapshot=None,
+            forbidden=DEFAULT_FORBIDDEN, declared=None) -> ScopeReport:
+    """Compute the scope report.
+
+    `baseline_snapshot` (preferred) is a {path: content-hash} map from BEFORE the carrier ran; a
+    pre-dirty file the carrier edits FURTHER is then caught by content (path-set subtraction alone
+    would hide it — NN3). `baseline` is the legacy path-set form.
+    """
     repo = Path(repo)
     post = porcelain_touched(repo)
-    changed = sorted(post - set(baseline or set()))
+    if baseline_snapshot is not None:
+        changed = changed_since(repo, baseline_snapshot)
+    else:
+        changed = sorted(post - set(baseline or set()))
     # forbidden is checked against the FULL touched set (not post-baseline): a forbidden path that
     # was already dirty and is touched again must still be caught (NN3 — baseline must not hide it).
     forbidden_hits = sorted(f for f in post if any(fnmatch.fnmatch(f, g) for g in forbidden))
@@ -129,6 +138,26 @@ def dirty_submodules(repo: Path) -> list[str]:
 def baseline_of(repo) -> set[str]:
     """Capture the pre-run dirty baseline so pre-existing changes aren't blamed on the carrier."""
     return porcelain_touched(Path(repo))
+
+
+def _content_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "__nonfile__"
+
+
+def baseline_snapshot(repo) -> dict:
+    """Pre-run snapshot {path: content-hash} of every currently-dirty path (content, not just path)."""
+    repo = Path(repo)
+    return {p: _content_hash(repo / p) for p in porcelain_touched(repo)}
+
+
+def changed_since(repo, snapshot: dict) -> list[str]:
+    """Paths that are new OR whose content differs from the snapshot (catches re-edited dirty files)."""
+    repo = Path(repo)
+    out = []
+    for p in porcelain_touched(repo):
+        if snapshot.get(p) != _content_hash(repo / p):
+            out.append(p)
+    return sorted(out)
 
 
 if __name__ == "__main__":
