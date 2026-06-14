@@ -1,218 +1,486 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Summon — SSR Reveal</title>
-<style>
-  :root{
-    --gold:#f6d77a; --gold-deep:#b88a2e; --gold-light:#fff3c8;
-    --ink:#05060c; --holo1:#7af0ff; --holo2:#ff8ad8; --holo3:#b69bff;
-  }
-  *{margin:0;box-sizing:border-box}
-  html,body{width:100%;height:100%;background:#000;overflow:hidden;font-family:"Hiragino Mincho ProN","Times New Roman",Georgia,serif;}
-  .wrap{position:absolute;inset:0;display:grid;place-items:center;background:#000;}
-  .stage{position:relative;width:1920px;height:1080px;transform-origin:center;overflow:hidden;
-    /* dark theatre: near-black, with colour concentrated as a glow behind the card */
-    background:
-      radial-gradient(58% 62% at 50% 47%, #2a2150 0%, #15113a 26%, #0a0a22 48%, #050510 70%, #010103 100%),
-      #010103;
-  }
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSR Reveal</title>
+  <style>
+    :root {
+      --scale: 1;
+      --gold: #ffe177;
+      --hot: #fff7bd;
+      --amber: #ffb633;
+      --violet: #735dff;
+      --cyan: #6cf0ff;
+      --ink: #05040a;
+    }
 
-  /* deep nebula wash — concentrated, not a full-screen blue */
-  .nebula{position:absolute;inset:0;mix-blend-mode:screen;opacity:.5;
-    background:
-      radial-gradient(34% 26% at 33% 36%, rgba(120,86,210,.40), transparent 70%),
-      radial-gradient(30% 24% at 70% 34%, rgba(40,150,210,.34), transparent 72%),
-      radial-gradient(40% 30% at 50% 70%, rgba(150,60,150,.24), transparent 75%);
-    filter:blur(10px);}
+    * {
+      box-sizing: border-box;
+    }
 
-  /* god-rays radiating from the focal point — brighter, longer, more contrast */
-  .rays{position:absolute;left:50%;top:44%;width:2600px;height:2600px;transform:translate(-50%,-50%);
-    background:repeating-conic-gradient(from 0deg,
-      rgba(255,230,170,0) 0deg, rgba(255,232,175,.22) 1.6deg, rgba(255,230,170,0) 4.6deg);
-    -webkit-mask:radial-gradient(closest-side, transparent 5%, #000 16%, #000 46%, transparent 72%);
-            mask:radial-gradient(closest-side, transparent 5%, #000 16%, #000 46%, transparent 72%);
-    mix-blend-mode:screen;opacity:.85;}
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #020107;
+      color: #fff;
+      font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+    }
 
-  /* core bloom — the light is the protagonist: hot white-gold core, big falloff */
-  .bloom{position:absolute;left:50%;top:47%;width:1700px;height:1700px;transform:translate(-50%,-50%);
-    background:
-      radial-gradient(circle at center, rgba(255,252,235,1) 0%, rgba(255,240,190,.85) 5%,
-        rgba(255,210,120,.55) 13%, rgba(246,160,60,.30) 26%, rgba(120,70,40,.12) 44%, transparent 64%);
-    mix-blend-mode:screen;filter:blur(3px);}
+    body {
+      display: grid;
+      place-items: center;
+    }
 
-  /* frontal halo ring glowing behind the card */
-  .halo{position:absolute;left:50%;top:48%;width:760px;height:760px;transform:translate(-50%,-50%);
-    border-radius:50%;mix-blend-mode:screen;
-    background:radial-gradient(closest-side, transparent 60%, rgba(255,222,150,.0) 66%, rgba(255,226,150,.5) 73%, rgba(255,210,120,.12) 80%, transparent 88%);
-    filter:blur(2px);}
+    #stage {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      transform: scale(var(--scale));
+      transform-origin: center;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(255, 239, 152, 0.16) 0 9%, rgba(189, 122, 255, 0.09) 18%, transparent 34%),
+        radial-gradient(circle at 50% 48%, rgba(72, 28, 160, 0.5) 0 18%, rgba(10, 7, 23, 0.88) 43%, #020107 82%),
+        linear-gradient(180deg, #080713 0%, #03020a 72%, #010104 100%);
+      isolation: isolate;
+    }
 
-  /* anamorphic horizontal flare through the focal point */
-  .flare{position:absolute;left:50%;top:46.5%;width:1600px;height:6px;transform:translate(-50%,-50%);
-    background:linear-gradient(90deg, transparent, rgba(150,210,255,.0) 12%, rgba(180,225,255,.8) 50%, rgba(150,210,255,0) 88%, transparent);
-    box-shadow:0 0 40px 8px rgba(150,210,255,.5);mix-blend-mode:screen;filter:blur(.5px);}
-  .flare.v{width:6px;height:760px;background:linear-gradient(180deg,transparent,rgba(180,225,255,.55) 50%,transparent);}
+    #stage::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse at center, transparent 0 39%, rgba(0, 0, 0, 0.38) 66%, rgba(0, 0, 0, 0.88) 100%),
+        linear-gradient(90deg, rgba(0, 0, 0, 0.42), transparent 16% 84%, rgba(0, 0, 0, 0.42));
+      mix-blend-mode: multiply;
+    }
 
-  /* ornate summoning circle */
-  .circle{position:absolute;left:50%;top:48%;width:980px;height:980px;transform:translate(-50%,-50%) rotateX(62deg);
-    transform-style:preserve-3d;opacity:.85;filter:drop-shadow(0 0 18px rgba(246,200,110,.55));}
-  .circle svg{width:100%;height:100%}
+    #stage::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 518px;
+      height: 22px;
+      z-index: 12;
+      background: linear-gradient(90deg, transparent 0%, rgba(70, 235, 255, 0.18) 22%, rgba(255, 255, 255, 0.85) 49%, rgba(255, 180, 54, 0.52) 56%, rgba(84, 224, 255, 0.16) 78%, transparent 100%);
+      filter: blur(1px) drop-shadow(0 0 26px rgba(255, 236, 145, 0.7));
+      opacity: 0.92;
+    }
 
-  /* vertical light column behind the card */
-  .column{position:absolute;left:50%;top:0;width:520px;height:100%;transform:translateX(-50%);
-    background:linear-gradient(to top, transparent 0%, rgba(255,225,150,.10) 30%, rgba(255,238,190,.22) 55%, rgba(255,225,150,.08) 78%, transparent 100%);
-    -webkit-mask:linear-gradient(to right, transparent, #000 30%, #000 70%, transparent);
-            mask:linear-gradient(to right, transparent, #000 30%, #000 70%, transparent);
-    mix-blend-mode:screen;filter:blur(6px);}
+    .backdrop-lines {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      opacity: 0.32;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px) 0 0 / 160px 160px,
+        linear-gradient(0deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px) 0 0 / 160px 160px;
+      mask-image: radial-gradient(circle at center, black 0 46%, transparent 76%);
+    }
 
-  /* holographic card */
-  .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-52%);
-    width:392px;height:556px;border-radius:18px;
-    background:linear-gradient(160deg,#15172b,#0c0e1d 60%,#080a16);
-    box-shadow:
-      0 0 0 2px rgba(255,243,200,.18),
-      0 0 60px 6px rgba(246,200,110,.45),
-      0 30px 80px rgba(0,0,0,.7),
-      inset 0 0 40px rgba(80,60,120,.25);
-    padding:14px;}
-  .card .frame{position:absolute;inset:0;border-radius:18px;padding:2px;
-    background:linear-gradient(135deg,var(--gold-light),var(--gold) 25%,var(--gold-deep) 50%,var(--gold) 72%,var(--gold-light));
-    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    -webkit-mask-composite:xor;mask-composite:exclude;}
-  .card .art{position:absolute;inset:58px 14px 132px;border-radius:12px;overflow:hidden;
-    background:radial-gradient(115% 95% at 50% 42%, #20254e 0%, #0c0f2a 52%, #05071a 100%);
-    display:grid;place-items:center;box-shadow:inset 0 0 60px rgba(0,0,0,.72);}
-  /* bright halo directly behind the subject so it reads as emerging from light */
-  .card .art::before{content:"";position:absolute;left:50%;top:46%;width:300px;height:300px;transform:translate(-50%,-50%);
-    background:radial-gradient(circle, rgba(255,236,190,.85) 0%, rgba(255,205,120,.45) 28%, rgba(246,170,70,.18) 50%, transparent 70%);
-    mix-blend-mode:screen;filter:blur(2px);}
-  .card .art::after{content:"";position:absolute;inset:0;mix-blend-mode:screen;
-    background:linear-gradient(115deg, transparent 30%, rgba(122,240,255,.10) 46%, rgba(255,138,216,.10) 56%, transparent 70%);}
-  .card .art img{position:relative;width:80%;transform:translateY(4px);
-    filter:contrast(1.12) saturate(1.18) brightness(1.04)
-      drop-shadow(0 10px 28px rgba(0,0,0,.55)) drop-shadow(0 0 22px rgba(255,214,140,.6));}
-  /* holo sheen */
-  .card .sheen{position:absolute;inset:0;border-radius:18px;pointer-events:none;
-    background:linear-gradient(115deg, transparent 18%, rgba(122,240,255,.16) 33%, rgba(255,138,216,.16) 45%,
-      rgba(182,155,255,.16) 56%, transparent 72%);
-    mix-blend-mode:screen;opacity:.9;}
-  .card .stars{position:absolute;left:0;right:0;top:18px;height:34px;text-align:center;font-size:30px;letter-spacing:8px;text-indent:8px;
-    color:var(--gold-light);
-    text-shadow:0 0 14px rgba(255,206,110,1),0 0 26px rgba(246,170,70,.85),0 1px 0 var(--gold-deep);}
-  .card .plate{position:absolute;left:14px;right:14px;bottom:14px;height:104px;border-radius:12px;
-    background:linear-gradient(180deg, rgba(20,22,40,.2), rgba(8,9,18,.86));
-    border:1px solid rgba(246,215,130,.35);display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;}
-  .card .rarity{font-family:"Helvetica Neue",Arial,sans-serif;font-weight:800;font-size:13px;letter-spacing:.42em;
-    color:#0a0a12;background:linear-gradient(90deg,var(--gold-light),var(--gold),var(--gold-light));
-    padding:2px 12px 2px 14px;border-radius:999px;text-indent:.42em;}
-  .card .name{font-size:30px;color:#fff;letter-spacing:.06em;text-shadow:0 2px 12px rgba(0,0,0,.7);}
-  .card .sub{font-family:"Helvetica Neue",Arial,sans-serif;font-size:12px;letter-spacing:.34em;color:#b9a36a;text-transform:uppercase;}
+    .rays,
+    .rays::before,
+    .rays::after {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 1580px;
+      height: 1580px;
+      translate: -50% -50%;
+      border-radius: 50%;
+      pointer-events: none;
+    }
 
-  /* floating motes */
-  .motes{position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen}
-  .mote{position:absolute;border-radius:50%;background:radial-gradient(circle,#fff,rgba(255,225,160,.6) 40%,transparent 70%);}
+    .rays {
+      z-index: 3;
+      background:
+        conic-gradient(from -12deg,
+          transparent 0deg 7deg,
+          rgba(255, 243, 160, 0.4) 10deg,
+          transparent 15deg 27deg,
+          rgba(126, 232, 255, 0.16) 31deg,
+          transparent 36deg 48deg,
+          rgba(255, 190, 67, 0.25) 53deg,
+          transparent 59deg 72deg,
+          rgba(255, 249, 202, 0.34) 77deg,
+          transparent 83deg 101deg,
+          rgba(122, 112, 255, 0.22) 107deg,
+          transparent 113deg 131deg,
+          rgba(255, 232, 129, 0.3) 137deg,
+          transparent 145deg 179deg,
+          rgba(255, 244, 177, 0.34) 187deg,
+          transparent 194deg 222deg,
+          rgba(80, 220, 255, 0.17) 231deg,
+          transparent 238deg 257deg,
+          rgba(255, 180, 50, 0.22) 265deg,
+          transparent 273deg 305deg,
+          rgba(255, 249, 210, 0.32) 313deg,
+          transparent 320deg 360deg);
+      filter: blur(9px);
+      opacity: 0.76;
+      mask-image: radial-gradient(circle, transparent 0 8%, black 12% 44%, transparent 72%);
+    }
 
-  /* headline + chrome */
-  .headline{position:absolute;left:0;right:0;top:92px;text-align:center;}
-  .headline .kicker{font-family:"Helvetica Neue",Arial,sans-serif;font-size:15px;letter-spacing:.7em;
-    color:#cdb878;text-indent:.7em;opacity:.9;}
-  .headline .title{margin-top:10px;font-size:78px;letter-spacing:.14em;line-height:1;
-    background:linear-gradient(180deg,var(--gold-light) 0%,var(--gold) 42%,var(--gold-deep) 100%);
-    -webkit-background-clip:text;background-clip:text;color:transparent;
-    filter:drop-shadow(0 2px 1px rgba(0,0,0,.55)) drop-shadow(0 0 26px rgba(246,200,110,.45));text-indent:.14em;}
+    .rays::before {
+      content: "";
+      background:
+        conic-gradient(from 4deg,
+          transparent 0deg 19deg,
+          rgba(255, 250, 202, 0.52) 24deg,
+          transparent 30deg 84deg,
+          rgba(254, 207, 88, 0.38) 89deg,
+          transparent 96deg 153deg,
+          rgba(255, 255, 255, 0.38) 160deg,
+          transparent 166deg 229deg,
+          rgba(106, 236, 255, 0.24) 236deg,
+          transparent 243deg 300deg,
+          rgba(255, 242, 145, 0.4) 306deg,
+          transparent 313deg 360deg);
+      filter: blur(18px);
+      opacity: 0.68;
+    }
 
-  .chrome{position:absolute;left:0;right:0;bottom:54px;display:flex;justify-content:center;}
-  .chrome .cta{font-family:"Helvetica Neue",Arial,sans-serif;font-size:16px;letter-spacing:.5em;color:#e9ddba;text-indent:.5em;
-    position:relative;padding-bottom:14px;}
-  .chrome .cta::after{content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);width:120px;height:1px;
-    background:linear-gradient(90deg,transparent,var(--gold),transparent);}
-  .counter{position:absolute;left:64px;bottom:52px;font-family:"Helvetica Neue",Arial,sans-serif;color:#9aa0c0;
-    font-size:15px;letter-spacing:.28em;}
-  .counter b{color:var(--gold-light);font-weight:700}
-  .skip{position:absolute;right:64px;bottom:52px;font-family:"Helvetica Neue",Arial,sans-serif;color:#9aa0c0;
-    font-size:14px;letter-spacing:.34em;border:1px solid rgba(154,160,192,.4);padding:8px 18px;border-radius:999px;}
+    .rays::after {
+      content: "";
+      width: 940px;
+      height: 940px;
+      background: radial-gradient(circle, rgba(255, 248, 190, 0.96) 0 8%, rgba(255, 205, 80, 0.52) 16%, rgba(114, 77, 255, 0.2) 31%, transparent 54%);
+      filter: blur(7px);
+      opacity: 0.9;
+    }
 
-  /* cinematic vignette — heavy, crushes corners to black */
-  .vignette{position:absolute;inset:0;pointer-events:none;
-    background:
-      radial-gradient(78% 66% at 50% 46%, transparent 32%, rgba(0,0,0,.5) 68%, rgba(0,0,0,.86) 88%, rgba(0,0,0,.98) 100%);}
+    .summon-ring {
+      position: absolute;
+      left: 50%;
+      top: 48.5%;
+      z-index: 4;
+      width: 840px;
+      height: 840px;
+      translate: -50% -50%;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 230, 123, 0.58);
+      box-shadow:
+        0 0 34px rgba(255, 211, 79, 0.65),
+        inset 0 0 54px rgba(255, 235, 137, 0.28);
+      background:
+        radial-gradient(circle, transparent 0 58%, rgba(255, 244, 171, 0.16) 58% 60%, transparent 61%),
+        conic-gradient(from 0deg, transparent 0 7deg, rgba(255, 241, 167, 0.4) 8deg 11deg, transparent 12deg 31deg, rgba(108, 236, 255, 0.25) 32deg 35deg, transparent 36deg 55deg);
+      opacity: 0.92;
+    }
 
-  .credit{position:absolute;right:14px;bottom:14px;font-family:sans-serif;font-size:12px;color:#5a5e78;}
-</style>
+    .summon-ring::before,
+    .summon-ring::after {
+      content: "";
+      position: absolute;
+      inset: 58px;
+      border-radius: inherit;
+      border: 1px solid rgba(124, 236, 255, 0.28);
+      box-shadow: inset 0 0 22px rgba(108, 236, 255, 0.2);
+    }
+
+    .summon-ring::after {
+      inset: 138px;
+      border-color: rgba(255, 224, 118, 0.38);
+      box-shadow: 0 0 30px rgba(255, 221, 101, 0.22);
+    }
+
+    .particle-field {
+      position: absolute;
+      inset: 0;
+      z-index: 8;
+      pointer-events: none;
+    }
+
+    .spark {
+      position: absolute;
+      width: var(--s);
+      height: var(--s);
+      border-radius: 50%;
+      background: var(--c);
+      box-shadow: 0 0 calc(var(--s) * 3) var(--c);
+      opacity: var(--o);
+    }
+
+    .prize-shadow {
+      position: absolute;
+      left: 50%;
+      top: 80%;
+      z-index: 5;
+      width: 640px;
+      height: 90px;
+      translate: -50% -50%;
+      border-radius: 50%;
+      background: radial-gradient(ellipse, rgba(0, 0, 0, 0.72) 0 38%, transparent 72%);
+      filter: blur(10px);
+    }
+
+    .prize-wrap {
+      position: absolute;
+      left: 50%;
+      top: 49%;
+      z-index: 9;
+      width: 640px;
+      height: 640px;
+      translate: -50% -50%;
+      display: grid;
+      place-items: center;
+    }
+
+    .prize-wrap::before {
+      content: "";
+      position: absolute;
+      inset: 48px;
+      z-index: -2;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(255, 255, 255, 0.95) 0 11%, rgba(255, 226, 115, 0.82) 20%, rgba(255, 162, 53, 0.35) 38%, transparent 62%);
+      filter: blur(16px);
+    }
+
+    .prize-wrap::after {
+      content: "";
+      position: absolute;
+      inset: 86px;
+      z-index: -1;
+      border-radius: 50%;
+      background: radial-gradient(circle, transparent 0 48%, rgba(116, 243, 255, 0.48) 58%, rgba(255, 221, 107, 0.36) 66%, transparent 76%);
+      filter: blur(5px);
+    }
+
+    .prize {
+      max-width: 570px;
+      max-height: 570px;
+      object-fit: contain;
+      filter:
+        drop-shadow(0 -16px 18px rgba(255, 246, 192, 0.82))
+        drop-shadow(0 0 42px rgba(255, 199, 63, 0.92))
+        drop-shadow(0 0 88px rgba(101, 229, 255, 0.48))
+        drop-shadow(0 38px 30px rgba(0, 0, 0, 0.82));
+    }
+
+    .rarity-panel {
+      position: absolute;
+      left: 50%;
+      top: 92px;
+      z-index: 16;
+      width: 580px;
+      translate: -50% 0;
+      text-align: center;
+    }
+
+    .rarity-badge {
+      display: inline-grid;
+      place-items: center;
+      min-width: 280px;
+      height: 104px;
+      padding: 0 42px;
+      color: #fffdf1;
+      font-size: 82px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0;
+      text-shadow:
+        0 3px 0 rgba(86, 38, 0, 0.9),
+        0 0 18px rgba(255, 238, 139, 0.98),
+        0 0 38px rgba(255, 188, 49, 0.86);
+      border: 2px solid rgba(255, 239, 158, 0.88);
+      background:
+        linear-gradient(120deg, rgba(42, 17, 96, 0.86), rgba(164, 82, 255, 0.68) 34%, rgba(255, 218, 85, 0.78) 50%, rgba(110, 234, 255, 0.68) 66%, rgba(35, 18, 86, 0.9)),
+        rgba(16, 10, 40, 0.8);
+      box-shadow:
+        0 0 0 5px rgba(43, 20, 80, 0.82),
+        0 0 30px rgba(255, 220, 93, 0.82),
+        inset 0 0 22px rgba(255, 255, 255, 0.32);
+      clip-path: polygon(7% 0, 93% 0, 100% 50%, 93% 100%, 7% 100%, 0 50%);
+    }
+
+    .stars {
+      display: flex;
+      justify-content: center;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .star {
+      position: relative;
+      width: 62px;
+      height: 62px;
+      clip-path: polygon(50% 0%, 61% 34%, 98% 35%, 68% 56%, 79% 91%, 50% 70%, 21% 91%, 32% 56%, 2% 35%, 39% 34%);
+      background: linear-gradient(160deg, #fff8c6 0%, #ffe15d 34%, #ff9f25 70%, #fff2ac 100%);
+      box-shadow:
+        0 0 0 3px rgba(78, 32, 0, 0.55),
+        0 0 22px rgba(255, 221, 86, 0.92);
+      filter: drop-shadow(0 4px 0 rgba(72, 27, 0, 0.78));
+    }
+
+    .frame {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      z-index: 11;
+      width: 760px;
+      height: 760px;
+      translate: -50% -50%;
+      pointer-events: none;
+      border-radius: 50px;
+      border: 2px solid rgba(255, 236, 139, 0.72);
+      box-shadow:
+        0 0 24px rgba(255, 231, 126, 0.76),
+        inset 0 0 34px rgba(111, 238, 255, 0.26);
+      clip-path: polygon(10% 0, 90% 0, 100% 10%, 100% 90%, 90% 100%, 10% 100%, 0 90%, 0 10%);
+    }
+
+    .frame::before,
+    .frame::after {
+      content: "";
+      position: absolute;
+      inset: 20px;
+      border: 1px solid rgba(103, 232, 255, 0.5);
+      border-radius: 36px;
+      clip-path: inherit;
+    }
+
+    .frame::after {
+      inset: 46px;
+      border-color: rgba(255, 221, 98, 0.42);
+      box-shadow: inset 0 0 24px rgba(255, 218, 91, 0.14);
+    }
+
+    .name-plate {
+      position: absolute;
+      left: 50%;
+      bottom: 92px;
+      z-index: 16;
+      width: 760px;
+      min-height: 112px;
+      translate: -50% 0;
+      display: grid;
+      place-items: center;
+      padding: 18px 48px 20px;
+      color: #fffaf0;
+      text-align: center;
+      border: 2px solid rgba(255, 233, 143, 0.9);
+      background:
+        linear-gradient(90deg, rgba(8, 7, 20, 0.92), rgba(38, 20, 76, 0.88) 23%, rgba(102, 58, 144, 0.82) 50%, rgba(38, 20, 76, 0.88) 77%, rgba(8, 7, 20, 0.92)),
+        rgba(9, 6, 21, 0.92);
+      box-shadow:
+        0 0 0 5px rgba(5, 3, 13, 0.82),
+        0 0 28px rgba(255, 217, 83, 0.64),
+        inset 0 0 20px rgba(255, 255, 255, 0.14);
+      clip-path: polygon(5% 0, 95% 0, 100% 50%, 95% 100%, 5% 100%, 0 50%);
+    }
+
+    .name-plate .name {
+      display: block;
+      font-size: 46px;
+      font-weight: 800;
+      line-height: 1.12;
+      letter-spacing: 0;
+      text-shadow: 0 2px 0 rgba(0, 0, 0, 0.9), 0 0 18px rgba(255, 218, 91, 0.8);
+    }
+
+    .name-plate .title {
+      display: block;
+      margin-top: 6px;
+      color: #ffe894;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-shadow: 0 2px 0 rgba(0, 0, 0, 0.9);
+    }
+
+    .credit {
+      position: absolute;
+      right: 34px;
+      bottom: 24px;
+      z-index: 18;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 20px;
+      line-height: 1;
+      letter-spacing: 0;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.95);
+    }
+  </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="stage" id="stage">
-    <div class="nebula"></div>
+  <main id="stage" aria-label="SSR reveal screen">
+    <div class="backdrop-lines"></div>
     <div class="rays"></div>
-    <div class="column"></div>
-    <div class="circle">
-      <svg viewBox="0 0 980 980" fill="none" stroke="#f6d77a" stroke-width="1.4">
-        <circle cx="490" cy="490" r="470" stroke-opacity=".55"/>
-        <circle cx="490" cy="490" r="438" stroke-opacity=".85" stroke-width="2.4"/>
-        <circle cx="490" cy="490" r="360" stroke-opacity=".4"/>
-        <circle cx="490" cy="490" r="250" stroke-opacity=".7"/>
-        <circle cx="490" cy="490" r="120" stroke-opacity=".5"/>
-        <g stroke-opacity=".8">
-          <!-- hexagram -->
-          <polygon points="490,120 810,675 170,675" stroke-opacity=".7"/>
-          <polygon points="490,860 170,305 810,305" stroke-opacity=".7"/>
-        </g>
-        <g stroke="#f6d77a" stroke-opacity=".6">
-          <!-- tick ring -->
-          <g id="ticks"></g>
-        </g>
-      </svg>
-    </div>
-    <div class="bloom"></div>
-    <div class="halo"></div>
-    <div class="flare"></div>
-    <div class="flare v"></div>
-
-    <div class="headline">
-      <div class="kicker">SUMMONING</div>
-      <div class="title">LEGENDARY</div>
-    </div>
-
-    <div class="card">
-      <div class="frame"></div>
-      <div class="stars">★★★★★</div>
-      <div class="art"><img src="../assets/legendary_dragon.png" alt="Ancient Dragon"></div>
-      <div class="plate">
-        <span class="rarity">SSR</span>
-        <span class="name">Ancient Dragon</span>
-        <span class="sub">Mythic · Astral Wyrm</span>
+    <div class="summon-ring"></div>
+    <div class="particle-field" id="particles" aria-hidden="true"></div>
+    <div class="rarity-panel" aria-label="SSR rarity, five stars">
+      <div class="rarity-badge">SSR</div>
+      <div class="stars" aria-hidden="true">
+        <span class="star"></span>
+        <span class="star"></span>
+        <span class="star"></span>
+        <span class="star"></span>
+        <span class="star"></span>
       </div>
-      <div class="sheen"></div>
     </div>
+    <div class="frame" aria-hidden="true"></div>
+    <div class="prize-shadow" aria-hidden="true"></div>
+    <div class="prize-wrap">
+      <img class="prize" src="../assets/legendary_dragon.png" alt="Legendary dragon prize">
+    </div>
+    <div class="name-plate">
+      <span class="name">LEGENDARY DRAGON</span>
+      <span class="title">Star-Crowned Ancient Wyrm</span>
+    </div>
+    <div class="credit">イラスト: いらすとや (irasutoya.com)</div>
+  </main>
 
-    <div class="motes" id="motes"></div>
+  <script>
+    const stage = document.getElementById("stage");
+    const particles = document.getElementById("particles");
 
-    <div class="counter">PULL <b>1</b> / 10</div>
-    <div class="skip">SKIP ▸</div>
-    <div class="chrome"><div class="cta">TAP TO CONTINUE</div></div>
+    function fitStage() {
+      const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+      stage.style.setProperty("--scale", scale);
+    }
 
-    <div class="vignette"></div>
-    <p class="credit">イラスト: いらすとや (irasutoya.com)</p>
-  </div>
-</div>
-<script>
-  // fit to viewport
-  function fit(){var s=document.getElementById('stage');s.style.transform='scale('+Math.min(innerWidth/1920,innerHeight/1080)+')';}
-  addEventListener('resize',fit);fit();
-  // tick ring
-  var ticks=document.getElementById('ticks'),cx=490,cy=490,r1=438,r2=410;var n=72,s='';
-  for(var i=0;i<n;i++){var a=i/n*Math.PI*2;var big=i%6===0;var rr=big?396:418;
-    s+='<line x1="'+(cx+Math.cos(a)*r1)+'" y1="'+(cy+Math.sin(a)*r1)+'" x2="'+(cx+Math.cos(a)*rr)+'" y2="'+(cy+Math.sin(a)*rr)+'" stroke-width="'+(big?2.4:1)+'"/>';}
-  ticks.innerHTML=s;
-  // motes (static scatter)
-  var m=document.getElementById('motes'),h='';
-  var seed=7;function rnd(){seed=(seed*1103515245+12345)&0x7fffffff;return seed/0x7fffffff;}
-  for(var j=0;j<70;j++){var x=rnd()*1920,y=rnd()*1080;var d=Math.hypot(x-960,y-500);
-    var sz=1+rnd()*4*(1-Math.min(d/900,1))+rnd()*2;var op=.2+.7*(1-Math.min(d/1000,1))*rnd();
-    h+='<span class="mote" style="left:'+x+'px;top:'+y+'px;width:'+sz+'px;height:'+sz+'px;opacity:'+op.toFixed(2)+'"></span>';}
-  m.innerHTML=h;
-</script>
+    function seededRandom(seed) {
+      let value = seed;
+      return function random() {
+        value = (value * 1664525 + 1013904223) >>> 0;
+        return value / 4294967296;
+      };
+    }
+
+    function scatterParticles() {
+      const random = seededRandom(77391);
+      const colors = ["#fff4a8", "#ffe071", "#68efff", "#c5a5ff", "#ffffff"];
+      const fragment = document.createDocumentFragment();
+
+      for (let i = 0; i < 150; i += 1) {
+        const angle = random() * Math.PI * 2;
+        const radius = Math.pow(random(), 0.62) * 630;
+        const x = 960 + Math.cos(angle) * radius + (random() - 0.5) * 130;
+        const y = 520 + Math.sin(angle) * radius * 0.72 + (random() - 0.5) * 90;
+        const size = 2 + random() * 7;
+        const spark = document.createElement("i");
+        spark.className = "spark";
+        spark.style.left = `${x}px`;
+        spark.style.top = `${y}px`;
+        spark.style.setProperty("--s", `${size}px`);
+        spark.style.setProperty("--o", `${0.34 + random() * 0.58}`);
+        spark.style.setProperty("--c", colors[Math.floor(random() * colors.length)]);
+        fragment.appendChild(spark);
+      }
+
+      particles.appendChild(fragment);
+    }
+
+    fitStage();
+    scatterParticles();
+    window.addEventListener("resize", fitStage);
+  </script>
 </body>
 </html>

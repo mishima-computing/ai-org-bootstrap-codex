@@ -17,7 +17,7 @@ Visual register (the light grammar): a high-rarity reveal is a DARK THEATRE wher
 - Rarity is unmistakable and legible over the bloom: rarity stars/signal and a holographic rarity frame read clearly against the bright focal area (do not let the bloom wash the rarity signal).
 - One supporting cinematic accent is allowed (e.g. an anamorphic light streak); restraint elsewhere — chrome is quiet, light is loud.
 - Art is staged, not just placed: rim-light/backlight and contrast make even modest art read as emerging from light; never present the prize flatly under even lighting.
-Exemplar (static peak frame): `demos/retro-gacha-gui/gacha-reveal/`.
+Exemplar (static peak frame): `demos/retro-gacha-gui/gacha-reveal/` — produced by a Codex carrier reading this grammar alone (independent of the controller's hand version, 0/154 shared CSS declarations), controller-verified (prize salience 0.113 ≫ background 0.0001; all grammar obligations present in code), owner taste-gate preferred it over the controller's hand build. Evidence that the light grammar transfers to a carrier, not just the controller.
 Rule: Rarity signaled before item; pre-draw audit record shows odds and material constraints visible before ceremony.
 Language: Use rarity language consistently across copy, color, audio, motion, and inventory state.
 Beats: Entrance, suspense, rarity confirmation, item reveal, and recovery carry skip and reduced-motion paths, citing anchor:motion#wcag22-motion-criteria and anchor:motion#apple-hig-motion.
