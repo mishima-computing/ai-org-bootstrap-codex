@@ -51,7 +51,11 @@ def _safe_rel(path: str) -> bool:
 
 
 def _changed_allowed_files(worktree: Path, contract: dict) -> list[str]:
-    changed = _check_git(worktree, "diff", "--name-only", "HEAD").splitlines()
+    # stage everything first so NEW (untracked) files are detected — `git diff --name-only HEAD` alone
+    # lists only modifications to already-tracked files and silently drops created files, which is the
+    # common carrier case (a carrier usually CREATES files). Staging + diff --cached catches both.
+    _check_git(worktree, "add", "-A")
+    changed = _check_git(worktree, "diff", "--cached", "--name-only").splitlines()
     return sorted(path for path in changed if _safe_rel(path) and _allowed(path, contract))
 
 
@@ -154,9 +158,10 @@ def _self_test() -> None:
         repo = root / "repo"
         repo.mkdir()
         _check_git(repo, "init")
-        (repo / "a.txt").write_bytes(b"base a\n")
-        (repo / "b.txt").write_bytes(b"base b\n")
-        _check_git(repo, "add", "a.txt", "b.txt")
+        # commit only a seed; the contracts CREATE a.txt/b.txt fresh, so this exercises NEW (untracked)
+        # file detection — the case the merge previously dropped.
+        (repo / "seed.txt").write_bytes(b"seed\n")
+        _check_git(repo, "add", "seed.txt")
         subprocess.run(
             [
                 "git",
