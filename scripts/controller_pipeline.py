@@ -126,10 +126,24 @@ def _contract(entry: RegistryEntry, objective: str, inputs: dict[str, dict]) -> 
     return contract
 
 
-def _read_result(path: Path) -> dict | None:
+def _read_result(path: Path, errors: list[str] | None = None) -> dict | None:
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        if errors is not None:
+            errors.append(f"{RESULT_FILE}: invalid JSON: {exc}")
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        if errors is not None:
+            errors.append(f"{RESULT_FILE}: unreadable: {exc}")
+        return None
+    if not isinstance(result, dict):
+        if errors is not None:
+            errors.append(f"{RESULT_FILE}: expected JSON object, got {type(result).__name__}")
+        return None
+    return result
 
 
 def _controller_journal_root(repo: Path) -> Path:
@@ -218,6 +232,9 @@ def _stage_record(repo: Path, role: str, entry: RegistryEntry, contract: dict, r
                   result_path: Path | None, result_sha256: str | None, report_dict: dict,
                   stage_run_id: str, stage_ok: bool, started_at: datetime, finished_at: datetime) -> dict:
     journal_dir = _stage_journal_dir(repo, stage_run_id)
+    stage_errors = report_dict.get("stage_errors")
+    if not isinstance(stage_errors, list):
+        stage_errors = []
     return {
         "role": role,
         "run_id": stage_run_id,
@@ -228,6 +245,7 @@ def _stage_record(repo: Path, role: str, entry: RegistryEntry, contract: dict, r
         "journal_path": str(journal_dir / "journal.jsonl"),
         "report_ok": bool(report_dict.get("ok")),
         "stage_ok": stage_ok,
+        "stage_errors": stage_errors,
         "events": _freeze_events(report_dict),
         "timing": {
             "started_at": _iso8601_utc(started_at),
@@ -237,6 +255,29 @@ def _stage_record(repo: Path, role: str, entry: RegistryEntry, contract: dict, r
     }
 
 
+def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
+                   stage_run_id: str, cache: bool) -> tuple[bool, dict | None, dict, dict]:
+    contract = _contract(entry, objective, inputs)
+    started_at = _utc_now()
+    stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
+        repo, entry, contract, stage_run_id, cache
+    )
+    finished_at = _utc_now()
+    report_dict = report.to_dict()
+    _record_stage_errors(report_dict, stage_errors)
+    stage = _stage_record(repo, role, entry, contract, result, result_path, result_sha256,
+                          report_dict, stage_run_id, stage_ok, started_at, finished_at)
+    return stage_ok, result, report_dict, stage
+
+
+def _store_stage_output(role: str, entry: RegistryEntry, result: dict | None,
+                        report_dict: dict, results: dict[str, dict]) -> None:
+    if result is not None:
+        results[role] = result
+    elif entry.write_scope:
+        results[role] = _stage_output_for_write_role(role, report_dict)
+
+
 def _write_manifest(repo: Path, run_id: str, manifest: dict) -> Path:
     path = _manifest_path(repo, run_id)
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
@@ -244,17 +285,49 @@ def _write_manifest(repo: Path, run_id: str, manifest: dict) -> Path:
     return path
 
 
-def _provenance_manifest(started_at: datetime, finished_at: datetime, stages: list[dict]) -> dict:
+def _linon_findings(result: dict | str | None) -> list[dict]:
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(result, dict):
+        return []
+    findings = result.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return [finding for finding in findings if isinstance(finding, dict)]
+
+
+def _iteration_record(kind: str, iteration: int, started_at: datetime, finished_at: datetime,
+                      stages: list[dict], linon_findings_count: int) -> dict:
     return {
+        "kind": kind,
+        "iteration": iteration,
         "started_at": _iso8601_utc(started_at),
         "finished_at": _iso8601_utc(finished_at),
+        "duration_seconds": max(0.0, (finished_at - started_at).total_seconds()),
+        "linon_findings_count": linon_findings_count,
         "stages": stages,
     }
 
 
-def _preserve_result(repo: Path, stage_run_id: str) -> tuple[dict | None, Path | None, str | None]:
+def _provenance_manifest(started_at: datetime, finished_at: datetime, stages: list[dict],
+                         iterations: list[dict] | None = None) -> dict:
+    manifest = {
+        "started_at": _iso8601_utc(started_at),
+        "finished_at": _iso8601_utc(finished_at),
+        "stages": stages,
+    }
+    if iterations is not None:
+        manifest["iterations"] = iterations
+    return manifest
+
+
+def _preserve_result(repo: Path, stage_run_id: str,
+                     errors: list[str] | None = None) -> tuple[dict | None, Path | None, str | None]:
     result_path = repo / RESULT_FILE
-    result = _read_result(result_path)
+    result = _read_result(result_path, errors)
     if result is None:
         return None, None, None
     preserved_path = _stage_journal_dir(repo, stage_run_id) / RESULT_FILE
@@ -264,20 +337,36 @@ def _preserve_result(repo: Path, stage_run_id: str) -> tuple[dict | None, Path |
 
 
 def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
-               cache: bool) -> tuple[bool, dict | None, Path | None, str | None, object]:
+               cache: bool) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
     result_path = repo / RESULT_FILE
     if result_path.exists():
         result_path.unlink()
     report = controller_run.run(repo, contract, run_id, cache=cache)
     if entry.write_scope:
         stage_ok = bool(report.ok)
-        return stage_ok, None, None, None, report
-    result, preserved_path, result_sha256 = _preserve_result(repo, run_id)
+        return stage_ok, None, None, None, report, []
+    stage_errors: list[str] = []
+    result, preserved_path, result_sha256 = _preserve_result(repo, run_id, stage_errors)
     stage_ok = bool(report.ok) and result is not None
-    return stage_ok, result, preserved_path, result_sha256, report
+    return stage_ok, result, preserved_path, result_sha256, report, stage_errors
 
 
-def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True) -> dict:
+def _record_stage_errors(report_dict: dict, stage_errors: list[str]) -> None:
+    if not stage_errors:
+        return
+    report_dict["stage_errors"] = list(stage_errors)
+    unresolved = report_dict.get("unresolved_failures")
+    if isinstance(unresolved, list):
+        unresolved.extend(stage_errors)
+    else:
+        report_dict["unresolved_failures"] = list(stage_errors)
+
+
+def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
+                 max_repair_iterations: int = 3) -> dict:
+    if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
+        raise ValueError("max_repair_iterations must be a non-negative integer")
+
     repo = Path(repo).resolve()
     run_id = _validate_run_id(repo, run_id)
     entries = _entries(repo)
@@ -291,65 +380,114 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True) -> di
     required_ok: dict[str, bool] = {}
     terminal_write_roles: list[str] = []
     stages: list[dict] = []
+    iterations: list[dict] = []
     run_started_at = _utc_now()
+    pipeline_failed = False
 
     for role in ordered:
         entry = entries[role]
         inputs = {upstream: results[upstream] for upstream in predecessors[role] if upstream in results}
         stage_run_id = f"{run_id}-{role}"
-        contract = _contract(entry, objective, inputs)
-        started_at = _utc_now()
-        stage_ok, result, result_path, result_sha256, report = _run_stage(repo, entry, contract, stage_run_id, cache)
-        finished_at = _utc_now()
-        report_dict = report.to_dict()
-        summary[role] = bool(report.ok)
+        stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
+                                                              inputs, stage_run_id, cache)
+        summary[role] = bool(report_dict.get("ok"))
         required_ok[role] = stage_ok
         reports[role] = report_dict
-        stages.append(_stage_record(repo, role, entry, contract, result, result_path, result_sha256,
-                                    report_dict, stage_run_id, stage_ok, started_at, finished_at))
-        if result is not None:
-            results[role] = result
-        elif entry.write_scope:
-            results[role] = _stage_output_for_write_role(role, report_dict)
+        stages.append(stage)
+        _store_stage_output(role, entry, result, report_dict, results)
         if entry.output_to is None and entry.write_scope:
             terminal_write_roles.append(role)
         if not stage_ok:
-            manifest = _provenance_manifest(run_started_at, _utc_now(), stages)
-            manifest_path = _write_manifest(repo, run_id, manifest)
-            return {
-                "summary": summary,
-                "required_ok": required_ok,
-                "order": list(summary),
-                "reports": reports,
-                "results": results,
-                "manifest": manifest,
-                "manifest_path": str(manifest_path),
-            }
-
-    verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
-    for role in sorted(verifiers):
-        entry = entries[role]
-        stage_run_id = f"{run_id}-{role}"
-        contract = _contract(entry, objective, verifier_inputs)
-        started_at = _utc_now()
-        stage_ok, result, result_path, result_sha256, report = _run_stage(repo, entry, contract, stage_run_id, cache)
-        finished_at = _utc_now()
-        report_dict = report.to_dict()
-        summary[role] = bool(report.ok)
-        required_ok[role] = stage_ok
-        reports[role] = report_dict
-        stages.append(_stage_record(repo, role, entry, contract, result, result_path, result_sha256,
-                                    report_dict, stage_run_id, stage_ok, started_at, finished_at))
-        if result is not None:
-            results[role] = result
-        if not stage_ok:
+            pipeline_failed = True
             break
 
-    manifest = _provenance_manifest(run_started_at, _utc_now(), stages)
+    if not pipeline_failed:
+        verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
+        for role in sorted(verifiers):
+            entry = entries[role]
+            stage_run_id = f"{run_id}-{role}"
+            stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
+                                                                  verifier_inputs, stage_run_id, cache)
+            summary[role] = bool(report_dict.get("ok"))
+            required_ok[role] = stage_ok
+            reports[role] = report_dict
+            stages.append(stage)
+            _store_stage_output(role, entry, result, report_dict, results)
+            if not stage_ok:
+                pipeline_failed = True
+                break
+
+    initial_finished_at = _utc_now()
+    findings = _linon_findings(results.get("linon"))
+    iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
+                                        list(stages), len(findings)))
+
+    repair_iterations = 0
+    producer_roles = {
+        role for role, entry in entries.items()
+        if entry.output_to == "aufheben-designer" and not entry.write_scope
+    }
+    repair_forward_roles = [
+        role for role in ordered
+        if role in producer_roles or role in {"aufheben-designer", "implementer"}
+    ]
+
+    while findings and not pipeline_failed and repair_iterations < max_repair_iterations:
+        repair_iterations += 1
+        repair_started_at = _utc_now()
+        repair_stages: list[dict] = []
+        linon_context = dict(results.get("linon") or {})
+        linon_context["repair_iteration"] = repair_iterations
+
+        for role in repair_forward_roles:
+            entry = entries[role]
+            if role in producer_roles:
+                inputs = {"linon": linon_context}
+            else:
+                inputs = {upstream: results[upstream]
+                          for upstream in predecessors[role] if upstream in results}
+            stage_run_id = f"{run_id}-repair{repair_iterations}-{role}"
+            stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
+                                                                  inputs, stage_run_id, cache)
+            summary[role] = bool(report_dict.get("ok"))
+            required_ok[role] = stage_ok
+            reports[role] = report_dict
+            stages.append(stage)
+            repair_stages.append(stage)
+            _store_stage_output(role, entry, result, report_dict, results)
+            if not stage_ok:
+                pipeline_failed = True
+                break
+
+        if not pipeline_failed and "linon" in entries:
+            verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
+            entry = entries["linon"]
+            stage_run_id = f"{run_id}-repair{repair_iterations}-linon"
+            stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective,
+                                                                  verifier_inputs, stage_run_id, cache)
+            summary["linon"] = bool(report_dict.get("ok"))
+            required_ok["linon"] = stage_ok
+            reports["linon"] = report_dict
+            stages.append(stage)
+            repair_stages.append(stage)
+            _store_stage_output("linon", entry, result, report_dict, results)
+            if not stage_ok:
+                pipeline_failed = True
+
+        findings = _linon_findings(results.get("linon"))
+        repair_finished_at = _utc_now()
+        iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
+                                            repair_stages, len(findings)))
+
+    converged = bool(required_ok.get("linon")) and not findings
+    manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
     manifest_path = _write_manifest(repo, run_id, manifest)
     return {"summary": summary, "required_ok": required_ok, "order": list(summary),
             "reports": reports, "results": results, "manifest": manifest,
-            "manifest_path": str(manifest_path)}
+            "manifest_path": str(manifest_path), "converged": converged,
+            "repair_iterations": repair_iterations,
+            "max_repair_iterations": max_repair_iterations,
+            "linon_findings_count": len(findings)}
 
 
 def main(argv=None) -> int:
@@ -357,13 +495,15 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--objective", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--max-repair-iterations", type=int, default=3)
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
 
-    result = run_pipeline(args.repo, args.objective, args.run_id, cache=not args.no_cache)
+    result = run_pipeline(args.repo, args.objective, args.run_id, cache=not args.no_cache,
+                          max_repair_iterations=args.max_repair_iterations)
     print(json.dumps(result["summary"], indent=2, ensure_ascii=False))
     print(f"provenance_manifest: {result['manifest_path']}")
-    return 0 if all(result["required_ok"].values()) else 1
+    return 0 if all(result["required_ok"].values()) and result["converged"] else 1
 
 
 if __name__ == "__main__":
