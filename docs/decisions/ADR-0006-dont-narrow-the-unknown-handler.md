@@ -73,11 +73,12 @@ with that purpose:
 ## Consequences
 
 - **Build∥review pipelining is implemented** (the field-preserving lever) and measured
-  against the serial baseline (serial role build ≈ 4075s). The reclaim is **less than
-  Linon's 30% share**, because the final stage's review has nothing to hide under (an
-  untouchable tail) and because two concurrent carriers contend on the same API rate limit
-  (the coordination tax — real parallelism < theoretical). The exact A/B number is recorded
-  with the run.
+  against the serial baseline. Six-stage A/B: **serial 4074s → pipelined 3124s = 23.3%
+  reclaim (1.30×)**. Of Linon's 30% share, **77% was hidden under the next build**; the
+  unreclaimed remainder is the final stage's review (an untouchable tail, nothing to hide
+  under) plus contention between two concurrent carriers on the same API rate limit (the
+  coordination tax — real parallelism < theoretical). The reclaim is real but below Linon's
+  full share, which is the expected shape, not a disappointment.
 - **Cone scoping and cache-skip are deferred** behind a seeded-bug recall measurement that
   must include non-graph coupling. They are documented here as candidates, not decisions.
 - **Statelessness is kept, deliberately.** Linon carries no memory between turns and may
