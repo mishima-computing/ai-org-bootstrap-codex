@@ -8,8 +8,10 @@ to a committed replayable artifact or be labeled **Hypothesis**.
 | --- | --- | --- |
 | A motivating session used chat steering rather than hand-editing as the owner-facing action. | ADR-0007 | **Hypothesis.** No committed replayable artifact in this repository. |
 | The cockpit components -- map, org dispatch, Linon review, growth view, and role/cost substrate -- have all been validated together. | ADR-0007 | **Hypothesis.** ADR-0007 now states the integration direction and does not claim live integrated validation. |
+| The deterministic codebase-city layout is already secured as a pure function of the repo. | ADR-0007 | **Hypothesis.** No committed replayable artifact in this repository. |
 | Existing map, review, growth view, role-timing, and org-dispatch pieces can be bound into a live cockpit without a new product primitive. | ADR-0007 | **Hypothesis.** Pending implementation and live verification. |
 | A sibling edition was built by this org, so one org composed another org. | ADR-0008 | **Hypothesis.** External/pending evidence; no committed replayable artifact in this repository. |
+| `ai-org-tools` and Corps are referenced as files or packages present in this repository. | ADR-0008 | **Rejected wording.** ADR-0008 now identifies them as external/sibling references, not in-repo files or packages. |
 | Lower-trust carriers can be safe under containment, logging, and verification. | ADR-0008, ADR-0012 | **Hypothesis** until a committed containment design, log bundle, and ADR-0013 live verification artifact exist. ADR-0012 is the policy boundary, not proof. |
 | Swapping an agent can be checked as runtime-compatible by Linon alone. | ADR-0009 | **Rejected wording.** ADR-0013 separates static Linon from live smoke/battery verification. |
 | Parallel carriers produced 2-3 effective lanes in the motivating work. | ADR-0009 | **Hypothesis.** No committed replayable measurement artifact in this repository. |

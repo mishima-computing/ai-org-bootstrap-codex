@@ -78,9 +78,9 @@ Evidence status:
 - **The file buffer becomes a drop-to detail**, not the centre — the assembly analogy made
   literal in the UI.
 - **Determinism is a hard requirement, not polish.** An interactive map needs stable
-  positions for spatial memory and reliable hover/click targets. Already secured: a layout
-  that is a pure function of the repo (package-hierarchy roads; set-order non-determinism
-  removed).
+  positions for spatial memory and reliable hover/click targets. **Hypothesis:** the
+  deterministic-layout claim remains unpromoted until a committed replayable artifact is
+  referenced; see `docs/evidence/ADR-0011-claim-ledger.md`.
 - **Honest risk — the niche graveyard.** Software-city visualisations have repeatedly stayed
   niche demos (CodeCity, Sourcetrail, and others). Pretty ≠ daily driver. The city earns
   daily use **only** as the cockpit — where AI work is *done* and *understood* — never as a
