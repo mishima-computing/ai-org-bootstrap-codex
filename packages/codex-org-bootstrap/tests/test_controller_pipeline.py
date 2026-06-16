@@ -176,6 +176,174 @@ class ControllerPipelineTests(unittest.TestCase):
         implementer_stage = [stage for stage in result["manifest"]["stages"] if stage["role"] == "implementer"][0]
         self.assertEqual(implementer_stage["artifact"]["diff_artifact"]["sha256"], "diff-sha-implementer")
 
+    def test_linon_findings_trigger_repair_loop_until_converged(self):
+        linon_runs = 0
+
+        def _repair_run(repo, contract, run_id, *, cache=True):
+            nonlocal linon_runs
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": f"impl-{len([call for call in self.calls if call[0] == role])}",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "required_checks": [
+                            "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
+                        ],
+                        "received_from": sorted(payload["inputs"]),
+                    }
+                elif role == "linon":
+                    linon_runs += 1
+                    result = {
+                        "profile_id": "linon-review",
+                        "findings": [{
+                            "file": "scripts/controller_pipeline.py",
+                            "line_range": {"start": 1, "end": 1},
+                            "severity": "major",
+                            "lens": "silent-failure",
+                            "basis": "static-read",
+                            "claim": "first pass finding",
+                            "evidence_ref": "scripts/controller_pipeline.py:1",
+                        }] if linon_runs == 1 else [],
+                        "criterion_verdicts": [],
+                        "gaps": [],
+                    }
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _repair_run
+
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+
+        self.assertTrue(result["converged"])
+        self.assertEqual(result["repair_iterations"], 1)
+        self.assertEqual([call[0] for call in self.calls], [
+            "aggressive-designer",
+            "conservative-designer",
+            "functional-ci-action-writer",
+            "genius",
+            "nonfunctional-ci-action-writer",
+            "security-ci-action-writer",
+            "aufheben-designer",
+            "implementer",
+            "linon",
+            "stefan",
+            "aggressive-designer",
+            "conservative-designer",
+            "genius",
+            "aufheben-designer",
+            "implementer",
+            "linon",
+        ])
+
+        repair_designer_payload = self.calls[10][1]
+        self.assertEqual(repair_designer_payload["inputs"]["linon"]["findings"][0]["claim"],
+                         "first pass finding")
+        self.assertEqual(repair_designer_payload["objective"], "wire declared org")
+
+        self.assertEqual(len(result["manifest"]["iterations"]), 2)
+        self.assertEqual(result["manifest"]["iterations"][0]["kind"], "initial")
+        self.assertEqual(result["manifest"]["iterations"][1]["kind"], "repair")
+        self.assertRegex(result["manifest"]["iterations"][0]["started_at"], ISO8601_UTC)
+        self.assertRegex(result["manifest"]["iterations"][1]["finished_at"], ISO8601_UTC)
+        self.assertEqual(
+            [stage["role"] for stage in result["manifest"]["iterations"][1]["stages"]],
+            ["aggressive-designer", "conservative-designer", "genius",
+             "aufheben-designer", "implementer", "linon"],
+        )
+        self.assertEqual(result["manifest"]["iterations"][0]["linon_findings_count"], 1)
+        self.assertEqual(result["manifest"]["iterations"][1]["linon_findings_count"], 0)
+
+    def test_linon_findings_stop_at_repair_iteration_cap(self):
+        linon_runs = 0
+
+        def _capped_run(repo, contract, run_id, *, cache=True):
+            nonlocal linon_runs
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": f"impl-{len([call for call in self.calls if call[0] == role])}",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "required_checks": [
+                            "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
+                        ],
+                        "received_from": sorted(payload["inputs"]),
+                    }
+                elif role == "linon":
+                    linon_runs += 1
+                    result = {
+                        "profile_id": "linon-review",
+                        "findings": [{
+                            "file": "scripts/controller_pipeline.py",
+                            "line_range": {"start": 1, "end": 1},
+                            "severity": "major",
+                            "lens": "silent-failure",
+                            "basis": "static-read",
+                            "claim": f"finding {linon_runs}",
+                            "evidence_ref": "scripts/controller_pipeline.py:1",
+                        }],
+                        "criterion_verdicts": [],
+                        "gaps": [],
+                    }
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _capped_run
+
+        result = pipeline.run_pipeline(
+            ROOT, "wire declared org", "pipe-test", cache=False, max_repair_iterations=2
+        )
+
+        self.assertFalse(result["converged"])
+        self.assertEqual(result["repair_iterations"], 2)
+        self.assertEqual(result["max_repair_iterations"], 2)
+        self.assertEqual(result["linon_findings_count"], 1)
+        self.assertEqual(linon_runs, 3)
+        self.assertEqual([iteration["iteration"] for iteration in result["manifest"]["iterations"]], [0, 1, 2])
+        self.assertEqual([iteration["kind"] for iteration in result["manifest"]["iterations"]],
+                         ["initial", "repair", "repair"])
+        self.assertEqual([iteration["linon_findings_count"] for iteration in result["manifest"]["iterations"]],
+                         [1, 1, 1])
+        for iteration in result["manifest"]["iterations"][1:]:
+            self.assertEqual(
+                [stage["role"] for stage in iteration["stages"]],
+                ["aggressive-designer", "conservative-designer", "genius",
+                 "aufheben-designer", "implementer", "linon"],
+            )
+
+    def test_malformed_result_json_fails_stage_without_crashing(self):
+        def _malformed_run(repo, contract, run_id, *, cache=True):
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                (Path(repo) / pipeline.RESULT_FILE).write_text("{not valid json", encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _malformed_run
+
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+
+        self.assertFalse(result["required_ok"]["aggressive-designer"])
+        self.assertFalse(result["converged"])
+        first_stage = result["manifest"]["stages"][0]
+        self.assertFalse(first_stage["stage_ok"])
+        self.assertIn("result.json: invalid JSON", first_stage["stage_errors"][0])
+        self.assertIsNone(first_stage["artifact"]["result"])
+        self.assertIsNone(first_stage["artifact"]["result_path"])
+        self.assertIsNone(first_stage["artifact"]["result_sha256"])
+
     def test_run_id_must_be_safe_single_path_segment(self):
         for bad_run_id in ["", "/", ".", "..", "../escape", "nested/run", "nested\\run"]:
             with self.subTest(run_id=bad_run_id):
