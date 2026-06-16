@@ -1,0 +1,50 @@
+[
+ {
+  "tag": "G-ingraph-full",
+  "seconds": 112,
+  "web": 0,
+  "findings_file": "/tmp/linon-exp/findings-G-ingraph-full.txt",
+  "chars": 39197,
+  "bug": "G-ingraph",
+  "scope": "full",
+  "modules_py": 47,
+  "schema_present": true,
+  "bug_applied": true
+ },
+ {
+  "tag": "G-ingraph-cone",
+  "seconds": 189,
+  "web": 0,
+  "findings_file": "/tmp/linon-exp/findings-G-ingraph-cone.txt",
+  "chars": 87217,
+  "bug": "G-ingraph",
+  "scope": "cone",
+  "modules_py": 13,
+  "schema_present": false,
+  "bug_applied": true
+ },
+ {
+  "tag": "N-nongraph-full",
+  "seconds": 129,
+  "web": 0,
+  "findings_file": "/tmp/linon-exp/findings-N-nongraph-full.txt",
+  "chars": 39776,
+  "bug": "N-nongraph",
+  "scope": "full",
+  "modules_py": 47,
+  "schema_present": true,
+  "bug_applied": true
+ },
+ {
+  "tag": "N-nongraph-cone",
+  "seconds": 254,
+  "web": 0,
+  "findings_file": "/tmp/linon-exp/findings-N-nongraph-cone.txt",
+  "chars": 82945,
+  "bug": "N-nongraph",
+  "scope": "cone",
+  "modules_py": 4,
+  "schema_present": false,
+  "bug_applied": true
+ }
+]
