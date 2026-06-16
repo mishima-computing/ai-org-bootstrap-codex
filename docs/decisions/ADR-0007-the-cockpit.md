@@ -7,13 +7,11 @@ Accepted. (Owner-articulated product positioning for the Shagiri observation sur
 ## Context
 
 As the AI org authors more of the code, the human bottleneck moves from **writing** to
-**understanding, steering, and reviewing**. This is not a forecast — it is what already
-happens. The session that produced this ADR built an arcade, fixed its roads, ran a Linon
-recall experiment, measured role-level timing, and wrote ADR-0006 — and the owner **never
-hand-edited a file**. He steered in a chat box ("the roads don't connect", "fix the
-camera"); the org dispatched carriers; the god-hand growth showed it building; Linon
-reviewed. The working session was a manual, terminal-bound run of the very tool described
-here.
+**understanding, steering, and reviewing**. The product direction is decided even where the
+supporting measurements are still evidence-gated: the cockpit assumes the human's primary
+unit of action is *express intent + judge the result*. Session anecdotes that motivated this
+ADR are treated as hypotheses unless they are backed by committed, replayable artifacts; see
+the claim ledger in `docs/evidence/ADR-0011-claim-ledger.md`.
 
 So hand-editing code is **demoted** — from the centre of the workflow to a detail you
 rarely open. Like assembly: still reachable, you can drop to it, but you do not live there.
@@ -56,25 +54,26 @@ file buffer** but four channels:
    those buildings light up). Persisted provenance is also what makes lower-trust carriers
    auditable — trust by inspection, not faith.
 
-## The loop already runs — the product is the BINDING, not new capability
+## The product is the BINDING
 
-Every component was validated in the session that wrote this:
+The decisive direction is integration: bind map -> chat -> org so the conversation is
+spatial and results render back onto the city. The cockpit is not a claim that every
+component has already been validated as a live integrated product.
 
-- the org that **builds** (carriers, host or boxed),
-- the **verifier** (Linon — and ADR-0006 established that its sharpness is load-bearing and
-  must not be narrowed),
-- the **map** (a deterministic, interactive codebase-city; positions stable run-to-run),
-- the **growth view** (the god-hand placing/relocating buildings),
-- the cost/role substrate (role-level timing; build∥review pipelining).
+Evidence status:
 
-What remains is **integration**: bind map ↔ chat ↔ org so the conversation is spatial and
-results render back onto the city live. No new capability is invented. Today's terminal
-session is a working, unbound prototype of the cockpit.
+- **Committed direction:** the cockpit consists of map, intent, review, and provenance.
+- **Committed evidence reference:** claims retained from the motivating sessions are tracked
+  in `docs/evidence/ADR-0011-claim-ledger.md`.
+- **Hypothesis:** the existing map, review, growth view, role-timing, and org-dispatch
+  pieces can be bound into a live cockpit without discovering a new product primitive.
+- **Not claimed:** static Linon review or terminal-session output proves live runtime
+  compatibility of the integrated cockpit.
 
 ## Consequences
 
-- **Build order: bind, don't invent.** Wire (a) map selection → chat context, (b) chat
-  intent → scoped org dispatch, (c) org result (diff + Linon verdict + god-hand build) →
+- **Build order: bind, don't invent.** Wire (a) map selection -> chat context, (b) chat
+  intent -> scoped org dispatch, (c) org result (diff + Linon verdict + god-hand build) ->
   live city update. The hard parts exist; the work is the wiring.
 - **The file buffer becomes a drop-to detail**, not the centre — the assembly analogy made
   literal in the UI.
@@ -88,12 +87,12 @@ session is a working, unbound prototype of the cockpit.
   picture. Stickiness comes from steering and comprehension, not aesthetics. (This is the
   grounding-not-illustration discipline applied to the product.)
 - **Relationship to Shagiri.** The cockpit is the productised Shagiri **observation** axis
-  (B) fronting the AI-org **execution** axis (A). The city is the human surface; the box /
-  microVM containment is what makes heterogeneous, lower-trust carriers (e.g. a DeepSeek
-  edition) safe to run beneath it.
+  (B) fronting the AI-org **execution** axis (A). The city is the human surface; heterogeneous,
+  lower-trust carriers are product-level only under the containment boundary of ADR-0012,
+  not new invocation paths in this repository.
 - **Persistence is foundational, not a feature.** The provenance channel requires durable
   storage of conversations + agent logs, linked to the artifacts (and buildings) they
-  produced. This also closes a standing gap: prior runs left their outputs in volatile `/tmp`.
+  produced. Volatile files and chat memory are not proof under ADR-0011.
 - **Extends ADR-0005 and ADR-0006.** There we refused to dumb the *implementer* or narrow
   the *verifier* — protecting the org's intelligence. Here we name the **human's** new role:
   steer and judge, not edit — and define the surface built for it.
