@@ -97,7 +97,7 @@ class CacheTests(unittest.TestCase):
                                          include_builtin_gates=False, cache_enabled=True, clock=lambda: 1)
             self.assertTrue(rep2.ok)
             self.assertEqual(calls["n"], 1)                 # carrier not re-run
-            self.assertEqual((r / "out.txt").read_text(), "carrier output v1")  # replayed
+            self.assertEqual((r / "out.txt").read_text(encoding="utf-8"), "carrier output v1")  # replayed
             self.assertIn("out.txt", rep2.changed_files)
 
     def test_cache_miss_on_different_state(self):
@@ -156,7 +156,7 @@ class LinonFixTests(unittest.TestCase):
             key = cache.contract_key({"role": "implementer"}, st)
             cache.store(r, key, st, snap, {"ok": True, "attempts": []})
             bpath = r / ".agent-runs" / "controller" / "cache" / f"{key}.json"
-            b = json.loads(bpath.read_text())
+            b = json.loads(bpath.read_text(encoding="utf-8"))
             b["changed"] = b["changed"] + ["sneaky.txt"]   # tamper without fixing manifest
             bpath.write_text(json.dumps(b))
             self.assertIsNone(cache.lookup(r, key, st))     # integrity check rejects it

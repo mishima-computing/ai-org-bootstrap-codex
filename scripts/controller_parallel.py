@@ -19,7 +19,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", str(repo), *args],
         check=False,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         stdin=subprocess.DEVNULL,
     )
 
@@ -177,7 +177,7 @@ def _self_test() -> None:
             ],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL,
         )
 

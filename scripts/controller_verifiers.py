@@ -37,7 +37,7 @@ def run_verifier(name: str, argv: list[str], *, cwd=None, evidence_dir=None,
     proc_env = {**os.environ, **env} if env else None
     try:
         cp = subprocess.run(argv, cwd=str(cwd) if cwd else None, capture_output=True,
-                            text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=proc_env)
+                            text=True, encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL, env=proc_env)
         out, code = (cp.stdout or "") + (cp.stderr or ""), cp.returncode
         status = "pass" if code == 0 else "fail"
     except subprocess.TimeoutExpired:

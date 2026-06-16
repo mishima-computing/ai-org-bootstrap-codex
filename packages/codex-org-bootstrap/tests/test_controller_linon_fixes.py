@@ -117,7 +117,7 @@ class LinonFixTests(unittest.TestCase):
             j.append("a", {"v": 1}); j.append("b", {"v": 2})
             self.assertEqual(len(j.events(verify=True)), 2)  # clean chain verifies
             # tamper: rewrite the first event's payload
-            lines = j.path.read_text().splitlines()
+            lines = j.path.read_text(encoding="utf-8").splitlines()
             e0 = json.loads(lines[0]); e0["v"] = 999
             lines[0] = json.dumps(e0)
             j.path.write_text("\n".join(lines) + "\n")
@@ -133,7 +133,7 @@ class LinonFixTests(unittest.TestCase):
             r = _repo(d)
             (r / "new_deliverable.txt").write_text("carrier made this")  # untracked
             art = carrier_harness.diff_artifact(r, r / ".agent-runs" / "diff.patch")
-            body = (r / ".agent-runs" / "diff.patch").read_text()
+            body = (r / ".agent-runs" / "diff.patch").read_text(encoding="utf-8")
             self.assertIn("new_deliverable.txt", body)
             self.assertGreaterEqual(art["untracked_count"], 1)
 

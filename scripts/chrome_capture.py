@@ -484,7 +484,7 @@ def browser_class_user_agent_for_chrome_version(version_output: str) -> str | No
 
 def chrome_version_output(binary: str) -> str | None:
     try:
-        completed = subprocess.run([binary, "--version"], check=False, text=True, capture_output=True, timeout=5)
+        completed = subprocess.run([binary, "--version"], check=False, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if completed.returncode != 0:
@@ -553,7 +553,7 @@ def chrome_run(
         argv.append(f"--screenshot={screenshot_path}")
     argv.append(url)
     try:
-        completed = subprocess.run(argv, check=False, text=True, capture_output=True, timeout=timeout_seconds)
+        completed = subprocess.run(argv, check=False, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout_seconds)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ChromeUnavailableError(f"Chrome launch failed: {exc}") from exc
     if completed.returncode != 0:

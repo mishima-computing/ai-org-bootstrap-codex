@@ -344,7 +344,7 @@ def git_run(
     return subprocess.run(
         ["git", *args],
         cwd=repo_root,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         capture_output=True,
         check=False,
         env=env,
@@ -468,7 +468,7 @@ def validate_fixture_diff(diff_path: Path) -> list[str]:
     proc = subprocess.run(
         ["git", "apply", "--check", str(diff_path)],
         cwd=ROOT,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         capture_output=True,
         check=False,
     )

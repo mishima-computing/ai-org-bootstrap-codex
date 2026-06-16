@@ -40,7 +40,7 @@ def probe(name: str) -> str | None:
 def _run(argv: list[str], cwd: Path, timeout: int = TOOL_TIMEOUT):
     """Return (returncode, stdout, stderr, timed_out). Bounded; stdin closed."""
     try:
-        cp = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, check=False,
+        cp = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
                             timeout=timeout, stdin=subprocess.DEVNULL)
         return cp.returncode, cp.stdout or "", cp.stderr or "", False
     except subprocess.TimeoutExpired:
@@ -48,7 +48,7 @@ def _run(argv: list[str], cwd: Path, timeout: int = TOOL_TIMEOUT):
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
                           check=False, timeout=60).stdout
 
 

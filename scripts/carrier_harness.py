@@ -55,7 +55,7 @@ def compose_prompt(prompt: str, discipline: str, prepend_discipline: bool) -> st
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=False, text=True,
+    return subprocess.run(["git", "-C", str(repo), *args], check=False, text=True, encoding="utf-8", errors="replace",
                           capture_output=True).stdout
 
 
@@ -134,7 +134,7 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
             cp = subprocess.run(
                 argv,
                 stdin=subprocess.DEVNULL,   # <-- THE enforcement: codex never waits on stdin
-                capture_output=True, text=True, timeout=timeout, cwd=str(repo),
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=str(repo),
             )
             stdout, stderr, code, timed_out = cp.stdout, cp.stderr, cp.returncode, False
         except subprocess.TimeoutExpired as exc:
@@ -173,7 +173,7 @@ def cmd_run(args) -> int:
         "scope_deviations": deviations, "scope_ok": not deviations,
         "diff_artifact": artifact, "attempts": result["attempts"],
     }
-    (out_dir / "carrier-report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    (out_dir / "carrier-report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     for a in result["attempts"]:
         print(f"  attempt {a['attempt']}: exit={a['exit']} timed_out={a['timed_out']} stdin_hang={a['stdin_hang']}")
     print(f"  changed: {len(changed)} files; scope deviations: {deviations or 'none'}")

@@ -17,7 +17,7 @@ def run_verify(packet: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(VERIFY), str(packet)],
         cwd=ROOT,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
