@@ -30,7 +30,7 @@ thing that is ending.
 Position the product **not as a better editor but as the cockpit for an AI software org** —
 a comprehension + orchestration surface for the era when humans do not write most of the
 code. A different category, not a Cursor competitor: its successor. Its centre is **not a
-file buffer** but three channels:
+file buffer** but four channels:
 
 1. **Map — comprehend.** The deterministic codebase-city. Buildings = modules (height ∝
    size); **roads = package structure** (the address system: where a thing lives); **hover =
@@ -44,6 +44,17 @@ file buffer** but three channels:
 
 3. **Review — judge.** The build is watched (the god-hand growth) and adversarially reviewed
    (Linon), surfaced inline. Correction is **re-steering, not hand-editing**.
+
+4. **Provenance — remember.** Every utterance is persisted: the human↔orchestrator
+   conversation AND every worker-agent's log (designer proposals, carrier reasoning, Linon
+   findings). This inverts what "source" means: code is the *output*; the **conversation is
+   the source** (the WHY/intent) and the agent logs are the HOW (the org's reasoning), while
+   git keeps only the WHAT. Each building carries its **story** — the conversation that asked
+   for it, the agents that built it, the review that passed it — so click-detail history is
+   dialogue + provenance, not just commits. It also adds a navigation axis: query the map by
+   the *intent* that produced a region ("what came from the score-signing discussion?" →
+   those buildings light up). Persisted provenance is also what makes lower-trust carriers
+   auditable — trust by inspection, not faith.
 
 ## The loop already runs — the product is the BINDING, not new capability
 
@@ -80,6 +91,9 @@ session is a working, unbound prototype of the cockpit.
   (B) fronting the AI-org **execution** axis (A). The city is the human surface; the box /
   microVM containment is what makes heterogeneous, lower-trust carriers (e.g. a DeepSeek
   edition) safe to run beneath it.
+- **Persistence is foundational, not a feature.** The provenance channel requires durable
+  storage of conversations + agent logs, linked to the artifacts (and buildings) they
+  produced. This also closes a standing gap: prior runs left their outputs in volatile `/tmp`.
 - **Extends ADR-0005 and ADR-0006.** There we refused to dumb the *implementer* or narrow
   the *verifier* — protecting the org's intelligence. Here we name the **human's** new role:
   steer and judge, not edit — and define the surface built for it.
