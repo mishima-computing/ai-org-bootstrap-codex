@@ -80,7 +80,8 @@ with that purpose:
   unreclaimed remainder is the final stage's review (an untouchable tail, nothing to hide
   under) plus contention between two concurrent carriers on the same API rate limit (the
   coordination tax — real parallelism < theoretical). The reclaim is real but below Linon's
-  full share, which is the expected shape, not a disappointment.
+  full share, which is the expected shape, not a disappointment. Evidence (raw data, n=1,
+  harness external): `docs/evidence/role-timing-and-pipelining.md`.
 - **Cone scoping was measured and REJECTED.** A seeded-bug experiment on a built 60-module
   repo ran Linon read-only over two bugs × two scopes (full repo vs import-cone, the cone
   pruned to whole modules only):
@@ -108,7 +109,7 @@ with that purpose:
   Net: the broad scan is a load-bearing part of *why* Linon is sharp. "Speed up Linon by
   reading less" would dumb the verifier — the ADR-0005 mistake, one role over. (web_search
   fired **0×** in all runs — these are repo-grounded bugs; the "pruning reduces web cost"
-  hypothesis needs an external-fact bug to test and remains unmeasured.)
+  hypothesis needs an external-fact bug to test and remains unmeasured.) Evidence (raw data, n=1 per cell, documented confound): `docs/evidence/cone-recall-experiment.md`.
 - **Statelessness is kept, deliberately.** Linon carries no memory between turns and may
   re-raise a finding every review — for a safety net, re-raising a still-true finding is a
   feature, and suppression is how false negatives are manufactured. Any "don't re-litigate"

@@ -1,0 +1,121 @@
+{
+  "out": "/tmp/townout/kenney-roletimed.gif",
+  "frames": 14,
+  "buildings": 18,
+  "stages": [
+    {
+      "stage": 1,
+      "role": "conservative-designer",
+      "seconds": 91.3,
+      "status": "ok"
+    },
+    {
+      "stage": 1,
+      "role": "implementer",
+      "seconds": 207.1,
+      "status": "ok"
+    },
+    {
+      "stage": 1,
+      "role": "linon",
+      "seconds": 94.1,
+      "status": "ok"
+    },
+    {
+      "stage": 2,
+      "role": "conservative-designer",
+      "seconds": 93.0,
+      "status": "ok"
+    },
+    {
+      "stage": 2,
+      "role": "implementer",
+      "seconds": 480.0,
+      "status": "timeout"
+    },
+    {
+      "stage": 2,
+      "role": "linon",
+      "seconds": 311.1,
+      "status": "ok"
+    },
+    {
+      "stage": 3,
+      "role": "conservative-designer",
+      "seconds": 173.7,
+      "status": "ok"
+    },
+    {
+      "stage": 3,
+      "role": "implementer",
+      "seconds": 480.0,
+      "status": "timeout"
+    },
+    {
+      "stage": 3,
+      "role": "linon",
+      "seconds": 225.7,
+      "status": "ok"
+    },
+    {
+      "stage": 4,
+      "role": "conservative-designer",
+      "seconds": 286.6,
+      "status": "ok"
+    },
+    {
+      "stage": 4,
+      "role": "implementer",
+      "seconds": 323.6,
+      "status": "ok"
+    },
+    {
+      "stage": 4,
+      "role": "linon",
+      "seconds": 287.9,
+      "status": "ok"
+    },
+    {
+      "stage": 5,
+      "role": "conservative-designer",
+      "seconds": 228.0,
+      "status": "ok"
+    },
+    {
+      "stage": 5,
+      "role": "implementer",
+      "seconds": 268.3,
+      "status": "ok"
+    },
+    {
+      "stage": 5,
+      "role": "linon",
+      "seconds": 169.0,
+      "status": "ok"
+    },
+    {
+      "stage": 6,
+      "role": "conservative-designer",
+      "seconds": 114.9,
+      "status": "ok"
+    },
+    {
+      "stage": 6,
+      "role": "implementer",
+      "seconds": 90.1,
+      "status": "ok"
+    },
+    {
+      "stage": 6,
+      "role": "linon",
+      "seconds": 150.2,
+      "status": "ok"
+    },
+    {
+      "stage": "total",
+      "role": "all",
+      "seconds": 4074.5,
+      "status": "build-end"
+    }
+  ]
+}

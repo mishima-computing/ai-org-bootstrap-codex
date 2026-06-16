@@ -2,7 +2,11 @@
 
 This ledger tracks retained measured, proven, validated, already-working, live-compatible, or
 cost-established claims from ADR-0007 through ADR-0010. Under ADR-0011, each claim must point
-to a committed replayable artifact or be labeled **Hypothesis**.
+to a committed artifact or be labeled **Hypothesis**. Three grades are used: **Hypothesis** (no
+committed artifact), **Evidenced (harness external)** (the raw measurement data is committed and
+inspectable here, but full re-execution needs a sibling-repo harness per ADR-0012's plane boundary;
+honestly noted with sample size), and **Rejected wording** (the claim was removed/replaced). The goal
+is better, honest ADRs — ground what is real, hedge only what is genuinely unproven; do not blanket-hedge.
 
 | Claim | ADR | Evidence status |
 | --- | --- | --- |
@@ -15,9 +19,9 @@ to a committed replayable artifact or be labeled **Hypothesis**.
 | Lower-trust carriers can be safe under containment, logging, and verification. | ADR-0008, ADR-0012 | **Hypothesis** until a committed containment design, log bundle, and ADR-0013 live verification artifact exist. ADR-0012 is the policy boundary, not proof. |
 | Swapping an agent can be checked as runtime-compatible by Linon alone. | ADR-0009 | **Rejected wording.** ADR-0013 separates static Linon from live smoke/battery verification. |
 | Parallel carriers produced 2-3 effective lanes in the motivating work. | ADR-0009 | **Hypothesis.** No committed replayable measurement artifact in this repository. |
-| Role-level timing was 45% implementer, 30% Linon, and 24% conservative-designer. | ADR-0006, ADR-0007 | **Hypothesis for ADR-0007/0010 reuse.** ADR-0006 records the figures, but no committed replayable raw measurement artifact is present. |
-| Build/review pipelining reclaimed 23.3% wall clock and hid 77% of Linon time. | ADR-0006, ADR-0007 | **Hypothesis for ADR-0007/0010 reuse.** ADR-0006 records the figures, but no committed replayable raw measurement artifact is present. |
-| The cone-recall experiment rejected dependency-cone scoping. | ADR-0006 | **Hypothesis for downstream reuse.** ADR-0006 records the experiment narrative, but no committed replayable artifact is present. |
+| Role-level timing was 45% implementer, 30% Linon, and 24% conservative-designer. | ADR-0006, ADR-0007 | **Evidenced (raw data committed; harness external, n=1).** `docs/evidence/role-timing-and-pipelining.md` + `docs/evidence/data/role-timing-serial.json` reproduce 45/30/24. |
+| Build/review pipelining reclaimed 23.3% wall clock and hid 77% of Linon time. | ADR-0006, ADR-0007 | **Evidenced (raw data committed; harness external, n=1).** `docs/evidence/role-timing-and-pipelining.md` + `data/role-timing-serial.json` + `data/role-timing-pipelined.json` (4074s → 3124s). |
+| The cone-recall experiment rejected dependency-cone scoping. | ADR-0006 | **Evidenced, with a documented confound.** `docs/evidence/cone-recall-experiment.md` + `data/cone-recall-summary.json`. The rejection rests on *unenforceability* (sandbox read leak) and *against-grain* (broad scan load-bearing), not on a clean recall delta; n=1 per cell. |
 | Tokens, compute, or API rate ceilings are the actual cost driver. | ADR-0010 | **Hypothesis.** Pending committed replayable cost measurement. |
 | Cross-carrier unit economics allow cheaper contained carriers to widen Gem generosity. | ADR-0010 | **Hypothesis.** Pending committed carrier-cost comparison and live containment evidence. |
 
