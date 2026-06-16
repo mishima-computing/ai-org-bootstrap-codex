@@ -38,6 +38,16 @@ Containment generalizes ADR-0001's trust-by-constraint intent. ADR-0001 constrai
 admitting only the local carrier family. The product constrains trust by admitting other
 carriers only inside containment, logging, and verification.
 
+### Plane Boundary
+
+Codex-only purity governs tracked runtime and shipped artifacts: code, registry entries,
+adapters, invocation paths, and packaged repository content. Git authorship metadata is a
+separate development-provenance plane, not a runtime or shipped-artifact carrier surface.
+Honest attribution, including a non-Codex AI coauthor trailer, is preserved in that
+provenance channel under ADR-0007. The residue checker intentionally excludes `.git` because
+policing authorship metadata would collapse provenance into runtime purity and would invite
+history rewrite instead of evidence discipline.
+
 ## Consequences
 
 - This repository does not gain non-Codex runtime paths.

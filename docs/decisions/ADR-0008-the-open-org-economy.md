@@ -10,10 +10,11 @@ ADR-0007 defines the cockpit: the human steers an AI org and judges the result. 
 the supply question — where do the agents and orgs come from? Three facts already in hand:
 
 - **Orgs are configuration, not code we hard-wire.** An agent is a role definition
-  (`roles/*.md`) plus carrier-independent tools (`ai-org-tools` / Corps) plus a verifier
-  spec. An org is a manifest of such roles, a topology (who hands to whom, who verifies whom,
-  serial vs parallel), and the design rules of ADR-0005/0006. The controller composes them as
-  a workflow.
+  (`roles/*.md`) plus carrier-independent tool references (`ai-org-tools` / Corps as
+  external/sibling references, not files or packages present in this repository) plus a
+  verifier spec. An org is a manifest of such roles, a topology (who hands to whom, who
+  verifies whom, serial vs parallel), and the design rules of ADR-0005/0006. The controller
+  composes them as a workflow.
 - **Composing orgs is the product direction.** The motivating dogfood claim that one org
   composed another org is retained only as a hypothesis until backed by a committed,
   replayable artifact; see `docs/evidence/ADR-0011-claim-ledger.md`. The direction remains:
@@ -48,25 +49,25 @@ Build an **open economy** of agents and orgs on top of the cockpit.
 4. **Linon is the registration gate.** Submission triggers a Linon scan; its findings (under
    NN1 — the controller independently confirms them, so the gate is not a self-report)
    determine whether the artifact may register, and surface as the listing's evidence. The
-   adversarial verifier becomes the marketplace's **quality and safety floor**, turning the
-   "trust-nothing" stance into the registration mechanism. Lower-trust submissions still run
-   only in containment. Static Linon findings gate static claims; runtime compatibility also
-   requires the live smoke/battery regime defined by ADR-0013.
+   adversarial verifier becomes the marketplace's **quality and containment gate**, turning
+   the "trust-nothing" stance into the registration mechanism. Lower-trust submissions are
+   eligible only under containment. Static Linon findings gate static claims; runtime
+   compatibility also requires the live smoke/battery regime defined by ADR-0013.
 
 ## Consequences
 
 - **Containment is the moat.** An open marketplace of executable, code-writing agents is
-  viable for whoever can run untrusted submissions **safely** — box isolation + full-log
-  observation + Linon verification. "Anyone can add" must not become "anyone can harm you";
-  containment is what keeps those separate, and it is the differentiator competitors lack.
+  intended only where untrusted submissions are eligible under containment: box isolation,
+  full-log observation, and Linon verification. "Anyone can add" must not become "anyone can
+  harm you"; containment is the intended separator, not proof of established safety.
 - **This repository remains a Codex-only edition runtime.** The open org economy is a
   product-level direction. It does not authorize non-Codex carrier directories, adapters,
   fallback carriers, extractor tooling, registry changes, or invocation paths in this repo.
 - **The enabling work is a manifest standard** — the "package.json for an org": role
   definitions, tools, topology, verifier specs, carrier requirements, and the evidence bundle
-  format. The pieces exist (`roles/*.md`, `ai-org-tools`, controller-as-workflow, evidence
-  bundles); standardising the open format is the task that lets everyone contribute
-  interoperably.
+  format. The in-repo pieces include `roles/*.md`, controller-as-workflow, and evidence
+  bundles; `ai-org-tools` and Corps are external/sibling references, not files or packages
+  present in this repository.
 - **Quality control against the lemon-market failure** = the Linon gate + persisted logs
   (inspection) + reputation, not first-party curation alone. Trust by
   containment-and-verification, not by faith — the `ai-org-bootstrap-codex-facade` discipline
