@@ -14,8 +14,8 @@ the supply question — where do the agents and orgs come from? Three facts alre
   spec. An org is a manifest of such roles, a topology (who hands to whom, who verifies whom,
   serial vs parallel), and the design rules of ADR-0005/0006. The controller composes them as
   a workflow.
-- **Composing orgs is proven, not speculative.** The claudecode edition was built by the
-  codex org (dogfood) — an org composed another org. So "define your own org" is the
+- **Composing orgs is proven, not speculative.** A sibling edition was built by the codex
+  org itself (dogfood) — an org composed another org. So "define your own org" is the
   productisation of something already done, and an org can help you build an org (meta).
 - **The dangerous part is already solved.** Running arbitrary third-party code-writing agents
   is normally a security nightmare; the box / microVM containment plus full-log observation
