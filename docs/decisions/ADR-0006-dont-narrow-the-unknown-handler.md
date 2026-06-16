@@ -57,14 +57,16 @@ with that purpose:
      - *Internal lens-parallelism* — run NN1–NN4 (and red-test calibration) as concurrent
        sub-reviews and merge.
      - *Faster inference* — same field, subject to a separate quality check on the model.
-   - **Field-narrowing (a bet on the coupling model — adopt only on proof):**
+   - **Field-narrowing (a bet on the coupling model):**
      - *Dependency-cone scoping* — review changed nodes ∪ their import/importer cone as
-       whole modules.
+       whole modules. **REJECTED by measurement** (see Consequences): unenforceable under
+       the current carrier sandbox, against Linon's grain, and evidence-lossy.
      - *Content-addressed cache-skip* — skip Linon on a region whose cone is unchanged.
+       Still gated; weakened by the same "the broad scan is load-bearing" evidence.
 
-     These are adopted **only** with measured evidence that they do not drop catches —
-     including bugs deliberately seeded through **non-import** coupling (config, runtime,
-     implicit contract, shared state) — and are revisited humbly, because a passing
+     A field-narrowing lever is adopted **only** with measured evidence that it does not drop
+     catches — including bugs deliberately seeded through **non-import** coupling (config,
+     runtime, implicit contract, shared state) — and is revisited humbly, because a passing
      bug-set may not represent the real unknowns.
 
 3. **Epistemic discipline.** Do not assert that a region is irrelevant to a review without
@@ -79,8 +81,34 @@ with that purpose:
   under) plus contention between two concurrent carriers on the same API rate limit (the
   coordination tax — real parallelism < theoretical). The reclaim is real but below Linon's
   full share, which is the expected shape, not a disappointment.
-- **Cone scoping and cache-skip are deferred** behind a seeded-bug recall measurement that
-  must include non-graph coupling. They are documented here as candidates, not decisions.
+- **Cone scoping was measured and REJECTED.** A seeded-bug experiment on a built 60-module
+  repo ran Linon read-only over two bugs × two scopes (full repo vs import-cone, the cone
+  pruned to whole modules only):
+  - *G — in-graph control* (rename `ScoreEntry.points`→`value`, breaking a direct importer):
+    caught at full **and** cone — the cone preserves recall when the coupling is in-graph.
+  - *N — non-graph* (add an extra `meta` key to the signed-score payload; the only thing it
+    violates is `score.schema.json`, `additionalProperties:false`, which is referenced by
+    path and never imported, so it is outside every cone).
+  Three findings, all against the cone:
+  1. **Unenforceable.** The carrier's read-only sandbox does not confine reads to the `-C`
+     repo — it reads the whole filesystem. Cone-Linon reconstructed the schema by reading a
+     **sibling full checkout** (its own evidence_ref cited
+     `/tmp/.../N-nongraph-full/schemas/score.schema.json`). Pruning a copy does not scope
+     reads; only filesystem isolation (a box/microVM with just the cone mounted) would — a
+     real cost just to *test*, let alone ship, the lever.
+  2. **Against Linon's grain.** Linon scans the whole *pre-change* codebase by default: for
+     a **one-line** diff it cited **~48 unchanged files** (`schemas/score.schema.json`,
+     `docs/architecture.md`, `docs/README.md`, `tests/test_security.py`, sibling modules…).
+     The broad scan is how it catches cross-cutting defects and how it grounds findings in
+     real files — it is the unknown-handling, not overhead to trim.
+  3. **Evidence-lossy.** Full-Linon *cited* the schema (`score.schema.json:41-71`) — a
+     controller-confirmable fact. A truly-isolated cone-Linon could only *reconstruct/assert*
+     the contract from prior knowledge — a weaker self-report. Narrowing the field trades
+     verifiable evidence for guesswork.
+  Net: the broad scan is a load-bearing part of *why* Linon is sharp. "Speed up Linon by
+  reading less" would dumb the verifier — the ADR-0005 mistake, one role over. (web_search
+  fired **0×** in all runs — these are repo-grounded bugs; the "pruning reduces web cost"
+  hypothesis needs an external-fact bug to test and remains unmeasured.)
 - **Statelessness is kept, deliberately.** Linon carries no memory between turns and may
   re-raise a finding every review — for a safety net, re-raising a still-true finding is a
   feature, and suppression is how false negatives are manufactured. Any "don't re-litigate"
