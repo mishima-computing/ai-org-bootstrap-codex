@@ -25,12 +25,33 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import os
+import selectors
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # codex's signature for the stdin-wait hang this harness exists to prevent.
 STDIN_HANG_MARKER = "Reading additional input from stdin"
+NO_OUTPUT_TIMEOUT_ENV = "CODEX_CARRIER_NO_OUTPUT_TIMEOUT_SECONDS"
+DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS = 120.0
+
+
+def _iso8601_utc() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _no_output_timeout_seconds() -> float:
+    raw = os.environ.get(NO_OUTPUT_TIMEOUT_ENV)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS
 
 
 def repo_carrier_discipline(repo: Path) -> str:
@@ -112,6 +133,78 @@ def diff_artifact(repo: Path, out_path: Path) -> dict:
             "untracked_count": len(manifest_lines)}
 
 
+def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
+                            no_output_timeout: float) -> tuple[str, str, int | None, bool, bool, bool]:
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    started = time.monotonic()
+    last_output = started
+    timed_out = False
+    frozen = False
+    killed = False
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,   # <-- THE enforcement: codex never waits on stdin
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(repo),
+    )
+    selector = selectors.DefaultSelector()
+    if proc.stdout is not None:
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+    if proc.stderr is not None:
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+
+    try:
+        while selector.get_map() or proc.poll() is None:
+            now = time.monotonic()
+            if proc.poll() is None and timeout and now - started >= timeout:
+                timed_out = True
+                killed = True
+                proc.kill()
+            elif proc.poll() is None and no_output_timeout and now - last_output >= no_output_timeout:
+                frozen = True
+                killed = True
+                proc.kill()
+
+            deadlines = []
+            if proc.poll() is None:
+                if timeout:
+                    deadlines.append(timeout - (now - started))
+                if no_output_timeout:
+                    deadlines.append(no_output_timeout - (now - last_output))
+            wait = min(max(0.0, min(deadlines)) if deadlines else 0.05, 0.05)
+            events = selector.select(wait)
+            if not events and proc.poll() is not None and not selector.get_map():
+                break
+
+            for key, _mask in events:
+                chunk = os.read(key.fileobj.fileno(), 4096)
+                if chunk:
+                    if key.data == "stdout":
+                        stdout_chunks.append(chunk)
+                    else:
+                        stderr_chunks.append(chunk)
+                    last_output = time.monotonic()
+                else:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except KeyError:
+                        pass
+                    key.fileobj.close()
+    finally:
+        selector.close()
+        if proc.poll() is None:
+            proc.kill()
+            killed = True
+        code = proc.wait()
+
+    stdout = b"".join(stdout_chunks).decode("utf-8", "replace")
+    stderr = b"".join(stderr_chunks).decode("utf-8", "replace")
+    return stdout, stderr, code, timed_out, frozen, killed
+
+
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,
                 retries=1, prepend_discipline=True, out_dir=None, output_file=None) -> dict:
     """Launch a Codex carrier deterministically. stdin is ALWAYS closed (the fix for the hang).
@@ -127,29 +220,23 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
     if output_file:
         argv += ["-o", str(output_file)]
     argv += [full_prompt]
+    no_output_timeout = _no_output_timeout_seconds()
 
     attempts = []
     for attempt in range(retries + 1):
-        try:
-            cp = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,   # <-- THE enforcement: codex never waits on stdin
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=str(repo),
-            )
-            stdout, stderr, code, timed_out = cp.stdout, cp.stderr, cp.returncode, False
-        except subprocess.TimeoutExpired as exc:
-            stdout, stderr, code, timed_out = (exc.stdout or ""), (exc.stderr or ""), None, True
-        # On TimeoutExpired the captured streams come back as bytes; normalize both to text.
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", "replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "replace")
+        timestamp = _iso8601_utc()
+        # _stream_carrier_process passes stdin=subprocess.DEVNULL and streams output for liveness.
+        stdout, stderr, code, timed_out, frozen, killed = _stream_carrier_process(
+            argv, repo, timeout, no_output_timeout)
         log = out_dir / f"carrier-attempt{attempt}.log"
-        log.write_text(stdout + ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
+        log.write_text("timestamp: " + timestamp + "\n" + stdout +
+                       ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
         hang = STDIN_HANG_MARKER in stdout and code != 0
-        attempts.append({"attempt": attempt, "exit": code, "timed_out": timed_out,
-                         "stdin_hang": hang, "log": str(log)})
-        if code == 0 and not timed_out and not hang:
+        attempts.append({"attempt": attempt, "timestamp": timestamp, "exit": code,
+                         "timed_out": timed_out, "stdin_hang": hang, "frozen": frozen,
+                         "killed": killed, "retryable": attempt < retries,
+                         "no_output_timeout": no_output_timeout, "log": str(log)})
+        if code == 0 and not timed_out and not frozen and not killed and not hang:
             return {"ok": True, "attempts": attempts, "log": str(log)}
         # else retry (timeout/hang/nonzero)
     return {"ok": False, "attempts": attempts, "log": attempts[-1]["log"]}
