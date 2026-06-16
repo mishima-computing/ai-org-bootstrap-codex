@@ -111,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
                 verifier_specs=[PASS], include_builtin_gates=False,
                 carrier_runner=_stub_carrier("allowed.txt"), clock=lambda: 1)
             journal = repo / ".agent-runs" / "controller" / "run-j" / "journal.jsonl"
-            phases = [__import__("json").loads(l)["phase"] for l in journal.read_text().splitlines()]
+            phases = [__import__("json").loads(l)["phase"] for l in journal.read_text(encoding="utf-8").splitlines()]
             for expected in ["validate_contract", "baseline", "run_carrier", "enforce_scope",
                              "run_verifiers", "package_evidence"]:
                 self.assertIn(expected, phases)

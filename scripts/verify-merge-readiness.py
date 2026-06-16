@@ -176,7 +176,7 @@ def blocking_count(review: dict[str, Any]) -> int:
 
 
 def subprocess_gate(command: list[str]) -> tuple[bool, str]:
-    proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    proc = subprocess.run(command, cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False)
     output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part.strip())
     return proc.returncode == 0, output
 

@@ -56,7 +56,7 @@ def run_gh(args: list[str], timeout: float = 30.0) -> str:
             ["gh", *args],
             check=False,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -312,7 +312,7 @@ def run_readiness_gate(
         command.extend(["--base", base])
     if head:
         command.extend(["--head", head])
-    proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    proc = subprocess.run(command, cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False)
     raw = proc.stdout if proc.returncode == 0 else proc.stderr or proc.stdout
     try:
         parsed = json.loads(raw)
