@@ -1,0 +1,274 @@
+"""Generic controller pipeline: registry-declared DAG order and fan-in."""
+from __future__ import annotations
+
+import json
+import hashlib
+import os
+import re
+import shutil
+import sys
+import tempfile
+import unittest
+from unittest import mock
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "codex-org-bootstrap" / "src"))
+
+import controller_pipeline as pipeline  # noqa: E402
+import controller_run  # noqa: E402
+import carrier_harness  # noqa: E402
+
+ISO8601_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
+class _Rep:
+    def __init__(self, ok=True, *, run_id="run", role="role"):
+        self.ok = ok
+        self.run_id = run_id
+        self.role = role
+
+    def to_dict(self):
+        report = {
+            "ok": self.ok,
+            "attempts": [{
+                "attempt": 0,
+                "exit": 0,
+                "timed_out": False,
+                "stdin_hang": False,
+                "log": str(ROOT / ".agent-runs" / "controller" / self.run_id / "carrier-attempt0.log"),
+            }],
+        }
+        if self.role in {
+            "functional-ci-action-writer",
+            "nonfunctional-ci-action-writer",
+            "security-ci-action-writer",
+            "implementer",
+        }:
+            report["diff_artifact"] = {
+                "path": str(ROOT / ".agent-runs" / "controller" / self.run_id / "diff.patch"),
+                "sha256": f"diff-sha-{self.role}",
+                "bytes": 17,
+                "untracked_count": 0,
+            }
+        return report
+
+
+class ControllerPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self._orig = controller_run.run
+        self.calls = []
+
+        def _fake_run(repo, contract, run_id, *, cache=True):
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": "impl-1",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "files_not_allowed_to_change": ["registry/runtime-registry.yaml"],
+                        "required_checks": [
+                            "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
+                        ],
+                        "received_from": sorted(payload["inputs"]),
+                    }
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _fake_run
+
+    def tearDown(self):
+        controller_run.run = self._orig
+        result_file = ROOT / pipeline.RESULT_FILE
+        if result_file.exists():
+            result_file.unlink()
+        shutil.rmtree(ROOT / ".agent-runs" / "controller" / "pipe-test", ignore_errors=True)
+
+    def test_registry_dag_order_fan_in_and_verifiers(self):
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+        order = [call[0] for call in self.calls]
+        self.assertEqual(order, [
+            "aggressive-designer",
+            "conservative-designer",
+            "functional-ci-action-writer",
+            "genius",
+            "nonfunctional-ci-action-writer",
+            "security-ci-action-writer",
+            "aufheben-designer",
+            "implementer",
+            "linon",
+            "stefan",
+        ])
+        self.assertTrue(all(result["summary"].values()))
+        self.assertTrue(all(call[3] is False for call in self.calls))
+
+        by_role = {role: payload for role, payload, _run_id, _cache, _contract in self.calls}
+        self.assertEqual(by_role["aufheben-designer"]["inputs"]["aggressive-designer"]["role_id"],
+                         "aggressive-designer")
+        self.assertEqual(
+            by_role["aufheben-designer"]["inputs"]["security-ci-action-writer"]["diff_artifact"]["sha256"],
+            "diff-sha-security-ci-action-writer",
+        )
+        self.assertEqual(by_role["implementer"]["inputs"]["aufheben-designer"]["contract_id"], "impl-1")
+        self.assertEqual(by_role["linon"]["inputs"]["implementer"]["diff_artifact"]["sha256"],
+                         "diff-sha-implementer")
+        self.assertEqual(by_role["stefan"]["inputs"]["implementer"]["diff_artifact"]["sha256"],
+                         "diff-sha-implementer")
+
+        implementer_contract = [call[4] for call in self.calls if call[0] == "implementer"][0]
+        self.assertEqual(implementer_contract["files_allowed_to_change"],
+                         ["scripts/controller_pipeline.py"])
+        self.assertEqual(implementer_contract["forbidden_paths"],
+                         ["registry/runtime-registry.yaml"])
+
+        manifest_path = ROOT / ".agent-runs" / "controller" / "pipe-test" / "provenance-manifest.json"
+        self.assertEqual(Path(result["manifest_path"]), manifest_path)
+        self.assertTrue(manifest_path.is_file())
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), result["manifest"])
+        self.assertRegex(result["manifest"]["started_at"], ISO8601_UTC)
+        self.assertRegex(result["manifest"]["finished_at"], ISO8601_UTC)
+
+        self.assertEqual([stage["role"] for stage in result["manifest"]["stages"]], order)
+        for stage in result["manifest"]["stages"]:
+            stage_run_id = f"pipe-test-{stage['role']}"
+            self.assertEqual(stage["run_id"], stage_run_id)
+            self.assertEqual(stage["journal_path"],
+                             str(ROOT / ".agent-runs" / "controller" / stage_run_id / "journal.jsonl"))
+            self.assertEqual(stage["conversation_log_path"],
+                             str(ROOT / ".agent-runs" / "controller" / stage_run_id / "carrier-attempt0.log"))
+            self.assertTrue(stage["report_ok"])
+            self.assertIn("duration_seconds", stage["timing"])
+            self.assertRegex(stage["timing"]["started_at"], ISO8601_UTC)
+            self.assertRegex(stage["timing"]["finished_at"], ISO8601_UTC)
+            self.assertNotIn("started_at_epoch", stage["timing"])
+            self.assertNotIn("finished_at_epoch", stage["timing"])
+
+        write_roles = {
+            "functional-ci-action-writer",
+            "nonfunctional-ci-action-writer",
+            "security-ci-action-writer",
+            "implementer",
+        }
+        for stage in result["manifest"]["stages"]:
+            artifact = stage["artifact"]
+            if stage["role"] in write_roles:
+                self.assertIsNone(artifact["result"])
+                self.assertIsNone(artifact["result_path"])
+                self.assertIsNone(artifact["result_sha256"])
+                self.assertEqual(artifact["diff_artifact"]["sha256"], f"diff-sha-{stage['role']}")
+            else:
+                preserved = ROOT / ".agent-runs" / "controller" / stage["run_id"] / pipeline.RESULT_FILE
+                self.assertEqual(artifact["result"]["role_id"], stage["role"])
+                self.assertEqual(artifact["result_path"], str(preserved))
+                self.assertTrue(preserved.is_file())
+                self.assertEqual(
+                    artifact["result_sha256"],
+                    hashlib.sha256(preserved.read_bytes()).hexdigest(),
+                )
+                self.assertIsNone(artifact["diff_artifact"])
+
+        implementer_stage = [stage for stage in result["manifest"]["stages"] if stage["role"] == "implementer"][0]
+        self.assertEqual(implementer_stage["artifact"]["diff_artifact"]["sha256"], "diff-sha-implementer")
+
+    def test_run_id_must_be_safe_single_path_segment(self):
+        for bad_run_id in ["", "/", ".", "..", "../escape", "nested/run", "nested\\run"]:
+            with self.subTest(run_id=bad_run_id):
+                with self.assertRaises(ValueError):
+                    pipeline.run_pipeline(ROOT, "wire declared org", bad_run_id, cache=False)
+
+    def test_manifest_records_freeze_events_from_attempts(self):
+        def _freeze_run(repo, contract, run_id, *, cache=True):
+            result = {"role_id": contract["role"], "seen_inputs": json.loads(contract["prompt"])["inputs"]}
+            (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            rep = _Rep(True, run_id=run_id, role=contract["role"])
+            original_to_dict = rep.to_dict
+
+            def _to_dict():
+                d = original_to_dict()
+                d["attempts"][0].update({
+                    "frozen": True,
+                    "killed": True,
+                    "retryable": True,
+                    "no_output_timeout": 120,
+                    "timestamp": "2026-06-17T00:00:00Z",
+                })
+                d["attempts"].append({
+                    "attempt": 1,
+                    "exit": 0,
+                    "timed_out": False,
+                    "stdin_hang": False,
+                    "frozen": False,
+                    "killed": False,
+                    "retryable": False,
+                    "timestamp": "2026-06-17T00:00:01Z",
+                    "log": str(ROOT / ".agent-runs" / "controller" / run_id / "carrier-attempt1.log"),
+                })
+                return d
+
+            rep.to_dict = _to_dict
+            return rep
+
+        controller_run.run = _freeze_run
+
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+        first_stage = result["manifest"]["stages"][0]
+
+        self.assertEqual(first_stage["events"], [{
+            "type": "carrier_freeze_killed",
+            "attempt": 0,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "no_output_timeout": 120,
+            "retryable": True,
+        }])
+
+    def test_no_output_watchdog_kills_and_retries(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            quiet = [sys.executable, "-c", "import time; time.sleep(5)"]
+            with mock.patch.object(carrier_harness, "build_codex_argv", return_value=quiet), \
+                    mock.patch.dict(os.environ, {"CODEX_CARRIER_NO_OUTPUT_TIMEOUT_SECONDS": "0.1"}):
+                result = carrier_harness.run_carrier(repo, "prompt", "workspace-write", timeout=10, retries=1)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["attempts"]), 2)
+        self.assertTrue(result["attempts"][0]["frozen"])
+        self.assertTrue(result["attempts"][0]["killed"])
+        self.assertTrue(result["attempts"][0]["retryable"])
+        self.assertFalse(result["attempts"][0]["timed_out"])
+        self.assertEqual(result["attempts"][0]["no_output_timeout"], 0.1)
+        self.assertRegex(result["attempts"][0]["timestamp"], ISO8601_UTC)
+        self.assertTrue(result["attempts"][1]["frozen"])
+        self.assertFalse(result["attempts"][1]["retryable"])
+
+    def test_no_output_watchdog_freeze_then_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            marker = repo / "first-attempt-froze"
+            script = (
+                "import pathlib, time; "
+                f"p = pathlib.Path({str(marker)!r}); "
+                "print('success') if p.exists() else (p.write_text('1'), time.sleep(5))"
+            )
+            with mock.patch.object(carrier_harness, "build_codex_argv",
+                                   return_value=[sys.executable, "-c", script]), \
+                    mock.patch.dict(os.environ, {"CODEX_CARRIER_NO_OUTPUT_TIMEOUT_SECONDS": "0.1"}):
+                result = carrier_harness.run_carrier(repo, "prompt", "workspace-write", timeout=10, retries=1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["attempts"]), 2)
+        self.assertTrue(result["attempts"][0]["frozen"])
+        self.assertTrue(result["attempts"][0]["killed"])
+        self.assertTrue(result["attempts"][0]["retryable"])
+        self.assertFalse(result["attempts"][1]["frozen"])
+        self.assertFalse(result["attempts"][1]["killed"])
+        self.assertEqual(result["attempts"][1]["exit"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
