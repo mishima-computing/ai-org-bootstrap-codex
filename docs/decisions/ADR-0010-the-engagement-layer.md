@@ -9,8 +9,10 @@ Accepted. (Owner-articulated engagement / game-economy layer for the cockpit.)
 ADR-0007 fixed the cockpit, ADR-0008 the open economy, ADR-0009 the feel (Pikmin × RPG) and
 the roster. Two things were still open: how to drive engagement and **on-ramp the amateur
 market**, and how amateurs **acquire and manage the real resource the product consumes** —
-compute (tokens). This org's own measured work established that tokens / compute, against the
-API rate ceiling, are the actual cost driver.
+compute (tokens). Treat compute as the central budget to design around. Claims that measured
+work has established tokens, compute, or API rate ceilings as the actual cost driver require
+committed replayable artifacts under ADR-0011; until then they are hypotheses tracked in
+`docs/evidence/ADR-0011-claim-ledger.md`.
 
 Familiar mobile-game mechanics — gacha, login bonus, events, collectible skins — are the
 accessible, sticky loop for that market. But normal gacha currency is free to mint, whereas
@@ -36,10 +38,10 @@ Add an engagement layer, designed so the game economy and the product's real eco
   Cosmetic-only; no pay-to-win.
 
 - **The game economy interlocks with the carrier economy.** Because Gems are real compute,
-  generosity is bounded by real unit cost — and a cheaper, boxed carrier (e.g. a DeepSeek
-  edition) costs fewer Gems to run, so containment + carrier choice (ADR-0008) directly set
-  how generous the floor and the gacha can be. The token economy this org measures is the
-  economy the game dispenses.
+  generosity is bounded by real unit cost. Cross-carrier unit-economics claims, including
+  claims that a contained lower-cost carrier lets the product grant more Gems, are hypotheses
+  unless backed by committed artifacts in the claim ledger. Carrier choice is product-level
+  only under ADR-0012 containment and does not add runtime paths to this repository.
 
 - **Two-market tone.** Amateurs get the full game loop (the on-ramp and retention); pros get
   it toned down or cosmetic-only — a serious tool must not feel like a slot machine.
@@ -51,8 +53,8 @@ Add an engagement layer, designed so the game economy and the product's real eco
   compute floor plus cosmetic/bonus gacha. Gating the resource a user needs *to use the
   product at all* behind RNG is out of bounds.
 - **Unit economics are designed against real compute cost.** Grant rates (the login/event
-  floor, the gacha bonus) are a function of carrier cost and margin, not free minting; cheaper,
-  contained carriers widen the generosity budget.
+  floor, the gacha bonus) are a function of carrier cost and margin, not free minting.
+  Specific cross-carrier generosity claims remain hypotheses until committed evidence exists.
 - **Engagement serves the amateur on-ramp and retention**, while the pro segment is protected
   by the tone-down — the two markets stay coherent under one product.
 - Builds on **ADR-0007** (cockpit), **ADR-0008** (open economy, two markets, carrier
