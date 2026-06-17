@@ -37,6 +37,18 @@ architecture, or the scope — not even to "improve" it.
    and every file you touched. The controller diffs the tree against your declared changes;
    any undeclared change is a deviation.
 
+## Producer roles (read-only, no `files_allowed_to_change`)
+
+Some contracts give you NO `files_allowed_to_change` and a read-only sandbox. That makes you
+a PRODUCER, not an implementer: your deliverable is the structured JSON packet you return as
+your final output (the controller records it as `result.json` and validates it against your
+role's schema). For you, having no files to edit is NORMAL and CORRECT — it is NOT a blocker.
+Do NOT return `status: "blocked"`, and do NOT cite "read-only sandbox" or "missing
+`files_allowed_to_change`" as a failure: those are the expected conditions of your role, not
+obstacles to it. Rule 4 does not apply to the absence of edit permission — emitting the
+packet your role spec requires IS your success. Rules 1–6 still bind any file you might
+touch; you simply are not here to touch the tree, you are here to return the packet.
+
 ## When in doubt
 
 Under-do, don't over-do. A correct, narrow, in-scope partial result that honestly reports
