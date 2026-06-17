@@ -106,7 +106,14 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     # forbidden classes are controller-owned: contract paths ADD to DEFAULT_FORBIDDEN, never replace
     # it (NN2 — an interested-party contract must not be able to disable the absolute forbidden set).
     forbidden = tuple(scope.DEFAULT_FORBIDDEN) + tuple(contract.forbidden_paths or ())
-    scope_report = scope.enforce(repo, contract.files_allowed_to_change, baseline_snapshot=snapshot,
+    # the designated deliverable channel (output_path) is not a codebase deviation: whitelist exactly
+    # that one path on a LOCAL copy so the journaled contract.files_allowed_to_change is never mutated.
+    # forbidden_hits and the output traversal guard run independently of this list, so widening it here
+    # cannot launder a forbidden or escaping path.
+    allowed = list(contract.files_allowed_to_change or [])
+    if output_path:
+        allowed.append(output_path)
+    scope_report = scope.enforce(repo, allowed, baseline_snapshot=snapshot,
                                  forbidden=forbidden, declared=declared)
     journal.append("enforce_scope", scope_report.to_dict())
 

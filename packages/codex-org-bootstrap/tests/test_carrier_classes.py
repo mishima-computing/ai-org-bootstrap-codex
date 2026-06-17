@@ -127,13 +127,23 @@ class CacheTests(unittest.TestCase):
 
 class LinonFixTests(unittest.TestCase):
     def test_schema_unsupported_keyword_fails_closed(self):
-        # allOf/if/then are used by real schemas (linon-review) and the minimal validator can't check
-        # them — must fail closed (not silently pass).
+        # allOf/if/then are used by real schemas (linon-review). With the full `jsonschema` library
+        # present they are checked properly; WITHOUT it the minimal validator can't, and must fail closed
+        # (not silently pass). Assert the right behavior for whichever is installed.
+        try:
+            import jsonschema  # noqa: F401
+            has_full = True
+        except ImportError:
+            has_full = False
         with tempfile.TemporaryDirectory() as d:
             sp = Path(d) / "s.json"
             sp.write_text(json.dumps({"allOf": [{"type": "object"}]}))
             res = output.gate_output('{"x": 1}', sp)
-            self.assertFalse(res["output_ok"])
+            if has_full:
+                self.assertTrue(res["output_ok"])      # jsonschema validates the conditional schema
+                self.assertEqual(res.get("validator"), "jsonschema")
+            else:
+                self.assertFalse(res["output_ok"])     # minimal validator fails closed on allOf
 
     def test_additional_properties_as_schema(self):
         sch = {"type": "object", "additionalProperties": {"type": "string"}}
