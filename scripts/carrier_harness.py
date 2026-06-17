@@ -60,10 +60,16 @@ def repo_carrier_discipline(repo: Path) -> str:
 
 
 def build_codex_argv(repo: Path, sandbox: str, model: str | None = None) -> list[str]:
-    """The one true codex invocation. Flags are constructed here so no caller can forget them."""
+    """The one true codex invocation. Flags are constructed here so no caller can forget them.
+
+    `--json` makes codex print EACH EVENT to stdout as JSONL (its reasoning/work as it happens) instead
+    of only human-readable progress — the agent thinking out loud, in a structured, parseable stream (the
+    parity of the sibling edition's stream-json). The final deliverable is still captured via `-o`
+    (output-last-message), so --json on stdout does not change result extraction; each streamed line is a
+    heartbeat for the existing no-output liveness watchdog."""
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise ValueError(f"invalid sandbox mode: {sandbox}")
-    argv = ["codex", "exec", "-C", str(repo), "--sandbox", sandbox]
+    argv = ["codex", "exec", "--json", "-C", str(repo), "--sandbox", sandbox]
     if model:
         argv += ["--model", model]
     return argv
