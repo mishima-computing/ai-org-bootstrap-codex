@@ -55,7 +55,11 @@ def _no_output_timeout_seconds() -> float:
 
 
 def repo_carrier_discipline(repo: Path) -> str:
-    p = repo / "bootstrap" / "carrier-discipline.md"
+    # the carrier discipline ships with the ORG install (it is prepended to every carrier prompt), so
+    # read it from AI_ORG_ROOT when the org runs on an external --repo. Self-hosted: org_root == repo.
+    env = os.environ.get("AI_ORG_ROOT")
+    base = Path(env).expanduser().resolve() if env else Path(repo)
+    p = base / "bootstrap" / "carrier-discipline.md"
     return p.read_text(encoding="utf-8") if p.is_file() else ""
 
 

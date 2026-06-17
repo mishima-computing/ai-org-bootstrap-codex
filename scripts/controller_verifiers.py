@@ -61,21 +61,30 @@ def run_all(specs: list[dict], *, evidence_dir=None, timeout: int = 600) -> list
 
 
 def builtin_gate_specs(repo) -> list[dict]:
-    """The input-free deterministic gates that apply to any pack change."""
+    """The input-free deterministic gates that apply to any pack change.
+
+    These gates validate the ORG INSTALL's integrity (its scripts live there: the residue scan and
+    validate_pack), so they resolve against AI_ORG_ROOT — the org install — not the workspace. When
+    AI_ORG_ROOT is unset (self-hosted, org operates on itself) org_root == repo, so behaviour is
+    identical; when the org runs on an EXTERNAL --repo (cross-repo), the gates still find their own
+    scripts in the install instead of failing to open them in the workspace worktree."""
     repo = Path(repo)
+    env = os.environ.get("AI_ORG_ROOT")
+    base = Path(env).expanduser().resolve() if env else repo     # the org install (where the gate scripts are)
     pkg = "packages/codex-org-bootstrap/src"
     # the running interpreter, not an env-overridable name — an env var must not be able to point the
     # mandatory gates at /bin/true and turn them into no-ops (NN2/NN3).
     py = sys.executable or "python3"
     # hand the pack package to the gates on PYTHONPATH (absolute, so it holds regardless of cwd) — the
     # gates run as plain files, so `import ai_org_bootstrap` needs `src/` on the path, not the script dir.
-    gate_env = {"PYTHONPATH": str((repo / pkg).resolve())}
+    gate_env = {"PYTHONPATH": str((base / pkg).resolve())}
     return [
-        {"name": "residue", "argv": [py, "scripts/check-codex-private-residue.py", "--root", "."],
-         "cwd": repo, "env": gate_env},
+        {"name": "residue",
+         "argv": [py, str(base / "scripts/check-codex-private-residue.py"), "--root", str(base)],
+         "cwd": base, "env": gate_env},
         {"name": "validate_pack",
-         "argv": [py, f"{pkg}/ai_org_bootstrap/scripts/validate_pack.py", "--root", "."],
-         "cwd": repo, "env": gate_env},
+         "argv": [py, str(base / pkg / "ai_org_bootstrap/scripts/validate_pack.py"), "--root", str(base)],
+         "cwd": base, "env": gate_env},
     ]
 
 

@@ -52,7 +52,9 @@ def _iso8601_utc(value: datetime | float | int | None = None) -> str:
 
 
 def _entries(repo: Path) -> dict[str, RegistryEntry]:
-    entries = load_runtime_registry(repo / "registry" / "runtime-registry.yaml")
+    # the registry is part of the ORG install, not the workspace — read it from org_root so the org can
+    # operate on an EXTERNAL --repo (cross-repo). Self-hosted (AI_ORG_ROOT unset): org_root == repo.
+    entries = load_runtime_registry(controller_run.org_root(repo) / "registry" / "runtime-registry.yaml")
     return {entry.agent_id: entry for entry in entries}
 
 
@@ -583,7 +585,12 @@ def main(argv=None) -> int:
                         help="run independent read-only producers (the designers) concurrently, in "
                              "isolated worktrees; 1 = serial")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--org-root", default=None,
+                        help="the ORG install (registry/schemas/bootstrap); defaults to --repo "
+                             "(self-hosted). Set it to operate the org on an EXTERNAL --repo (cross-repo).")
     args = parser.parse_args(argv)
+    if args.org_root:
+        os.environ["AI_ORG_ROOT"] = str(Path(args.org_root).expanduser().resolve())
 
     result = run_pipeline(args.repo, args.objective, args.run_id, cache=not args.no_cache,
                           max_repair_iterations=args.max_repair_iterations, max_parallel=args.max_parallel)

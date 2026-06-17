@@ -30,10 +30,20 @@ import controller_workflow as workflow  # noqa: E402
 OUTPUT_FILE = "result.json"  # where producing/verifying carriers emit their JSON deliverable
 
 
+def org_root(repo) -> Path:
+    """The ORG install — where this org's registry/, schemas/, and bootstrap/ live — as distinct from
+    the WORKSPACE (the repo being changed). Defaults to the workspace (self-hosted: the org operates on
+    itself, so behaviour is unchanged). Set AI_ORG_ROOT (or pass --org-root, which exports it) to
+    operate the org on an EXTERNAL --repo: the org definition then comes from the install, while the
+    carrier still runs in --repo."""
+    env = os.environ.get("AI_ORG_ROOT")
+    return Path(env).expanduser().resolve() if env else Path(repo).resolve()
+
+
 def _registry_role(repo: Path, role: str) -> dict:
-    """Return {schema, write_scope} for a role, from the canonical registry."""
+    """Return {schema, write_scope} for a role, from the canonical registry in the ORG install."""
     from ai_org_bootstrap.registry import load_runtime_registry
-    for e in load_runtime_registry(repo / "registry" / "runtime-registry.yaml"):
+    for e in load_runtime_registry(org_root(repo) / "registry" / "runtime-registry.yaml"):
         if e.agent_id == role:
             return {"schema": e.schema, "write_scope": list(e.write_scope or [])}
     raise SystemExit(f"unknown role '{role}' (not in registry)")
@@ -48,7 +58,7 @@ def run(repo, contract: dict, run_id: str, *, cache=True) -> workflow.models.Con
 
     kwargs = {"cache_enabled": cache, "quality_gate_enabled": is_implementer}
     if is_producing:
-        kwargs["output_schema"] = str(repo / info["schema"])
+        kwargs["output_schema"] = str(org_root(repo) / info["schema"])   # schema lives in the org install
         kwargs["output_path"] = OUTPUT_FILE
     return workflow.run_contract(repo, contract, run_id, **kwargs)
 
