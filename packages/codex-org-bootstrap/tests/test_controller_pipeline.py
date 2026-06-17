@@ -438,6 +438,29 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertEqual(result["attempts"][1]["exit"], 0)
 
 
+class WriteRoleRetriesTests(unittest.TestCase):
+    """Write roles carry an extra carrier retry so codex's transient non-zero 'submission failed'
+    exit is absorbed; read-only producers keep the default (their non-zero exits are cheap to redo
+    and the contract default already retries once)."""
+
+    def test_write_role_contract_sets_retries(self):
+        entries = pipeline._entries(ROOT)
+        write_role = next(r for r, e in entries.items() if e.write_scope)
+        read_role = next(r for r, e in entries.items() if not e.write_scope)
+
+        wc = pipeline._contract(entries[write_role], "obj", {})
+        self.assertEqual(wc.get("retries"), pipeline.WRITE_ROLE_RETRIES)
+        self.assertGreater(pipeline.WRITE_ROLE_RETRIES, 1)
+
+        rc = pipeline._contract(entries[read_role], "obj", {})
+        self.assertNotIn("retries", rc)  # read-only producer → contract default (1)
+
+        # the contract must still parse (retries is a known CarrierContract field)
+        import controller_models
+        self.assertEqual(controller_models.CarrierContract.from_dict(wc).retries,
+                         pipeline.WRITE_ROLE_RETRIES)
+
+
 class ParallelWaveTests(unittest.TestCase):
     """The three independent designers (aggressive/conservative/genius) must overlap when
     --max-parallel>1: each read-only producer runs in its own git worktree off the repo HEAD."""

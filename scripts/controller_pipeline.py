@@ -29,6 +29,13 @@ from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # no
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
 
+# codex exec exits non-zero when the "task submission" fails (OpenAI Codex docs: exec exits non-zero
+# on submission failure) — a transport-level hiccup, NOT a verdict on the work. The write stages are
+# the long, expensive carriers where this bit us: implementer runs ending report_ok=False with no
+# frozen/killed/timeout, i.e. a clean turn that nonetheless exited non-zero. Give write roles one extra
+# attempt so a transient submission failure is absorbed instead of failing the stage.
+WRITE_ROLE_RETRIES = 2
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -123,6 +130,7 @@ def _contract(entry: RegistryEntry, objective: str, inputs: dict[str, dict]) -> 
     }
     if write_scope:
         contract["files_allowed_to_change"] = write_scope
+        contract["retries"] = WRITE_ROLE_RETRIES   # absorb codex's transient non-zero submission exits
     forbidden = _forbidden_files(inputs)
     if forbidden:
         contract["forbidden_paths"] = forbidden
