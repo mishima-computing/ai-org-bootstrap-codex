@@ -8,10 +8,13 @@ results.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -362,8 +365,67 @@ def _record_stage_errors(report_dict: dict, stage_errors: list[str]) -> None:
         report_dict["unresolved_failures"] = list(stage_errors)
 
 
+def _waves(producer_roles: list[str], predecessors: dict[str, list[str]]) -> list[list[str]]:
+    """Group producer roles into dependency LEVELS: a role joins the earliest wave after all its
+    producer-predecessors. Roles in the same wave are independent — they can run concurrently (the three
+    designers all feed aufheben with nothing between them => one wave)."""
+    pset = set(producer_roles)
+    waves, placed, remaining = [], set(), list(producer_roles)
+    while remaining:
+        ready = [r for r in remaining if all(p in placed or p not in pset for p in predecessors.get(r, []))]
+        if not ready:                                  # a cycle would stall us — fail safe to one serial wave
+            ready = list(remaining)
+        waves.append(sorted(ready))
+        placed.update(ready)
+        remaining = [r for r in remaining if r not in placed]
+    return waves
+
+
+def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
+                       predecessors, results: dict, run_id: str, cache: bool, max_workers: int) -> dict:
+    """Run independent READ-ONLY producers concurrently, each in its own git worktree so their result.json
+    and scope checks cannot collide; bring each stage's journal back into the main repo for provenance.
+    Returns {role: (stage_ok, result, report_dict, stage)}."""
+    prepared = []                                      # create the worktrees serially (git worktree add)
+    for role in roles:
+        wt = Path(tempfile.mkdtemp(prefix=f"pl-par-{role}-"))
+        add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), "HEAD"],
+                             capture_output=True, text=True)
+        prepared.append((role, wt, add.returncode == 0, add.stderr))
+
+    def _one(role, wt, ok, err):
+        stage_run_id = f"{run_id}-{role}"
+        if not ok:
+            raise RuntimeError(f"worktree add failed for {role}: {err[-200:]}")
+        inputs = {u: results[u] for u in predecessors.get(role, []) if u in results}
+        stage_ok, result, report_dict, stage = _execute_stage(wt, role, entries[role], objective,
+                                                              inputs, stage_run_id, cache)
+        src = wt / ".agent-runs" / "controller"        # copy the stage journal back so provenance finds it
+        if src.is_dir():
+            dst = repo / ".agent-runs" / "controller"
+            dst.mkdir(parents=True, exist_ok=True)
+            for d in src.glob(stage_run_id + "*"):
+                shutil.copytree(d, dst / d.name, dirs_exist_ok=True)
+        stage = json.loads(json.dumps(stage).replace(str(wt), str(repo)))   # rewrite worktree paths -> repo
+        return role, (stage_ok, result, report_dict, stage)
+
+    out = {}
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_one, role, wt, ok, err) for (role, wt, ok, err) in prepared]
+            for fut in concurrent.futures.as_completed(futures):
+                role, oc = fut.result()
+                out[role] = oc
+    finally:
+        for (_, wt, _, _) in prepared:
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                           capture_output=True)
+            shutil.rmtree(wt, ignore_errors=True)
+    return out
+
+
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
-                 max_repair_iterations: int = 3) -> dict:
+                 max_repair_iterations: int = 3, max_parallel: int = 1) -> dict:
     if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
@@ -384,21 +446,34 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     run_started_at = _utc_now()
     pipeline_failed = False
 
-    for role in ordered:
-        entry = entries[role]
-        inputs = {upstream: results[upstream] for upstream in predecessors[role] if upstream in results}
-        stage_run_id = f"{run_id}-{role}"
-        stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
-                                                              inputs, stage_run_id, cache)
-        summary[role] = bool(report_dict.get("ok"))
-        required_ok[role] = stage_ok
-        reports[role] = report_dict
-        stages.append(stage)
-        _store_stage_output(role, entry, result, report_dict, results)
-        if entry.output_to is None and entry.write_scope:
-            terminal_write_roles.append(role)
-        if not stage_ok:
-            pipeline_failed = True
+    repo_is_git = (repo / ".git").exists()
+    for wave in _waves(ordered, predecessors):
+        # independent READ-ONLY producers of this wave run concurrently in isolated worktrees (the three
+        # designers => one parallel wave); write roles and singletons run serially in the repo.
+        par = [r for r in wave if not entries[r].write_scope] if (max_parallel > 1 and repo_is_git) else []
+        outcomes: dict[str, tuple] = {}
+        if len(par) > 1:
+            outcomes.update(_run_wave_parallel(repo, par, entries, objective, predecessors,
+                                               results, run_id, cache, max_parallel))
+        for role in wave:
+            if role in outcomes:
+                continue
+            inputs = {u: results[u] for u in predecessors[role] if u in results}
+            outcomes[role] = _execute_stage(repo, role, entries[role], objective, inputs,
+                                            f"{run_id}-{role}", cache)
+        for role in wave:                              # record deterministically in wave order
+            entry = entries[role]
+            stage_ok, result, report_dict, stage = outcomes[role]
+            summary[role] = bool(report_dict.get("ok"))
+            required_ok[role] = stage_ok
+            reports[role] = report_dict
+            stages.append(stage)
+            _store_stage_output(role, entry, result, report_dict, results)
+            if entry.output_to is None and entry.write_scope:
+                terminal_write_roles.append(role)
+            if not stage_ok:
+                pipeline_failed = True
+        if pipeline_failed:
             break
 
     if not pipeline_failed:
@@ -496,11 +571,14 @@ def main(argv=None) -> int:
     parser.add_argument("--objective", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--max-repair-iterations", type=int, default=3)
+    parser.add_argument("--max-parallel", type=int, default=4,
+                        help="run independent read-only producers (the designers) concurrently, in "
+                             "isolated worktrees; 1 = serial")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
 
     result = run_pipeline(args.repo, args.objective, args.run_id, cache=not args.no_cache,
-                          max_repair_iterations=args.max_repair_iterations)
+                          max_repair_iterations=args.max_repair_iterations, max_parallel=args.max_parallel)
     print(json.dumps(result["summary"], indent=2, ensure_ascii=False))
     print(f"provenance_manifest: {result['manifest_path']}")
     return 0 if all(result["required_ok"].values()) and result["converged"] else 1

@@ -438,5 +438,55 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertEqual(result["attempts"][1]["exit"], 0)
 
 
+class ParallelWaveTests(unittest.TestCase):
+    """The three independent designers (aggressive/conservative/genius) must overlap when
+    --max-parallel>1: each read-only producer runs in its own git worktree off the repo HEAD."""
+
+    def tearDown(self):
+        result_file = ROOT / pipeline.RESULT_FILE
+        if result_file.exists():
+            result_file.unlink()
+        ctrl = ROOT / ".agent-runs" / "controller"
+        if ctrl.is_dir():
+            for d in ctrl.glob("par-test*"):
+                shutil.rmtree(d, ignore_errors=True)
+
+    def test_independent_producers_run_concurrently(self):
+        import threading
+        import time
+        entries = pipeline._entries(ROOT)
+        peak = {"n": 0, "max": 0}
+        lock = threading.Lock()
+
+        def _fake_run(repo, contract, run_id, *, cache=True):
+            role = contract["role"]
+            if not entries[role].write_scope:                 # the read-only producers (parallelized)
+                with lock:
+                    peak["n"] += 1
+                    peak["max"] = max(peak["max"], peak["n"])
+                time.sleep(0.3)                               # hold so any overlap is observable
+                with lock:
+                    peak["n"] -= 1
+            payload = json.loads(contract["prompt"])
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {"role_id": "aufheben-designer", "contract_id": "impl-1",
+                              "objective": payload["objective"],
+                              "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                              "files_not_allowed_to_change": [], "required_checks": [],
+                              "received_from": sorted(payload["inputs"])}
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        orig = controller_run.run
+        controller_run.run = _fake_run
+        try:
+            pipeline.run_pipeline(ROOT, "obj", "par-test", cache=False, max_parallel=4)
+            self.assertGreater(peak["max"], 1, "independent producers must run concurrently")
+        finally:
+            controller_run.run = orig
+
+
 if __name__ == "__main__":
     unittest.main()
