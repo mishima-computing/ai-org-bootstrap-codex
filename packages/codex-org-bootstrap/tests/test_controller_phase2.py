@@ -124,5 +124,60 @@ class WorkflowTests(unittest.TestCase):
                                       include_builtin_gates=False, carrier_runner=_stub_carrier())
 
 
+class ProducerOutputRetryTests(unittest.TestCase):
+    """A producer can exit cleanly yet leave an empty result.json (transient carrier miss); the
+    process-level retry never fires for that. _ensure_producer_output re-runs until the deliverable is
+    non-empty so one flake does not sink the producer wave."""
+
+    class _Contract:
+        prompt = "p"; sandbox = "read-only"; timeout = 600; retries = 1
+
+    class _Journal:
+        def __init__(self, d): self.dir = d
+        def append(self, *a, **k): pass
+
+    def test_empty_deliverable_is_retried_until_filled(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / "result.json").write_text("", encoding="utf-8")     # the transient empty miss
+            calls = {"n": 0}
+
+            def fake_runner(repo_, prompt, sandbox, *, timeout, retries, out_dir, output_file=None):
+                calls["n"] += 1
+                Path(output_file).write_text('{"role_id":"genius"}', encoding="utf-8")  # the re-run delivers
+                return {"ok": True, "attempts": []}
+
+            orig = workflow._default_carrier_runner
+            workflow._default_carrier_runner = fake_runner
+            try:
+                carrier, ok = workflow._ensure_producer_output(
+                    repo, self._Contract(), "schemas/x.json", "result.json", {"ok": True}, True,
+                    self._Journal(repo))
+            finally:
+                workflow._default_carrier_runner = orig
+            self.assertEqual(calls["n"], 1)                              # retried once, then non-empty
+            self.assertTrue((repo / "result.json").read_text().strip())
+            self.assertTrue(ok)
+
+    def test_nonempty_deliverable_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / "result.json").write_text('{"already":"here"}', encoding="utf-8")
+            calls = {"n": 0}
+
+            def fake_runner(*a, **k):
+                calls["n"] += 1
+                return {"ok": True}
+
+            orig = workflow._default_carrier_runner
+            workflow._default_carrier_runner = fake_runner
+            try:
+                workflow._ensure_producer_output(repo, self._Contract(), "schemas/x.json",
+                                                 "result.json", {"ok": True}, True, self._Journal(repo))
+            finally:
+                workflow._default_carrier_runner = orig
+            self.assertEqual(calls["n"], 0)                              # good output → no re-run
+
+
 if __name__ == "__main__":
     unittest.main()

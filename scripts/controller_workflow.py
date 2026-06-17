@@ -27,6 +27,33 @@ def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir,
                                        out_dir=out_dir, prepend_discipline=True, output_file=output_file)
 
 
+PRODUCER_OUTPUT_RETRIES = 2   # extra carrier re-runs when a producer left no deliverable
+
+
+def _ensure_producer_output(repo, contract, output_schema, output_path, carrier, carrier_ok, journal):
+    """A producing carrier can exit cleanly yet leave an EMPTY/absent result.json (a transient carrier
+    miss — the model emitted no final message). The process-level retry in run_carrier never fires for
+    that (exit 0), so the whole producer wave dies on one flake. Re-run the carrier a few times until the
+    deliverable is non-empty. Default carrier path only; an injected runner (tests) is left untouched."""
+    if not (carrier_ok and output_schema and output_path):
+        return carrier, carrier_ok
+    op = Path(repo) / output_path
+
+    def _empty():
+        return not op.is_file() or not op.read_text(encoding="utf-8", errors="replace").strip()
+
+    tries = 0
+    while _empty() and tries < PRODUCER_OUTPUT_RETRIES:
+        tries += 1
+        carrier = _default_carrier_runner(repo, contract.prompt, contract.sandbox,
+                                          timeout=contract.timeout, retries=contract.retries,
+                                          out_dir=journal.dir, output_file=op)
+        carrier_ok = bool(carrier.get("ok"))
+        journal.append("producer_output_retry", {"try": tries, "carrier_ok": carrier_ok,
+                                                  "still_empty": _empty()})
+    return carrier, carrier_ok
+
+
 def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin_gates=True,
                  declared=None, carrier_runner=None, clock=None,
                  quality_gate_enabled=False, cache_enabled=False,
@@ -75,6 +102,9 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     carrier_ok = bool(carrier.get("ok"))
     attempts = carrier.get("attempts", [])
     journal.append("run_carrier", {"ok": carrier_ok, "cache_hit": cache_hit, "attempts": attempts})
+    if carrier_runner is None and not cache_hit:   # absorb a transient empty producer deliverable
+        carrier, carrier_ok = _ensure_producer_output(repo, contract, output_schema, output_path,
+                                                      carrier, carrier_ok, journal)
     if cache_enabled and not cache_hit and carrier_ok:
         import controller_cache
         controller_cache.store(repo, cache_key, cache_state, snapshot, carrier)
