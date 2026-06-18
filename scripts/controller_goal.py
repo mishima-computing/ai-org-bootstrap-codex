@@ -79,6 +79,9 @@ def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
     if not (Path(repo) / ".git").exists():
         return "failed"
     run_id = "goal-" + uuid.uuid4().hex[:10]
+    # bridge the task (what the goal-layer leaf events carry) to the run_id (what the per-stage events
+    # carry, as <run_id>-<role>), so a consumer can attribute each leaf's stage-marmots to its task.
+    stream_emit(repo)({"type": "leaf_run", "task_id": task.get("id"), "run_id": run_id})
     wt = tempfile.mkdtemp(prefix=f"leaf-{task['id']}-")
     add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", wt, "HEAD"],
                          capture_output=True, text=True)
