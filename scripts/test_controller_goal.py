@@ -56,6 +56,21 @@ def test_failure_recurses_then_converges():
     print("ok  failure -> split into atomic children -> converge (recursion + node_status)")
 
 
+def test_split_output_shape_is_runnable():
+    # REGRESSION: the real splitter.split() returns tasks WITHOUT a "status" key (only id/objective/
+    # scope/depends_on). ready_tasks must treat a status-less leaf as pending, or the live builder splits
+    # then runs nothing (goal_split -> goal_done, no leaf). The _leaf() fixture masked this by setting status.
+    def split(goal, ctx, carrier):
+        return [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []},
+                {"id": "b", "objective": "do b", "scope": ["y.py"], "depends_on": ["a"]}]
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: "converged", split=split, emit=events.append)
+    st = _statuses(plan)
+    assert st == {"a": "done", "b": "done"}, st
+    assert any(e["type"] == "leaf_done" for e in events), ("a leaf must actually run", events)
+    print("ok  status-less split output (the real splitter shape) is runnable -> leaves run")
+
+
 def test_floor_stops_recursion():
     # an ATOMIC task (single file) that keeps failing must NOT split forever -> fail at the floor
     split = lambda goal, ctx, carrier: [_leaf("atom", ["only.py"])]

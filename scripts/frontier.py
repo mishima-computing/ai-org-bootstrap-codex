@@ -175,8 +175,8 @@ def _collect_ready(tasks, running, selected):
         if children:
             ready.extend(_collect_ready(children, running, selected))
             continue
-        if task.get("status") != "pending":
-            continue
+        if (task.get("status") or "pending") != "pending":   # a fresh leaf (no status) is pending,
+            continue                                          # consistent with node_status's default
         if any(scope_conflict(task, running_task) for running_task in running):
             continue
         if any(scope_conflict(task, selected_task) for selected_task in selected):
