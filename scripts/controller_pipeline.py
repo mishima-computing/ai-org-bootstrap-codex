@@ -284,6 +284,42 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     return stage_ok, result, report_dict, stage
 
 
+def _copy_stage_journal(wt: Path, repo: Path, stage_run_id: str) -> None:
+    """Bring a worktree stage's journal back into the main repo so provenance/activity find it."""
+    src = wt / ".agent-runs" / "controller"
+    if src.is_dir():
+        dst = repo / ".agent-runs" / "controller"
+        dst.mkdir(parents=True, exist_ok=True)
+        for d in src.glob(stage_run_id + "*"):
+            shutil.copytree(d, dst / d.name, dirs_exist_ok=True)
+
+
+def _execute_stage_isolated(repo: Path, role: str, entry: RegistryEntry, objective: str,
+                            inputs: dict[str, dict], stage_run_id: str, cache: bool) -> tuple:
+    """Run ONE write role in its own git worktree (detached at HEAD) so its scope check evaluates only
+    its OWN diff, then merge its file changes back into the main repo. This is the serial-but-isolated
+    path (max_parallel=1); the concurrent path is _run_wave_parallel. Falls back to in-repo execution if
+    a worktree cannot be created, rather than failing the run."""
+    wt = Path(tempfile.mkdtemp(prefix=f"pl-iso-{role}-"))
+    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), "HEAD"],
+                         capture_output=True, text=True)
+    if add.returncode != 0:
+        shutil.rmtree(wt, ignore_errors=True)
+        return _execute_stage(repo, role, entry, objective, inputs, stage_run_id, cache)
+    try:
+        stage_ok, result, report_dict, stage = _execute_stage(wt, role, entry, objective, inputs,
+                                                              stage_run_id, cache)
+        _copy_stage_journal(wt, repo, stage_run_id)
+        stage = json.loads(json.dumps(stage).replace(str(wt), str(repo)))   # worktree paths -> repo
+        if stage_ok:
+            _apply_worktree_changes(repo, wt, report_dict.get("changed_files") or [])
+        return stage_ok, result, report_dict, stage
+    finally:
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                       capture_output=True)
+        shutil.rmtree(wt, ignore_errors=True)
+
+
 def _store_stage_output(role: str, entry: RegistryEntry, stage_ok: bool, result: dict | None,
                         report_dict: dict, results: dict[str, dict]) -> None:
     if stage_ok and result is not None:
@@ -394,10 +430,29 @@ def _waves(producer_roles: list[str], predecessors: dict[str, list[str]]) -> lis
     return waves
 
 
+def _apply_worktree_changes(repo: Path, wt: Path, changed_files: list[str]) -> None:
+    """Copy a WRITE role's own changes out of its isolated worktree into the main repo. The role ran off
+    HEAD in `wt`, so `changed_files` (its scope_report.changed) are ITS changes only — never a sibling
+    role's. Disjoint write scopes mean independent roles (the CI writers + the implementer) merge back
+    without conflict; an implementer is never charged for, nor sees, a CI writer's .github edits."""
+    for rel in changed_files or []:
+        if not rel or rel == ".agent-runs" or rel.startswith(".agent-runs/"):
+            continue
+        src, dst = wt / rel, repo / rel
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif not src.exists() and dst.is_file():       # the role deleted it in its worktree
+            dst.unlink()
+
+
 def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
                        predecessors, results: dict, run_id: str, cache: bool, max_workers: int) -> dict:
-    """Run independent READ-ONLY producers concurrently, each in its own git worktree so their result.json
-    and scope checks cannot collide; bring each stage's journal back into the main repo for provenance.
+    """Run wave roles each in its own git worktree (detached at HEAD) so their result.json and — for
+    write roles — their working-tree edits and scope checks cannot collide. READ-ONLY producers only
+    emit result.json; WRITE roles' file changes are merged back into the main repo after the wave, in a
+    deterministic order. Bring each stage's journal back for provenance. max_workers=1 keeps it serial
+    but still ISOLATED (the correctness guarantee does not depend on concurrency).
     Returns {role: (stage_ok, result, report_dict, stage)}."""
     prepared = []                                      # create the worktrees serially (git worktree add)
     for role in roles:
@@ -429,6 +484,15 @@ def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
             for fut in concurrent.futures.as_completed(futures):
                 role, oc = fut.result()
                 out[role] = oc
+        # merge write-role edits into the main repo serially, deterministic order (disjoint scopes apply
+        # cleanly). The scope check already ran isolated in each worktree, so this only moves files.
+        wt_by_role = {role: wt for (role, wt, _, _) in prepared}
+        for role in sorted(out):
+            if not entries[role].write_scope:
+                continue
+            stage_ok, _result, report_dict, _stage = out[role]
+            if stage_ok:
+                _apply_worktree_changes(repo, wt_by_role[role], report_dict.get("changed_files") or [])
     finally:
         for (_, wt, _, _) in prepared:
             subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
@@ -475,12 +539,14 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
 
     repo_is_git = (repo / ".git").exists()
     for wave in _waves(ordered, predecessors):
-        # independent READ-ONLY producers of this wave run concurrently in isolated worktrees (the three
-        # designers => one parallel wave); write roles and singletons run serially in the repo.
-        par = [r for r in wave if not entries[r].write_scope] if (max_parallel > 1 and repo_is_git) else []
+        # WRITE roles run in their OWN worktree (off HEAD) so each role's scope check sees only its own
+        # diff — an implementer is never charged for, nor sees, a CI writer's .github edits (per-stage
+        # isolation; correctness does not depend on max_parallel). When max_parallel>1 the wave's
+        # independent roles (producers AND write roles) additionally run CONCURRENTLY; otherwise they run
+        # serially IN WAVE ORDER, write roles still isolated.
         outcomes: dict[str, tuple] = {}
-        if len(par) > 1:
-            outcomes.update(_run_wave_parallel(repo, par, entries, objective, predecessors,
+        if repo_is_git and max_parallel > 1 and len(wave) > 1:
+            outcomes.update(_run_wave_parallel(repo, sorted(wave), entries, objective, predecessors,
                                                results, run_id, cache, max_parallel))
         for role in wave:
             if role in outcomes:
@@ -491,8 +557,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
                 break
             inputs = {u: results[u] for u in predecessors[role] if u in results}
-            outcomes[role] = _execute_stage(repo, role, entries[role], objective, inputs,
-                                            f"{run_id}-{role}", cache)
+            runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
+                      else _execute_stage)
+            outcomes[role] = runner(repo, role, entries[role], objective, inputs,
+                                    f"{run_id}-{role}", cache)
         if pipeline_failed:
             break
         for role in wave:                              # record deterministically in wave order
