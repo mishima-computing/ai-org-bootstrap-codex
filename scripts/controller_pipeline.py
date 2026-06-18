@@ -269,6 +269,19 @@ def _stage_record(repo: Path, role: str, entry: RegistryEntry, contract: dict, r
     }
 
 
+def _stream_append(repo, event: dict) -> None:
+    """Tee one event to the shared stream log (STREAM_LOG env, else <repo>/.agent-runs/stream.jsonl) so a
+    consumer sees the dialectic as it happens — who (source) did what, when (ts). STREAM_LOG points at the
+    shared log even from an isolated worktree. Fail-soft: a logging error never breaks the pipeline."""
+    try:
+        log = Path(os.environ.get("STREAM_LOG") or (Path(repo) / ".agent-runs" / "stream.jsonl"))
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": _iso8601_utc(), **dict(event)}, ensure_ascii=False) + "\n")
+    except Exception:                                      # noqa: BLE001 - observability never breaks a run
+        pass
+
+
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
                    stage_run_id: str, cache: bool) -> tuple[bool, dict | None, dict, dict]:
     contract = _contract(entry, objective, inputs)
@@ -281,6 +294,8 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     _record_stage_errors(report_dict, stage_errors)
     stage = _stage_record(repo, role, entry, contract, result, result_path, result_sha256,
                           report_dict, stage_run_id, stage_ok, started_at, finished_at)
+    _stream_append(repo, {"source": role, "type": "stage_done", "run_id": stage_run_id,
+                          "ok": bool(stage_ok), "unresolved": report_dict.get("unresolved_failures") or []})
     return stage_ok, result, report_dict, stage
 
 
