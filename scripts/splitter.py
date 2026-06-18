@@ -22,10 +22,14 @@ def _default_carrier(_prompt):
 def _build_prompt(goal, context):
     return (
         "Decompose the goal into a child task DAG for the Frontier.\n"
-        "Granularity: make each task the smallest change an adversarial reviewer can confirm in a single "
-        "read — one concern, ideally one file. If one file needs several independent changes, emit several "
-        "tasks chained by depends_on rather than one big task; oversized tasks fail to converge under "
-        "review. Prefer more, smaller tasks over fewer, larger ones.\n"
+        "Split by the change's IMPACT (blast radius), NOT by diff size. The reviewer verifies everything a "
+        "change touches across the system — its callers and dependents — not the line count. A one-line "
+        "edit to a widely-depended-on core (a shared API, a contract, a base symbol) has a large blast "
+        "radius and is hard to verify; a large edit confined to one leaf module is easy. So make each task "
+        "ONE change with a small, contained blast radius: isolate a high-impact change to a shared "
+        "interface into its own task, and order tasks by depends_on so each one's ripple can be verified "
+        "alone. Shrinking a high-impact change into smaller diffs does NOT help — its impact is unchanged; "
+        "isolate and sequence it instead.\n"
         "Return only a JSON array of task objects. Each task must contain exactly "
         "id, objective, scope, and depends_on. id and objective are strings; "
         "scope and depends_on are lists of strings.\n\n"
