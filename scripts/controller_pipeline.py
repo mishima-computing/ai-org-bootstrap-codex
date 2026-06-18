@@ -35,6 +35,7 @@ PROVENANCE_FILE = "provenance-manifest.json"
 # frozen/killed/timeout, i.e. a clean turn that nonetheless exited non-zero. Give write roles one extra
 # attempt so a transient submission failure is absorbed instead of failing the stage.
 WRITE_ROLE_RETRIES = 2
+AUFHEBEN_ROLE = "aufheben-designer"
 
 
 def _utc_now() -> datetime:
@@ -283,12 +284,14 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     return stage_ok, result, report_dict, stage
 
 
-def _store_stage_output(role: str, entry: RegistryEntry, result: dict | None,
+def _store_stage_output(role: str, entry: RegistryEntry, stage_ok: bool, result: dict | None,
                         report_dict: dict, results: dict[str, dict]) -> None:
-    if result is not None:
+    if stage_ok and result is not None:
         results[role] = result
-    elif entry.write_scope:
+    elif stage_ok and entry.write_scope:
         results[role] = _stage_output_for_write_role(role, report_dict)
+    else:
+        results.pop(role, None)
 
 
 def _write_manifest(repo: Path, run_id: str, manifest: dict) -> Path:
@@ -434,6 +437,18 @@ def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
     return out
 
 
+def _advisory_producer_roles(entries: dict[str, RegistryEntry]) -> set[str]:
+    return {
+        role for role, entry in entries.items()
+        if entry.output_to == AUFHEBEN_ROLE and not entry.write_scope
+    }
+
+
+def _has_valid_producer_for_aufheben(predecessors: dict[str, list[str]], producer_roles: set[str],
+                                     results: dict[str, dict]) -> bool:
+    return any(role in results for role in predecessors.get(AUFHEBEN_ROLE, []) if role in producer_roles)
+
+
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                  max_repair_iterations: int = 3, max_parallel: int = 1) -> dict:
     if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
@@ -450,11 +465,13 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     reports: dict[str, dict] = {}
     summary: dict[str, bool] = {}
     required_ok: dict[str, bool] = {}
+    fatal_ok: dict[str, bool] = {}
     terminal_write_roles: list[str] = []
     stages: list[dict] = []
     iterations: list[dict] = []
     run_started_at = _utc_now()
     pipeline_failed = False
+    producer_roles = _advisory_producer_roles(entries)
 
     repo_is_git = (repo / ".git").exists()
     for wave in _waves(ordered, predecessors):
@@ -468,20 +485,29 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         for role in wave:
             if role in outcomes:
                 continue
+            if role == AUFHEBEN_ROLE and not _has_valid_producer_for_aufheben(predecessors, producer_roles,
+                                                                              results):
+                fatal_ok[AUFHEBEN_ROLE] = False
+                pipeline_failed = True
+                break
             inputs = {u: results[u] for u in predecessors[role] if u in results}
             outcomes[role] = _execute_stage(repo, role, entries[role], objective, inputs,
                                             f"{run_id}-{role}", cache)
+        if pipeline_failed:
+            break
         for role in wave:                              # record deterministically in wave order
             entry = entries[role]
             stage_ok, result, report_dict, stage = outcomes[role]
             summary[role] = bool(report_dict.get("ok"))
             required_ok[role] = stage_ok
+            if role not in producer_roles:
+                fatal_ok[role] = stage_ok
             reports[role] = report_dict
             stages.append(stage)
-            _store_stage_output(role, entry, result, report_dict, results)
+            _store_stage_output(role, entry, stage_ok, result, report_dict, results)
             if entry.output_to is None and entry.write_scope:
                 terminal_write_roles.append(role)
-            if not stage_ok:
+            if not stage_ok and role not in producer_roles:
                 pipeline_failed = True
         if pipeline_failed:
             break
@@ -495,9 +521,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                                                                   verifier_inputs, stage_run_id, cache)
             summary[role] = bool(report_dict.get("ok"))
             required_ok[role] = stage_ok
+            fatal_ok[role] = stage_ok
             reports[role] = report_dict
             stages.append(stage)
-            _store_stage_output(role, entry, result, report_dict, results)
+            _store_stage_output(role, entry, stage_ok, result, report_dict, results)
             if not stage_ok:
                 pipeline_failed = True
                 break
@@ -508,13 +535,9 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                                         list(stages), len(findings)))
 
     repair_iterations = 0
-    producer_roles = {
-        role for role, entry in entries.items()
-        if entry.output_to == "aufheben-designer" and not entry.write_scope
-    }
     repair_forward_roles = [
         role for role in ordered
-        if role in producer_roles or role in {"aufheben-designer", "implementer"}
+        if role in producer_roles or role in {AUFHEBEN_ROLE, "implementer"}
     ]
 
     while findings and not pipeline_failed and repair_iterations < max_repair_iterations:
@@ -529,6 +552,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             if role in producer_roles:
                 inputs = {"linon": linon_context}
             else:
+                if role == AUFHEBEN_ROLE and not _has_valid_producer_for_aufheben(predecessors, producer_roles,
+                                                                                  results):
+                    fatal_ok[AUFHEBEN_ROLE] = False
+                    pipeline_failed = True
+                    break
                 inputs = {upstream: results[upstream]
                           for upstream in predecessors[role] if upstream in results}
             stage_run_id = f"{run_id}-repair{repair_iterations}-{role}"
@@ -539,8 +567,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             reports[role] = report_dict
             stages.append(stage)
             repair_stages.append(stage)
-            _store_stage_output(role, entry, result, report_dict, results)
-            if not stage_ok:
+            _store_stage_output(role, entry, stage_ok, result, report_dict, results)
+            if role not in producer_roles:
+                fatal_ok[role] = stage_ok
+            if not stage_ok and role not in producer_roles:
                 pipeline_failed = True
                 break
 
@@ -555,7 +585,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             reports["linon"] = report_dict
             stages.append(stage)
             repair_stages.append(stage)
-            _store_stage_output("linon", entry, result, report_dict, results)
+            _store_stage_output("linon", entry, stage_ok, result, report_dict, results)
+            fatal_ok["linon"] = stage_ok
             if not stage_ok:
                 pipeline_failed = True
 
@@ -568,6 +599,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
     manifest_path = _write_manifest(repo, run_id, manifest)
     return {"summary": summary, "required_ok": required_ok, "order": list(summary),
+            "fatal_ok": fatal_ok,
             "reports": reports, "results": results, "manifest": manifest,
             "manifest_path": str(manifest_path), "converged": converged,
             "repair_iterations": repair_iterations,
@@ -596,7 +628,7 @@ def main(argv=None) -> int:
                           max_repair_iterations=args.max_repair_iterations, max_parallel=args.max_parallel)
     print(json.dumps(result["summary"], indent=2, ensure_ascii=False))
     print(f"provenance_manifest: {result['manifest_path']}")
-    return 0 if all(result["required_ok"].values()) and result["converged"] else 1
+    return 0 if all(result["fatal_ok"].values()) and result["converged"] else 1
 
 
 if __name__ == "__main__":

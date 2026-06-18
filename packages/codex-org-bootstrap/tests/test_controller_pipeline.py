@@ -176,6 +176,50 @@ class ControllerPipelineTests(unittest.TestCase):
         implementer_stage = [stage for stage in result["manifest"]["stages"] if stage["role"] == "implementer"][0]
         self.assertEqual(implementer_stage["artifact"]["diff_artifact"]["sha256"], "diff-sha-implementer")
 
+    def test_single_producer_failure_still_reaches_aufheben_implementer_and_reviewers(self):
+        def _producer_failure_run(repo, contract, run_id, *, cache=True):
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": "impl-1",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "files_not_allowed_to_change": [],
+                        "required_checks": [],
+                        "received_from": sorted(payload["inputs"]),
+                    }
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(role != "aggressive-designer", run_id=run_id, role=role)
+
+        controller_run.run = _producer_failure_run
+
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+        order = [call[0] for call in self.calls]
+
+        self.assertEqual(order[-3:], ["implementer", "linon", "stefan"])
+        self.assertFalse(result["required_ok"]["aggressive-designer"])
+        self.assertNotIn("aggressive-designer", result["fatal_ok"])
+        self.assertTrue(all(result["fatal_ok"].values()))
+        self.assertTrue(result["converged"])
+        self.assertNotIn("aggressive-designer", result["results"])
+
+        by_role = {role: payload for role, payload, _run_id, _cache, _contract in self.calls}
+        aufheben_inputs = by_role["aufheben-designer"]["inputs"]
+        self.assertNotIn("aggressive-designer", aufheben_inputs)
+        self.assertIn("conservative-designer", aufheben_inputs)
+        self.assertIn("genius", aufheben_inputs)
+
+        aggressive_stage = [
+            stage for stage in result["manifest"]["stages"]
+            if stage["role"] == "aggressive-designer"
+        ][0]
+        self.assertFalse(aggressive_stage["stage_ok"])
+
     def test_linon_findings_trigger_repair_loop_until_converged(self):
         linon_runs = 0
 
@@ -337,6 +381,8 @@ class ControllerPipelineTests(unittest.TestCase):
 
         self.assertFalse(result["required_ok"]["aggressive-designer"])
         self.assertFalse(result["converged"])
+        self.assertFalse(result["fatal_ok"]["aufheben-designer"])
+        self.assertNotIn("aufheben-designer", [call[0] for call in self.calls])
         first_stage = result["manifest"]["stages"][0]
         self.assertFalse(first_stage["stage_ok"])
         self.assertIn("result.json: invalid JSON", first_stage["stage_errors"][0])
