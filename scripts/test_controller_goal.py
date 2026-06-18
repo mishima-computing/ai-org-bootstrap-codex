@@ -72,6 +72,31 @@ def test_budget_stops():
     print("ok  budget caps total leaf runs (autonomous bound, not a human)")
 
 
+def test_stream_emit_appends():
+    import tempfile, json
+    with tempfile.TemporaryDirectory() as d:
+        emit = cg.stream_emit(d)
+        emit({"type": "a"})
+        emit({"type": "b", "id": "x"})
+        lines = (Path(d) / ".agent-runs" / "stream.jsonl").read_text(encoding="utf-8").splitlines()
+        evs = [json.loads(line) for line in lines]
+        assert [e["type"] for e in evs] == ["a", "b"], evs
+        assert evs[1]["id"] == "x"
+        print("ok  stream_emit appends events to the shared log (ADR-0009)")
+
+
+def test_run_goal_streams_to_log():
+    import tempfile, json
+    with tempfile.TemporaryDirectory() as d:
+        split = lambda goal, ctx, carrier: [_leaf("a", ["x.py"])]
+        cg.run_goal(d, "g", run_leaf=lambda r, t: "converged", split=split)  # default emit -> the log
+        evs = [json.loads(line) for line in
+               (Path(d) / ".agent-runs" / "stream.jsonl").read_text(encoding="utf-8").splitlines()]
+        types = [e["type"] for e in evs]
+        assert "goal_split" in types and "leaf_done" in types, types
+        print("ok  run_goal streams goal/leaf events to the shared log by default")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

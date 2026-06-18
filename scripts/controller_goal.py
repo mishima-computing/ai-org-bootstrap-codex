@@ -12,7 +12,11 @@ recurses on failure. The per-leaf runner is INJECTED (run_leaf) so this is testa
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -20,6 +24,65 @@ import frontier  # noqa: E402
 import splitter  # noqa: E402
 
 FLOOR_MAX_DEPTH = 3
+
+
+def stream_emit(repo):
+    """Return an emit(event) that APPENDS a JSON line to the shared stream log (ADR-0009): one
+    append-only log everything streams to, which consumers (the town, monitoring, the audit trail) tail.
+    Fail-soft — observability must never break a build."""
+    import json
+    log = Path(repo) / ".agent-runs" / "stream.jsonl"
+
+    def emit(event):
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(dict(event), ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    return emit
+
+
+def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
+    """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
+    never collide on the shared repo (the per-run isolation, ADR-0009). On convergence (linon passed,
+    no findings) merge the leaf's changed files back into the shared repo (disjoint scopes apply
+    cleanly) and return "converged"; else "failed". The worktree is always removed."""
+    if run_pipeline is None:
+        import controller_pipeline
+        run_pipeline = controller_pipeline.run_pipeline
+    if not (Path(repo) / ".git").exists():
+        return "failed"
+    run_id = "goal-" + uuid.uuid4().hex[:10]
+    wt = tempfile.mkdtemp(prefix=f"leaf-{task['id']}-")
+    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", wt, "HEAD"],
+                         capture_output=True, text=True)
+    if add.returncode != 0:
+        shutil.rmtree(wt, ignore_errors=True)
+        return "failed"
+    try:
+        result = run_pipeline(wt, task["objective"], run_id)
+        if not bool(result.get("converged")):
+            return "failed"
+        porcelain = subprocess.run(["git", "-C", wt, "status", "--porcelain"],
+                                   capture_output=True, text=True).stdout
+        for line in porcelain.splitlines():
+            rel = line[3:].strip()
+            if not rel or rel.startswith(".agent-runs") or rel == "result.json":
+                continue
+            src, dst = Path(wt) / rel, Path(repo) / rel
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            elif not src.exists() and dst.is_file():
+                dst.unlink()
+        return "converged"
+    except Exception:                                          # noqa: BLE001 - a leaf crash is just a failure
+        return "failed"
+    finally:
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], capture_output=True)
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def at_floor(task: dict, depth: int) -> bool:
@@ -52,13 +115,16 @@ def _set_children(tasks: list, task_id: str, children: list) -> list:
     return out
 
 
-def run_goal(repo, goal, run_leaf, *, split=splitter.split, context=None, carrier=None,
-             budget=None, emit=lambda e: None) -> list:
+def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, carrier=None,
+             budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
 
-    run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (inject the real
-    controller_pipeline runner; a stub in tests). budget caps the number of leaf runs (None = unbounded,
-    bounded only by the floor). emit(event) streams progress (ADR-0009). Returns the final task tree."""
+    run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
+    default_run_leaf, which runs controller_pipeline in an isolated worktree; a stub in tests). budget
+    caps the number of leaf runs (None = unbounded, bounded only by the floor). emit(event) streams
+    progress (ADR-0009). Returns the final task tree."""
+    run_leaf = run_leaf or default_run_leaf
+    emit = emit or stream_emit(repo)
     plan = split(goal, context or {}, carrier)
     errs = frontier.validate_plan(plan)
     if errs:
