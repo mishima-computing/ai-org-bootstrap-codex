@@ -22,6 +22,10 @@ def _default_carrier(_prompt):
 def _build_prompt(goal, context):
     return (
         "Decompose the goal into a child task DAG for the Frontier.\n"
+        "Granularity: make each task the smallest change an adversarial reviewer can confirm in a single "
+        "read — one concern, ideally one file. If one file needs several independent changes, emit several "
+        "tasks chained by depends_on rather than one big task; oversized tasks fail to converge under "
+        "review. Prefer more, smaller tasks over fewer, larger ones.\n"
         "Return only a JSON array of task objects. Each task must contain exactly "
         "id, objective, scope, and depends_on. id and objective are strings; "
         "scope and depends_on are lists of strings.\n\n"
