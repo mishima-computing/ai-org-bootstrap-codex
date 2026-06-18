@@ -140,11 +140,69 @@ def _contract(entry: RegistryEntry, objective: str, inputs: dict[str, dict]) -> 
     return contract
 
 
+def _close_brackets(s: str) -> str:
+    """Append the closing brackets a truncated JSON value is missing (the F10 closure repair), ignoring
+    brackets inside strings. Recovers a carrier whose output was cut off mid-object."""
+    stack, in_str, esc = [], False, False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif ch == "]" and stack and stack[-1] == "[":
+            stack.pop()
+    return s + "".join("}" if c == "{" else "]" for c in reversed(stack))
+
+
+def _salvage_json(text: str):
+    """Best-effort recovery of a JSON value from a carrier's raw output. LLM carriers wrap JSON in
+    markdown fences, add prose around it, emit Python-literal syntax (single-quoted keys), or get cut off.
+    Try, in order: as-is; fence-stripped; the first {...}/[...] block; the same with missing brackets
+    closed; and finally ast.literal_eval (Python literals). Raises json.JSONDecodeError if unrecoverable."""
+    s = (text or "").strip()
+    candidates = [s]
+    if "```" in s:
+        for part in s.split("```"):
+            part = part.strip()
+            if part[:4] == "json":
+                part = part[4:].strip()
+            if part[:1] in "{[":
+                candidates.append(part)
+    starts = [i for i in (s.find("{"), s.find("[")) if i >= 0]
+    if starts:
+        start = min(starts)
+        end = max(s.rfind("}"), s.rfind("]"))
+        if end > start:
+            candidates.append(s[start:end + 1])
+    for c in candidates:
+        for attempt in (c, _close_brackets(c)):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                pass
+        try:
+            import ast
+            return ast.literal_eval(c)                    # Python-literal output (single-quoted keys, etc.)
+        except (ValueError, SyntaxError):
+            pass
+    raise json.JSONDecodeError("unsalvageable carrier output", s or "", 0)
+
+
 def _read_result(path: Path, errors: list[str] | None = None) -> dict | None:
     if not path.is_file():
         return None
     try:
-        result = json.loads(path.read_text(encoding="utf-8"))
+        result = _salvage_json(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         if errors is not None:
             errors.append(f"{RESULT_FILE}: invalid JSON: {exc}")
@@ -414,6 +472,16 @@ def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
         return stage_ok, None, None, None, report, []
     stage_errors: list[str] = []
     result, preserved_path, result_sha256 = _preserve_result(repo, run_id, stage_errors)
+    if result is None and bool(report.ok):           # carrier ran clean but emitted unsalvageable output:
+        reask = dict(contract)                       # ask once more for ONLY valid JSON, bypassing the cache
+        reask["prompt"] = contract["prompt"] + (
+            "\n\nYOUR PREVIOUS OUTPUT WAS NOT VALID JSON. Return ONLY the JSON value your schema requires "
+            "— no prose, no markdown fences, double-quoted keys, no trailing commas.")
+        if result_path.exists():
+            result_path.unlink()
+        report = controller_run.run(repo, reask, run_id + "-reask", cache=False)
+        stage_errors = []
+        result, preserved_path, result_sha256 = _preserve_result(repo, run_id + "-reask", stage_errors)
     stage_ok = bool(report.ok) and result is not None
     return stage_ok, result, preserved_path, result_sha256, report, stage_errors
 
