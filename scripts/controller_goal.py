@@ -44,6 +44,27 @@ def stream_emit(repo):
     return emit
 
 
+def codex_carrier(repo, *, model=None):
+    """The real split carrier: run a read-only codex carrier that emits the child-DAG JSON to an output
+    file, and return it (fail-soft '[]' on any error, so split() yields no children rather than crash).
+    The carrier_harness import is lazy so tests that inject their own split never touch it."""
+    def carrier(prompt):
+        import carrier_harness
+        out = Path(tempfile.mkdtemp(prefix="split-")) / "tasks.json"
+        try:
+            result = carrier_harness.run_carrier(repo, prompt, sandbox="read-only",
+                                                 output_file=str(out), model=model, retries=1)
+            if result.get("ok") and out.is_file():
+                return out.read_text(encoding="utf-8")
+        except Exception:                                      # noqa: BLE001 - a split failure is just no children
+            pass
+        finally:
+            shutil.rmtree(out.parent, ignore_errors=True)
+        return "[]"
+
+    return carrier
+
+
 def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
     never collide on the shared repo (the per-run isolation, ADR-0009). On convergence (linon passed,
@@ -125,6 +146,8 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
     progress (ADR-0009). Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
     emit = emit or stream_emit(repo)
+    if carrier is None and split is splitter.split:    # real run: decompose via codex (tests inject split)
+        carrier = codex_carrier(repo)
     plan = split(goal, context or {}, carrier)
     errs = frontier.validate_plan(plan)
     if errs:
@@ -162,4 +185,22 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth})
+    emit({"type": "goal_done", "goal": goal})
     return plan
+
+
+def main(argv=None) -> int:
+    import argparse
+    import json
+    p = argparse.ArgumentParser(description="Run a GOAL through the org's autonomous builder (ADR-0008).")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--goal", required=True)
+    p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")
+    a = p.parse_args(argv)
+    plan = run_goal(a.repo, a.goal, budget=a.budget)
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+    return 0 if all(frontier.node_status(t) == "done" for t in plan) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
