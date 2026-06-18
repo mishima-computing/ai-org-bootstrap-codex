@@ -29,9 +29,12 @@ FLOOR_MAX_DEPTH = 3
 def stream_emit(repo):
     """Return an emit(event) that APPENDS a JSON line to the shared stream log (ADR-0009): one
     append-only log everything streams to, which consumers (the town, monitoring, the audit trail) tail.
-    Fail-soft — observability must never break a build."""
+    STREAM_LOG (env) points it at the SHARED log even when the build runs in an isolated worktree, so the
+    town sees events live regardless of where the leaf executes. Fail-soft — observability never breaks a
+    build."""
     import json
-    log = Path(repo) / ".agent-runs" / "stream.jsonl"
+    import os
+    log = Path(os.environ.get("STREAM_LOG") or (Path(repo) / ".agent-runs" / "stream.jsonl"))
 
     def emit(event):
         try:
