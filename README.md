@@ -16,6 +16,16 @@ deterministic harness wrapped around a semantic (LLM) core:
 | **dialectic** | `scripts/controller_pipeline.py` | one **objective** → one verified diff (the agent DAG, re-verified outside the carrier, repaired until linon is clean) |
 | **autonomous builder** | `scripts/controller_goal.py` | one **goal** → PRs (split into a task tree, build the parts in parallel, recurse on failure, stop at a floor/budget — never a human) |
 
+```mermaid
+flowchart LR
+  GOAL(["a GOAL<br/>(large or vague)"]) --> SPLIT["autonomous builder:<br/>split into a task tree"]
+  SPLIT --> LEAVES["disjoint leaves<br/>run in PARALLEL"]
+  LEAVES --> DIAL["each leaf: the dialectic<br/>→ one verified diff"]
+  DIAL --> MERGE["per-leaf commits<br/>merge back"]
+  MERGE --> PR(["PRs"])
+  LEAVES -. "cannot converge" .-> SPLIT
+```
+
 ## The dialectic (one objective → one verified diff)
 
 Codex main is the controller. Specialized Codex agents produce bounded artifacts:
@@ -38,6 +48,18 @@ design on rendered pixels. Both return findings that drive re-implementation; ne
 The designers run as advisory producers (a failed producer does not sink the run if the aufheben still
 has a valid input). The controller is a **semantic core** (authoring contracts, synthesizing tension,
 judging) that needs an LLM, plus a **mechanical harness** that must be right every time, so it is code.
+
+```mermaid
+flowchart LR
+  OBJ(["an objective"]) --> DES["designers<br/>(aggressive · conservative)"]
+  DES --> GEN["genius<br/>(evidence-gated)"]
+  GEN --> AUF["aufheben<br/>→ ONE contract"]
+  AUF --> IMP["implementer<br/>(scoped edits only)"]
+  IMP --> LIN["linon<br/>(adversarial code verify)"]
+  LIN -- "reject (bad reference)" --> AUF
+  LIN -- "clean" --> STE["stefan<br/>(aesthetic verify)"]
+  STE --> DIFF(["one verified diff"])
+```
 
 ### Execution: isolated, parallel, grounded
 
@@ -85,6 +107,16 @@ one node (`run()` a leaf via the dialectic; `split()` it when it cannot converge
   grows a new tool, and when the budget is spent it records partial progress and moves on.
 - every step appends to a shared event log (`STREAM_LOG`, default `.agent-runs/stream.jsonl`) that a host
   tails for live observability, independent of which worktree a leaf runs in.
+
+```mermaid
+flowchart TB
+  G(["GOAL"]) --> A["task A"] & B["task B"] & C["task C"]
+  B -- "still too big → split" --> B1["leaf"] & B2["leaf"]
+  A --> Ax["leaf ✓ commit"]
+  C --> Cx["leaf ✓ commit"]
+  B1 --> B1x["leaf ✓ commit"]
+  B2 -- "repair-cap fail at the FLOOR" --> F["fail (never an infinite split)"]
+```
 
 Design records (in the host, Shagiri): ADR-0006 the Frontier, ADR-0008 the Splitter, ADR-0009 the stream.
 
