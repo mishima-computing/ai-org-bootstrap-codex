@@ -1,6 +1,8 @@
 """Pure Splitter adapter for child Frontier task DAGs."""
 from __future__ import annotations
 
+__all__ = ["split", "HOUSE_RULES"]
+
 import json
 
 
