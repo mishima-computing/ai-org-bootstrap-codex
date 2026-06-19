@@ -486,6 +486,29 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertFalse(result["attempts"][1]["killed"])
         self.assertEqual(result["attempts"][1]["exit"], 0)
 
+    def test_linon_via_codex_review_flag(self):
+        # behind LINON_VIA_CODEX_REVIEW, the review stage runs `codex review` and returns findings in the
+        # SAME shape the repair loop consumes; flag OFF keeps the role-carrier path (default, unchanged).
+        import codex_review
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            sp.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+            fake = {"ok": True, "raw": "- [P2] bug — app.py:3-3\n  body",
+                    "findings": [{"file": "app.py", "line_range": {"start": 3, "end": 3},
+                                  "severity": "major", "claim": "off-by-one"}]}
+            with mock.patch.dict(os.environ, {"LINON_VIA_CODEX_REVIEW": "1"}), \
+                    mock.patch.object(codex_review, "review", return_value=fake):
+                stage_ok, result, report_dict, stage = pipeline._execute_stage(
+                    repo, "linon", None, "obj", {}, "run-linon", False)
+            self.assertTrue(stage_ok)
+            self.assertEqual(pipeline._linon_findings(result), fake["findings"])  # feeds the repair loop unchanged
+            self.assertEqual(stage["reviewer"], "codex-review")
+            self.assertTrue(report_dict["ok"])
+        self.assertTrue(pipeline._linon_via_codex_review_enabled.__module__)        # helper exists
+        with mock.patch.dict(os.environ, {"LINON_VIA_CODEX_REVIEW": "0"}):
+            self.assertFalse(pipeline._linon_via_codex_review_enabled())            # OFF by 0 / default
+
     def test_linon_findings_drop_nondeliverable_targets(self):
         # The hard backstop: a reviewer finding about controller scratch / a generated file can never be
         # cleared by changing the deliverable, so it would drive `while findings` repair forever (the live

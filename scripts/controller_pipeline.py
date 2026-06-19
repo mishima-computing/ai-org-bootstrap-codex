@@ -340,8 +340,45 @@ def _stream_append(repo, event: dict) -> None:
         pass
 
 
+def _linon_via_codex_review_enabled() -> bool:
+    return os.environ.get("LINON_VIA_CODEX_REVIEW", "") not in ("", "0", "false", "no")
+
+
+def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool, dict | None, dict, dict]:
+    """Run the review role through Codex's native `codex review` (diff-anchored: it starts from the leaf's
+    uncommitted changes but reads full files + cross-file dependents) instead of a free-reading role
+    carrier. Returns the same (stage_ok, result, report_dict, stage) tuple so the `while findings` repair
+    loop is unchanged; findings come back in the `{"findings": [...]}` shape `_linon_findings` consumes."""
+    import codex_review
+    started_at = _utc_now()
+    try:
+        rv = codex_review.review(str(repo))
+    except Exception as exc:  # noqa: BLE001 — a failed review is "could not review", not "clean"
+        rv = {"findings": [], "ok": False, "raw": f"{type(exc).__name__}: {exc}"}
+    finished_at = _utc_now()
+    findings = rv.get("findings") or []
+    stage_ok = bool(rv.get("ok"))
+    result = {"findings": findings}
+    unresolved = [] if stage_ok else ["codex review did not complete"]
+    report_dict = {"ok": stage_ok, "unresolved_failures": unresolved, "reviewer": "codex-review"}
+    try:                                                # journal the raw review for audit (mirror _run_stage)
+        d = Path(repo) / ".agent-runs" / "controller" / stage_run_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "codex-review.log").write_text(rv.get("raw") or "", encoding="utf-8")
+    except OSError:
+        pass
+    stage = {"role": "linon", "run_id": stage_run_id, "ok": stage_ok, "reviewer": "codex-review",
+             "started_at": _iso8601_utc(started_at), "finished_at": _iso8601_utc(finished_at),
+             "findings_count": len(findings)}
+    _stream_append(repo, {"source": "linon", "type": "stage_done", "run_id": stage_run_id,
+                          "ok": stage_ok, "unresolved": unresolved})
+    return stage_ok, result, report_dict, stage
+
+
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
                    stage_run_id: str, cache: bool) -> tuple[bool, dict | None, dict, dict]:
+    if role == "linon" and _linon_via_codex_review_enabled():
+        return _execute_linon_via_codex_review(repo, stage_run_id)
     contract = _contract(entry, objective, inputs)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
