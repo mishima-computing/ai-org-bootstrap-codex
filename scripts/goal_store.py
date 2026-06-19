@@ -114,18 +114,22 @@ class GoalStore:
     # here while the org keeps writing the record; append-only + a separate file means the two PROCESSES
     # never clobber each other (the record stays the org's, steering is host-ingress / org-read-only). The
     # org folds the notes into its not-yet-dispatched leaves at the next boundary — no work is discarded.
-    def steer(self, goal_id: str, text: str) -> dict | None:
-        """U-like OPERATION — append one steering note to a running goal; flowed to the log. Returns the
-        entry with its 1-based `seq`, or None for empty text / an unknown goal."""
+    def steer(self, goal_id: str, text: str, target: str = "goal") -> dict | None:
+        """U-like OPERATION — append one steering note to a running goal; flowed to the log. `target` says
+        WHERE in the Queue it applies: a NODE id (a leaf/branch in the split tree — folded into that node
+        and its whole subtree) or "goal" (every leaf). Goal-level alone is the degenerate case (the whole
+        Queue); NODE-targeting is the point. Returns the entry (1-based `seq`) or None for empty/unknown."""
         text = (text or "").strip()
         if not text or self.read(goal_id) is None:
             return None
+        target = (target or "goal").strip() or "goal"
         self.root.mkdir(parents=True, exist_ok=True)
         with self._steer_path(goal_id).open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")   # O_APPEND -> atomic per line
+            f.write(json.dumps({"text": text, "target": target}, ensure_ascii=False) + "\n")  # O_APPEND atomic
         seq = self._steer_count(goal_id)
-        self._emit({"type": "state", "op": "steer", "goal_id": goal_id, "seq": seq, "text": text})
-        return {"seq": seq, "text": text}
+        self._emit({"type": "state", "op": "steer", "goal_id": goal_id, "seq": seq,
+                    "target": target, "text": text})
+        return {"seq": seq, "text": text, "target": target}
 
     def read_steering(self, goal_id: str, since: int = 0) -> list[dict]:
         """Read (safe) — the goal's steering notes with seq > `since` (1-based line order); since=0 returns
@@ -139,7 +143,8 @@ class GoalStore:
             if not line or i <= since:
                 continue
             try:
-                out.append({"seq": i, "text": json.loads(line).get("text", "")})
+                rec = json.loads(line)
+                out.append({"seq": i, "text": rec.get("text", ""), "target": rec.get("target", "goal")})
             except json.JSONDecodeError:
                 continue
         return out
@@ -243,12 +248,15 @@ def self_test() -> int:
         assert st.load("goal-x", str(w2)) is True
         assert (w2 / "new.py").is_file() and "edit" in (w2 / "a.txt").read_text(), "wip restored via git"
         assert not (w2 / "result.json").exists(), "result.json was excluded from wip"
-        # steering: an additive note appends to the sidecar; read_steering returns it; since= filters new
-        assert st.steer("goal-x", "prefer official tools") == {"seq": 1, "text": "prefer official tools"}
+        # steering: notes append to the sidecar; read_steering returns them; since= filters; target routes
+        assert st.steer("goal-x", "prefer official tools") == {"seq": 1, "text": "prefer official tools",
+                                                               "target": "goal"}
         assert st.steer("goal-x", "  ") is None and st.steer("nope", "x") is None, "empty/unknown -> None"
-        st.steer("goal-x", "also add tests")
-        assert [n["text"] for n in st.read_steering("goal-x")] == ["prefer official tools", "also add tests"]
-        assert st.read_steering("goal-x", since=1) == [{"seq": 2, "text": "also add tests"}], "since= filters"
+        st.steer("goal-x", "rework the parser", target="leaf-7")     # NODE-targeted (a Queue node)
+        assert [(n["text"], n["target"]) for n in st.read_steering("goal-x")] == [
+            ("prefer official tools", "goal"), ("rework the parser", "leaf-7")]
+        assert st.read_steering("goal-x", since=1) == [
+            {"seq": 2, "text": "rework the parser", "target": "leaf-7"}], "since= filters"
         # load_all + delete
         assert "goal-x" in st.read_all()
         st.delete("goal-x")

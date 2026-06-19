@@ -208,15 +208,35 @@ def _set_children(tasks: list, task_id: str, children: list) -> list:
     return out
 
 
-def _apply_steering(store, goal_id, leaf):
-    """Fold the goal's current STEERING (additive mid-run guidance) into THIS leaf's objective at dispatch,
-    so an injection reaches every not-yet-dispatched leaf WITHOUT a kill + re-fire. Returns a COPY of the
-    leaf (never mutates the plan / the split source) with the notes appended as must-follow guidance, or
-    the leaf UNCHANGED when there is no steering. Standing guidance — re-applied to each new leaf at its
-    own dispatch (so re-split children pick it up when they run)."""
+def _ancestry(plan, leaf_id, path=()):
+    """The id set on the path from a root down to leaf_id, INCLUSIVE — so a steer TARGETED at an ancestor
+    (a branch / internal Queue node) reaches the whole subtree under it. Empty if leaf_id is not in the
+    tree (a freshly-split child whose id isn't placed yet falls back to {its own id})."""
+    for t in plan:
+        here = path + (t.get("id"),)
+        if t.get("id") == leaf_id:
+            return set(here)
+        if t.get("children"):
+            r = _ancestry(t["children"], leaf_id, here)
+            if r:
+                return r
+    return set()
+
+
+def _apply_steering(store, goal_id, leaf, plan):
+    """Fold STEERING into THIS leaf's objective at dispatch — WITHOUT a kill + re-fire. A note applies when
+    its target is "goal" (every leaf — the degenerate whole-Queue case) OR a node on this leaf's ancestry
+    path (the leaf itself, or a BRANCH above it so a branch-targeted steer reaches its whole subtree).
+    Node-targeting is the point: goal-level alone is just the Queue. Returns a COPY (never mutates the
+    plan / the split source), or the leaf UNCHANGED when nothing applies. Standing guidance — re-evaluated
+    for each new leaf at its own dispatch (re-split children inherit a branch's steer)."""
     if store is None or not goal_id:
         return leaf
     notes = store.read_steering(goal_id)
+    if not notes:
+        return leaf
+    reach = _ancestry(plan, leaf.get("id")) or {leaf.get("id")}
+    notes = [n for n in notes if n.get("target", "goal") == "goal" or n.get("target") in reach]
     if not notes:
         return leaf
     block = "\n".join(f"- {n['text']}" for n in notes)
@@ -285,7 +305,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             emit({"type": "leaf_start", "id": leaf["id"]})
             # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
             # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
-            exec_leaf = _apply_steering(store, goal_id, leaf)
+            exec_leaf = _apply_steering(store, goal_id, leaf, plan)
             if exec_leaf is not leaf:
                 emit({"type": "steer_applied", "id": leaf["id"]})
             outcome = run_leaf(repo, exec_leaf)

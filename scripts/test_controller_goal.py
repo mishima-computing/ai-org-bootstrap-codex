@@ -197,6 +197,28 @@ def test_additive_steering_reaches_the_dispatched_leaf():
     print("ok  additive steering reaches the dispatched leaf's objective (no kill+re-fire)")
 
 
+def test_node_targeted_steering_hits_only_its_queue_node():
+    # NODE-targeted steering (a Queue node) reaches only that leaf, not its siblings — goal-level alone is
+    # the degenerate "whole Queue" case; targeting a node in the Queue is the point.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    seen = {}
+    def run_leaf(r, t): seen[t["id"]] = t["objective"]; return {"outcome": "converged", "commit": None}
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo)
+        st.create("goal-tgt", "build it", "codex")
+        st.steer("goal-tgt", "rework only this node", target="b")        # targets the Queue node "b" only
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, goal_id="goal-tgt",
+                    split=lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []},
+                                            {"id": "b", "objective": "do b", "scope": ["y.py"], "depends_on": []}])
+    assert "rework only this node" in seen["b"], ("the targeted Queue node gets it", seen)
+    assert "rework only this node" not in seen["a"], ("a sibling node does NOT", seen)
+    print("ok  node-targeted steering reaches only its Queue node, not siblings")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
