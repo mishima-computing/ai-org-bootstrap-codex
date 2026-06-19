@@ -264,12 +264,16 @@ def _failure_sig(res):
     return None
 
 
-def _maybe_seed_scaffold(repo, leaf, emit):
+def _maybe_seed_scaffold(repo, leaf, emit, goal_text=None):
     """Before a GREENFIELD leaf that a trusted template fits, deterministically seed its skeleton into the
     goal repo and COMMIT it (ADR-0008) — acceptance-gated (build/import/smoke), NO LLM, NO Linon (there is
     no real logic to verify yet). The skeleton is the foundation, never the deliverable; the caller then
     FANS OUT the logic on it. No-op (returns None) when no template matches or the target dir already
-    exists. Returns the seed `{base, template, files, acceptance_ok}` on success. Fail-soft."""
+    exists. Returns the seed `{base, template, files, acceptance_ok}` on success. Fail-soft.
+
+    `goal_text` is the top GOAL string: it carries the declared target directory ("NEW directory X/ ONLY"),
+    which is authoritative over a verb-first leaf objective — without it a leaf like "Create the core …"
+    scaffolds into `create/` instead of the goal's real `engagement/`/`mocks/`."""
     if leaf.get("_scaffolded"):           # already inside a scaffolded subtree -> build on the seed, never re-seed
         return None
     try:
@@ -278,7 +282,7 @@ def _maybe_seed_scaffold(repo, leaf, emit):
         tid = scaffold_primitive.match_template(obj, scope)
         if tid is None:
             return None
-        base = scaffold_primitive._scope_base(obj, scope)
+        base = scaffold_primitive._scope_base(obj, scope, goal_text)
         if not base or (Path(repo) / base).exists():       # only GREENFIELD; an existing dir is patched
             return None
         files = scaffold_primitive.instantiate(tid, repo, base)
@@ -388,7 +392,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             # scaffold gives the seams to split along (walking-skeleton -> fan-out). The node is done only
             # when its logic children are, so a skeleton-only result is impossible and a heavy leaf no
             # longer dies atomically at the floor. Linon applies to the logic children, not the scaffold.
-            seeded = _maybe_seed_scaffold(repo, exec_leaf, emit)
+            seeded = _maybe_seed_scaffold(repo, exec_leaf, emit, goal)
             if seeded and split is not None and (_depth_of(plan, leaf["id"]) or 0) < FLOOR_MAX_DEPTH:
                 base = seeded["base"]
                 fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": base}

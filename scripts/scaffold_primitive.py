@@ -22,13 +22,31 @@ import sys
 from pathlib import Path
 
 
-def _scope_base(objective: str, scope=None) -> str:
-    """The package directory (repo-relative, no trailing slash) to scaffold into: the leaf's scope dir if
-    it names one, else a name derived from the objective. Deterministic — no LLM, no randomness."""
+def _declared_dir(text: str) -> str | None:
+    """The build-target directory a text EXPLICITLY names, e.g. "a NEW directory engagement/ ONLY" or
+    "under marketplace/packaging/". Returns the repo-relative path (no trailing slash) or None. This is
+    authoritative over the objective's leading verb: the goal SAYS where to build, so "Create … directory
+    engagement/" must scaffold into `engagement/`, never into `create/`."""
+    m = re.search(r"(?:new\s+directory|directory|under|inside)\s+([A-Za-z][\w-]*(?:/[\w-]+)*)/",
+                  text or "", re.IGNORECASE)
+    return m.group(1).strip("/") if m else None
+
+
+def _scope_base(objective: str, scope=None, goal_text: str | None = None) -> str:
+    """The package directory (repo-relative, no trailing slash) to scaffold into. Priority, most specific
+    first: (1) a directory named in the leaf's scope; (2) a directory the GOAL text explicitly declares
+    ("NEW directory X/ ONLY") — authoritative over a leading verb; (3) a directory the objective declares;
+    (4) a name derived from the objective's first word, last resort only. Deterministic — no LLM, no
+    randomness. The verb fallback once turned "Create/Implement/Replace …" into `create/`/`implement/`/
+    `replace/` directories; the declared-dir lookups above exist to prevent exactly that."""
     for s in (scope or []):
         s = str(s).strip().strip("/")
         if s and not s.endswith((".py", ".md", ".json", ".txt", ".toml")):   # a directory scope
             return s
+    for txt in (goal_text, objective):                                       # the goal/objective's declared dir
+        d = _declared_dir(txt)
+        if d:
+            return d
     m = re.search(r"[A-Za-z][A-Za-z0-9_]{2,}", objective or "")
     name = (m.group(0) if m else "app").lower()
     return re.sub(r"[^a-z0-9_]", "_", name).strip("_") or "app"
@@ -122,7 +140,7 @@ def scaffold(objective: str, target_dir, task: dict | None = None) -> dict | Non
     tid = match_template(objective, scope)
     if tid is None:
         return None
-    base = _scope_base(objective, scope)
+    base = _scope_base(objective, scope, task.get("goal_text"))
     files = instantiate(tid, target_dir, base)
     gate = acceptance(tid, target_dir, base)
     return {"ok": gate["ok"], "template": tid, "base": base, "dotted": _dotted(base),
@@ -144,6 +162,16 @@ def self_test() -> int:
         assert scaffold("integrate the stripe billing webhook with live keys", d + "/x") is None
         assert _scope_base("", ["mocks/"]) == "mocks"
         assert _scope_base("build the parser", ["a/b.py"]) == "build", "a file scope is skipped -> objective"
+        # the verb-fallback bug: a verb-first leaf objective must NOT become a `create/`/`implement/` dir
+        # when the goal text declares the real target directory (regression: engagement/mocks -> create/).
+        assert _declared_dir("Create and own a NEW directory engagement/ ONLY.") == "engagement"
+        assert _declared_dir("...a NEW directory marketplace/packaging/ ONLY.") == "marketplace/packaging"
+        assert _scope_base("Create the core create package contracts.", None,
+                           goal_text="...Create and own a NEW directory engagement/ ONLY.") == "engagement", \
+            "goal-declared dir must win over the objective's leading verb"
+        assert _scope_base("Implement the wallet and gacha engine.", ["create/__init__.py"],
+                           goal_text="...a NEW directory mocks/ ONLY.") == "mocks", \
+            "a file-only leaf scope falls through to the goal-declared dir, not the verb"
         assert _dotted("marketplace/2packaging") == "marketplace.p_2packaging"
     print("scaffold_primitive self-test passed (scope-aware match + deterministic instantiate + gate, no LLM).")
     return 0
