@@ -59,7 +59,11 @@ python3 scripts/controller_goal.py --repo R --goal "..." [--budget N] [--goal-id
 ```
 
 **You drive the org by INJECTING a goal — that command IS the unit of operation.** One goal is one
-independent process: a goal in, PRs out. **Inject several at once to run goals in PARALLEL** — each goal is
+independent process: a goal in, PRs out. The goal can be **large or coarse — you do not pre-decompose it**:
+the org recursively SPLITS it into scoped, dependency-ordered sub-tasks (the Splitter-Queue below), builds
+the parts in parallel, and splits any part that is still too big — down to an atomic floor (it never asks a
+human to break it down). A one-line fix and a sweeping "build me X" enter exactly the same way.
+**Inject several at once to run goals in PARALLEL** — each goal is
 its own `controller_goal` process, and they all append to the same `STREAM_LOG`, so you observe the
 concurrent runs together. (This in-process concurrency is on top of the *in-goal* parallelism below, where
 a single goal's disjoint leaves and write roles already run in parallel.) `--budget` bounds a run;
