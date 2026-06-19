@@ -369,7 +369,10 @@ class ControllerPipelineTests(unittest.TestCase):
     def test_malformed_result_json_fails_stage_without_crashing(self):
         def _malformed_run(repo, contract, run_id, *, cache=True):
             role = contract["role"]
-            payload = json.loads(contract["prompt"])
+            try:                                   # the reask path appends a non-JSON repair instruction
+                payload = json.loads(contract["prompt"])
+            except json.JSONDecodeError:
+                payload = None
             self.calls.append((role, payload, run_id, cache, contract))
             if "files_allowed_to_change" not in contract:
                 (Path(repo) / pipeline.RESULT_FILE).write_text("{not valid json", encoding="utf-8")

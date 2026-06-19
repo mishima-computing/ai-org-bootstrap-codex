@@ -143,6 +143,29 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     allowed = list(contract.files_allowed_to_change or [])
     if output_path:
         allowed.append(output_path)
+
+    # strip-and-pass for COORDINATION-forbidden paths: paths another role owns (e.g. a CI-writer's
+    # .github/workflows/*, which an over-eager implementer routinely adds "to be helpful"). Such an
+    # out-of-bounds extra must NOT land AND must NOT sink an otherwise-correct stage — so revert it
+    # BEFORE the scope check, leaving the deliverable as exactly the in-scope work. The ABSOLUTE/security
+    # set (DEFAULT_FORBIDDEN) is left to HARD-FAIL: attempting it is the signal, not a slip.
+    coord_forbidden = tuple(contract.forbidden_paths or ())
+    if coord_forbidden and carrier_ok:
+        import fnmatch
+        import subprocess
+        stripped = []
+        for f in scope.changed_since(repo, snapshot):
+            if any(fnmatch.fnmatch(f, g) for g in coord_forbidden) and \
+               not any(fnmatch.fnmatch(f, g) for g in scope.DEFAULT_FORBIDDEN):
+                cr = subprocess.run(["git", "-C", str(repo), "checkout", "HEAD", "--", f],
+                                    capture_output=True)
+                p = Path(repo) / f
+                if cr.returncode != 0 and p.exists():       # newly created (not at HEAD) -> remove it
+                    p.unlink()
+                stripped.append(f)
+        if stripped:
+            journal.append("strip_coordination_forbidden", {"stripped": stripped})
+
     scope_report = scope.enforce(repo, allowed, baseline_snapshot=snapshot,
                                  forbidden=forbidden, declared=declared)
     journal.append("enforce_scope", scope_report.to_dict())

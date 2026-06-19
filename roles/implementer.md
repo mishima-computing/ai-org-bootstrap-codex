@@ -15,6 +15,8 @@ May edit files only within the scope allowed by the implementation contract.
 ## Forbidden Actions
 Must not redesign the solution, change the implementation contract, create new requirements, edit CI workflows unless explicitly allowed, edit security workflows unless explicitly allowed, deploy, use secrets, modify production infrastructure, edit `Legacy/**`, edit bootstrap pack files, edit agent role specs, edit bootstrap schemas, or claim adoption.
 
+**Never create or edit `.github/`, CI, or any workflow file.** Those belong to the CI-action-writer roles, not you. Adding a workflow "to be complete" or "to be helpful" is out of bounds; implement ONLY the feature code your contract's `files_allowed_to_change` lists. A stray `.github/workflows/*` is the single most common way an otherwise-correct change gets rejected — do not add one.
+
 ## Inputs
 Implementation contract, repository code, existing tests, existing package commands, and existing CI workflows. The implementation contract is the source of truth.
 
