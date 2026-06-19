@@ -222,15 +222,36 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
     return stdout, stderr, code, timed_out, frozen, killed
 
 
-def _ensure_scratch_excluded(repo: Path) -> None:
-    """Keep the controller's runtime scratch (`.agent-runs/`) OUT of the file range the carrier can see.
-    Codex discovers files through gitignore-respecting search (ripgrep) and listing, so a git-excluded
-    path is never surfaced to the model. We write `.agent-runs/` to `.git/info/exclude` (NOT the tracked
-    `.gitignore`), which works for ANY target repo without modifying its files and is shared across its
-    worktrees. Without this, a reviewer carrier free-reads the controller's own journals under
-    `.agent-runs/` and reviews the bookkeeping instead of the deliverable — looping forever on a finding
+def _carrier_view_exclude_patterns() -> list:
+    """gitignore patterns for paths a carrier should never SEE: machine noise with no review value, plus
+    sibling-edition adapter dirs (containment). controller_scope's scratch classes are the single source of
+    truth for the cache/artifact set — we translate them to gitignore form and add dependency trees,
+    coverage, and editor/OS cruft. This is a DISCOVERY filter (codex searches via gitignore-respecting rg),
+    NOT a security boundary (secrets are the sandbox's job), and it deliberately omits lockfiles / generated
+    output, whose visibility is role-dependent (a reviewer shouldn't read them; an implementer may update
+    them) — and omits build/ dist/ target/, which can be a project's real source dirs."""
+    import controller_scope as cs
+    pats = [".agent-runs/"]                                            # controller runtime scratch
+    pats += [f"{seg}/" for seg in cs.SCRATCH_SEGMENTS]                 # __pycache__/, .pytest_cache/, ...
+    pats += [g for g in cs.SCRATCH_GLOBS if not g.endswith("/*")]      # *.pyc, *.pyo, *.pyd, *.egg-info
+    pats += [f"{a}/" for a in (cs._FB1, cs._FB2)]                      # sibling-edition adapters (containment)
+    pats += ["node_modules/", ".venv/", "venv/", "htmlcov/", ".coverage",
+             ".DS_Store", "*.swp", ".idea/", ".vscode/"]               # deps / coverage / editor-OS cruft
+    seen, out = set(), []
+    for p in pats:
+        if p not in seen:
+            seen.add(p); out.append(p)
+    return out
+
+
+def _ensure_carrier_view_clean(repo: Path) -> None:
+    """Keep machine noise + sibling-edition adapters OUT of the file range the carrier can see, via
+    `.git/info/exclude` (NOT the tracked `.gitignore`) so it holds for ANY target repo without modifying
+    its files and is shared across worktrees. Codex discovers files through gitignore-respecting search, so
+    excluded == unseen. Without this a reviewer carrier free-reads the controller's own `.agent-runs/`
+    journals (and caches/deps) and reviews the bookkeeping instead of the deliverable — looping on a finding
     no code change can clear (observed: a scaffold leaf failing linon r0..r3 on `.agent-runs/.../journal`).
-    A repo that already ignores it (most do) is a no-op."""
+    Idempotent; a no-op for patterns the repo already ignores."""
     try:
         gp = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
                             capture_output=True, text=True, timeout=10)
@@ -239,13 +260,16 @@ def _ensure_scratch_excluded(repo: Path) -> None:
         raw = gp.stdout.strip()
         excl = Path(raw) if os.path.isabs(raw) else (repo / raw)
         existing = excl.read_text(encoding="utf-8") if excl.is_file() else ""
-        if not any(tok in (".agent-runs", ".agent-runs/") for tok in existing.split()):
+        present = set(existing.split())
+        missing = [p for p in _carrier_view_exclude_patterns()
+                   if p not in present and p.rstrip("/") not in present]
+        if missing:
             excl.parent.mkdir(parents=True, exist_ok=True)
             with excl.open("a", encoding="utf-8") as f:
                 if existing and not existing.endswith("\n"):
                     f.write("\n")
-                f.write(".agent-runs/\n")
-    except Exception:  # noqa: BLE001 — scratch-hiding is best-effort, never break a run
+                f.write("\n".join(missing) + "\n")
+    except Exception:  # noqa: BLE001 — view-hygiene is best-effort, never break a run
         pass
 
 
@@ -257,7 +281,7 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
     the controller's schema gate validates it in Python — `--output-schema` is avoided since strict
     OpenAI schemas reject optional properties, F12)."""
     repo = Path(repo).resolve()
-    _ensure_scratch_excluded(repo)   # the carrier must never see the controller's .agent-runs/ scratch
+    _ensure_carrier_view_clean(repo)   # hide controller scratch + machine noise + sibling adapters from view
     out_dir = Path(out_dir) if out_dir else (repo / ".agent-runs" / "carrier")
     out_dir.mkdir(parents=True, exist_ok=True)
     full_prompt = compose_prompt(prompt, repo_carrier_discipline(repo), prepend_discipline)
