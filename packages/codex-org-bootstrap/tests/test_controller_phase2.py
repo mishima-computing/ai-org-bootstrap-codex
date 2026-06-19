@@ -103,6 +103,58 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(rep.ok)
             self.assertTrue(any("verifier bad" in u for u in rep.unresolved_failures))
 
+    def _forbidden_contract(self, allowed):
+        return {**self._contract(allowed), "forbidden_paths": [".github/*"]}
+
+    def test_coordination_forbidden_is_stripped_and_passes(self):
+        # an over-eager implementer adds a CI-writer's .github/workflows file "to be helpful". That extra
+        # must be reverted BEFORE the scope check so it neither lands nor sinks the otherwise-correct stage.
+        with tempfile.TemporaryDirectory() as d:
+            repo = _new_repo(d)
+            def carrier(repo, prompt, sandbox, *, timeout, retries, out_dir):
+                (Path(repo) / "allowed.txt").write_text("ok")
+                wf = Path(repo) / ".github" / "workflows"; wf.mkdir(parents=True)
+                (wf / "x.yml").write_text("on: push")
+                return {"ok": True, "attempts": [{"attempt": 0, "exit": 0,
+                                                  "timed_out": False, "stdin_hang": False}]}
+            rep = workflow.run_contract(
+                repo, self._forbidden_contract(["allowed.txt"]), "run-strip",
+                verifier_specs=[PASS], include_builtin_gates=False, carrier_runner=carrier, clock=lambda: 1)
+            self.assertTrue(rep.ok, rep.unresolved_failures)
+            self.assertEqual(rep.changed_files, ["allowed.txt"])
+            self.assertFalse((repo / ".github" / "workflows" / "x.yml").exists())
+
+    def test_coordination_forbidden_leftover_from_earlier_iteration_is_stripped(self):
+        # REGRESSION: a .github/workflows file created by an EARLIER (timed-out) repair iteration persists
+        # in the shared worktree and sits in THIS stage's baseline. The old strip looked only at this
+        # stage's delta (changed_since), so it skipped the leftover — but enforce flags forbidden against
+        # the FULL dirty set, so every later repair stage failed forever on a file its own delta no longer
+        # contained. Strip must clean the full set.
+        with tempfile.TemporaryDirectory() as d:
+            repo = _new_repo(d)
+            wf = Path(repo) / ".github" / "workflows"; wf.mkdir(parents=True)
+            (wf / "old.yml").write_text("leftover from a prior timed-out iteration")  # pre-existing dirty
+            rep = workflow.run_contract(
+                repo, self._forbidden_contract(["allowed.txt"]), "run-leftover",
+                verifier_specs=[PASS], include_builtin_gates=False,
+                carrier_runner=_stub_carrier("allowed.txt"), clock=lambda: 1)
+            self.assertTrue(rep.ok, rep.unresolved_failures)        # was False before the fix
+            self.assertFalse((wf / "old.yml").exists())             # leftover cleaned
+
+    def test_coordination_forbidden_cleaned_even_when_carrier_fails(self):
+        # the strip runs regardless of carrier_ok, so a forbidden leftover does not survive a timed-out
+        # iteration into the next one (the stage still fails on the carrier, but the worktree starts clean).
+        with tempfile.TemporaryDirectory() as d:
+            repo = _new_repo(d)
+            wf = Path(repo) / ".github" / "workflows"; wf.mkdir(parents=True)
+            (wf / "old.yml").write_text("leftover")
+            rep = workflow.run_contract(
+                repo, self._forbidden_contract(["allowed.txt"]), "run-clean-onfail",
+                verifier_specs=[PASS], include_builtin_gates=False,
+                carrier_runner=_stub_carrier("allowed.txt", ok=False), clock=lambda: 1)
+            self.assertFalse(rep.ok)                                 # carrier failed -> stage fails
+            self.assertFalse((wf / "old.yml").exists())              # ...but the forbidden leftover is cleaned
+
     def test_journal_records_all_phases(self):
         with tempfile.TemporaryDirectory() as d:
             repo = _new_repo(d)

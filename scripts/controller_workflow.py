@@ -150,18 +150,31 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     # BEFORE the scope check, leaving the deliverable as exactly the in-scope work. The ABSOLUTE/security
     # set (DEFAULT_FORBIDDEN) is left to HARD-FAIL: attempting it is the signal, not a slip.
     coord_forbidden = tuple(contract.forbidden_paths or ())
-    if coord_forbidden and carrier_ok:
+    # Strip over the FULL dirty set (porcelain_touched), not this stage's delta (changed_since), and
+    # do it even when the carrier failed: a coordination-forbidden file created in an EARLIER iteration
+    # that TIMED OUT (carrier_ok False -> strip skipped) would otherwise persist in the shared repair
+    # worktree, and `enforce` flags forbidden against the full set — so every later repair stage fails
+    # on a leftover its own delta no longer contains, looping forever. Cleaning the leftover unconditionally
+    # lets the next iteration start in-scope. (DEFAULT_FORBIDDEN/security is still left to HARD-FAIL below.)
+    if coord_forbidden:
         import fnmatch
         import subprocess
         stripped = []
-        for f in scope.changed_since(repo, snapshot):
+        for f in scope.porcelain_touched(repo):
             if any(fnmatch.fnmatch(f, g) for g in coord_forbidden) and \
                not any(fnmatch.fnmatch(f, g) for g in scope.DEFAULT_FORBIDDEN):
-                cr = subprocess.run(["git", "-C", str(repo), "checkout", "HEAD", "--", f],
+                # unstage (a staged-new add survives a plain `checkout HEAD --`), then revert if the path
+                # exists at HEAD, else remove the working-tree copy. Handles staged/untracked/modified/deleted.
+                subprocess.run(["git", "-C", str(repo), "reset", "-q", "HEAD", "--", f], capture_output=True)
+                co = subprocess.run(["git", "-C", str(repo), "checkout", "-q", "HEAD", "--", f],
                                     capture_output=True)
                 p = Path(repo) / f
-                if cr.returncode != 0 and p.exists():       # newly created (not at HEAD) -> remove it
+                if co.returncode != 0 and p.exists():        # not at HEAD -> newly added; remove it
                     p.unlink()
+                # a leftover from an earlier iteration sits in THIS stage's baseline snapshot; reverting it
+                # would otherwise read as a DELETE-vs-baseline and resurface as a deviation. Drop it from the
+                # snapshot so the strip is a true no-op to the scope check, not a new "change".
+                snapshot.pop(f, None)
                 stripped.append(f)
         if stripped:
             journal.append("strip_coordination_forbidden", {"stripped": stripped})
