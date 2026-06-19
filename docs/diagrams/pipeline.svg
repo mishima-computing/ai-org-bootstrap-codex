@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 300" width="980" height="300" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="A goal goes in and PRs come out: split a large or vague goal into a recursive task tree, build the disjoint leaves in parallel through the dialectic, verify with linon and stefan, deliver PRs. A leaf that cannot converge is re-split; it never asks a human.">
+  <defs>
+    <linearGradient id="gGoal" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+    <linearGradient id="gSplit" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/></linearGradient>
+    <linearGradient id="gBuild" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0284c7"/></linearGradient>
+    <linearGradient id="gVerify" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0d9488"/></linearGradient>
+    <linearGradient id="gPr" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#16a34a"/></linearGradient>
+    <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8b94a3"/></marker>
+    <marker id="arwLoop" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#f59e0b"/></marker>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.20"/></filter>
+  </defs>
+
+  <text x="490" y="40" text-anchor="middle" font-size="20" font-weight="700" fill="#8b94a3">AI Org Bootstrap Codex — a goal in, PRs out</text>
+
+  <!-- re-split loop -->
+  <path d="M 479 112 C 479 66, 289 66, 289 112" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arwLoop)"/>
+  <text x="384" y="60" text-anchor="middle" font-size="12" fill="#f59e0b">can't converge → re-split</text>
+
+  <!-- connectors -->
+  <line x1="174" y1="150" x2="206" y2="150" stroke="#8b94a3" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="364" y1="150" x2="396" y2="150" stroke="#8b94a3" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="554" y1="150" x2="586" y2="150" stroke="#8b94a3" stroke-width="2.5" marker-end="url(#arw)"/>
+  <line x1="744" y1="150" x2="776" y2="150" stroke="#8b94a3" stroke-width="2.5" marker-end="url(#arw)"/>
+
+  <!-- GOAL -->
+  <g filter="url(#sh)"><rect x="24" y="112" width="150" height="76" rx="14" fill="url(#gGoal)"/></g>
+  <text x="99" y="146" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">a GOAL</text>
+  <text x="99" y="166" text-anchor="middle" font-size="11.5" fill="#e0e7ff">large or vague</text>
+
+  <!-- SPLIT -->
+  <g filter="url(#sh)"><rect x="214" y="112" width="150" height="76" rx="14" fill="url(#gSplit)"/></g>
+  <text x="289" y="146" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">SPLIT</text>
+  <text x="289" y="166" text-anchor="middle" font-size="11.5" fill="#dbeafe">recursive task tree</text>
+
+  <!-- BUILD -->
+  <g filter="url(#sh)"><rect x="404" y="112" width="150" height="76" rx="14" fill="url(#gBuild)"/></g>
+  <text x="479" y="146" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">BUILD</text>
+  <text x="479" y="166" text-anchor="middle" font-size="11.5" fill="#e0f2fe">leaves ∥ · dialectic</text>
+
+  <!-- VERIFY -->
+  <g filter="url(#sh)"><rect x="594" y="112" width="150" height="76" rx="14" fill="url(#gVerify)"/></g>
+  <text x="669" y="146" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">VERIFY</text>
+  <text x="669" y="166" text-anchor="middle" font-size="11.5" fill="#ccfbf1">linon · stefan</text>
+
+  <!-- PRs -->
+  <g filter="url(#sh)"><rect x="784" y="112" width="150" height="76" rx="14" fill="url(#gPr)"/></g>
+  <text x="859" y="146" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">PRs</text>
+  <text x="859" y="166" text-anchor="middle" font-size="11.5" fill="#dcfce7">per-leaf commits</text>
+
+  <text x="490" y="240" text-anchor="middle" font-size="13" fill="#8b94a3">recursive decomposition · parallel build · stops at a floor + budget — never asks a human</text>
+</svg>

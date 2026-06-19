@@ -3,6 +3,11 @@
 > 🤖 **AI agents:** your operating instructions are in **[AGENTS.md](AGENTS.md)** — read it first.
 > This README is the human-facing overview of what the system is and how it works.
 
+<p align="center">
+  <img src="docs/diagrams/pipeline.svg" width="100%"
+       alt="a goal in, PRs out — split a large or vague goal into a recursive task tree, build the disjoint leaves in parallel through the dialectic, verify with linon and stefan, deliver PRs; a leaf that cannot converge is re-split, never a human.">
+</p>
+
 Private Codex-native operating kit for repo work under `mishima-computing`. Not a multi-carrier prompt
 pack — the Codex-only build of AI Org Bootstrap: role contracts, Codex adapters, schema-gated handoffs,
 deterministic validation, and one merge-gate path.
