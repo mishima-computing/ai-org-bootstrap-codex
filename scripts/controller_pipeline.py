@@ -410,6 +410,35 @@ def _write_manifest(repo: Path, run_id: str, manifest: dict) -> Path:
     return path
 
 
+# A reviewer's finding must target the human-authored DELIVERABLE. A finding whose file is controller
+# scratch (.agent-runs/), a build/cache artifact, a dependency tree, or a generated/lock file is NOT
+# reviewable: no change to the deliverable can clear it, so it drives the repair loop (while findings ...)
+# forever — observed live as a scaffold leaf failing linon r0..r3 on .agent-runs/.../journal.jsonl. Such
+# findings are DROPPED before they gate convergence. This is the hard, deterministic backstop: it holds no
+# matter what the reviewer was able to read (gitignore/exclude only soft-reduces what it sees; the reviewer
+# can still `find`/`cat` past it). Segment-based so it matches both relative and absolute finding paths.
+_NONREVIEWABLE_SEGMENTS = (".agent-runs", ".git", "__pycache__", "node_modules", ".venv", "venv",
+                           ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox")
+_NONREVIEWABLE_BASENAMES = ("package-lock.json", "poetry.lock", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock")
+_NONREVIEWABLE_GLOBS = ("*.pyc", "*.pyo", "*.pyd", "*.egg-info", "*.min.js", "*.min.css", "*.map")
+
+
+def _is_reviewable_finding_path(path: str) -> bool:
+    """False if a finding's file is non-deliverable (scratch / artifact / dependency / generated). A
+    finding with no concrete target is kept (conservative — we only drop what we can positively classify)."""
+    import fnmatch
+    p = (path or "").strip()
+    if not p:
+        return True
+    segs = [s for s in p.replace("\\", "/").split("/") if s and s != "."]
+    if any(seg in _NONREVIEWABLE_SEGMENTS for seg in segs):
+        return False
+    base = segs[-1] if segs else ""
+    if base in _NONREVIEWABLE_BASENAMES:
+        return False
+    return not any(fnmatch.fnmatch(base, g) for g in _NONREVIEWABLE_GLOBS)
+
+
 def _linon_findings(result: dict | str | None) -> list[dict]:
     if isinstance(result, str):
         try:
@@ -421,7 +450,11 @@ def _linon_findings(result: dict | str | None) -> list[dict]:
     findings = result.get("findings")
     if not isinstance(findings, list):
         return []
-    return [finding for finding in findings if isinstance(finding, dict)]
+    dicts = [finding for finding in findings if isinstance(finding, dict)]
+    # drop findings about non-deliverable files (scratch/artifact/generated) — they can never converge.
+    # The raw result (with every finding) is still journaled in reports["linon"], so nothing is lost from
+    # the audit trail; only the convergence gate ignores the un-actionable ones.
+    return [f for f in dicts if _is_reviewable_finding_path(f.get("file") or f.get("path") or "")]
 
 
 def _iteration_record(kind: str, iteration: int, started_at: datetime, finished_at: datetime,

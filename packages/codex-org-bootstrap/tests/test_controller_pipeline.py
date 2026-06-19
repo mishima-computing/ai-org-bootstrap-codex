@@ -486,6 +486,30 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertFalse(result["attempts"][1]["killed"])
         self.assertEqual(result["attempts"][1]["exit"], 0)
 
+    def test_linon_findings_drop_nondeliverable_targets(self):
+        # The hard backstop: a reviewer finding about controller scratch / a generated file can never be
+        # cleared by changing the deliverable, so it would drive `while findings` repair forever (the live
+        # scaffold loop on .agent-runs/.../journal). _linon_findings drops such findings before they gate.
+        real = {"file": "cockpit/server.py", "severity": "major", "claim": "off-by-one in the parser"}
+        result = {"findings": [
+            {"file": ".agent-runs/controller/goal-x-implementer/journal.jsonl", "claim": "ok:true but cmd exited 1"},
+            {"file": "tests/__pycache__/m.cpython.pyc", "claim": "stale bytecode"},
+            {"file": "package-lock.json", "claim": "lock churn"},
+            {"path": "/abs/repo/.agent-runs/stream.jsonl", "claim": "scratch via absolute path"},
+            real,
+        ]}
+        kept = pipeline._linon_findings(result)
+        self.assertEqual(kept, [real], "only the deliverable-targeting finding survives")
+        # path classifier directly
+        self.assertFalse(pipeline._is_reviewable_finding_path(".agent-runs/controller/j.jsonl"))
+        self.assertFalse(pipeline._is_reviewable_finding_path("node_modules/x/i.js"))
+        self.assertFalse(pipeline._is_reviewable_finding_path("poetry.lock"))
+        self.assertTrue(pipeline._is_reviewable_finding_path("src/app.py"))
+        self.assertTrue(pipeline._is_reviewable_finding_path(""), "no concrete target -> kept (conservative)")
+        # scratch-only findings collapse to empty -> a leaf with only such findings can converge
+        self.assertEqual(pipeline._linon_findings({"findings": [
+            {"file": ".agent-runs/x/journal.jsonl", "claim": "self-report-trust"}]}), [])
+
     def test_carrier_view_hides_scratch_and_noise(self):
         # A reviewer carrier free-reads the worktree, so machine noise must be OUT of its file range — else
         # it reviews the controller's own .agent-runs/ journals ("packet says ok but the journal shows a
