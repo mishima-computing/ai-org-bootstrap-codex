@@ -51,14 +51,27 @@ judging) that needs an LLM, plus a **mechanical harness** that must be right eve
 
 ```mermaid
 flowchart LR
-  OBJ(["an objective"]) --> DES["designers<br/>(aggressive · conservative)"]
-  DES --> GEN["genius<br/>(evidence-gated)"]
-  GEN --> AUF["aufheben<br/>→ ONE contract"]
-  AUF --> IMP["implementer<br/>(scoped edits only)"]
-  IMP --> LIN["linon<br/>(adversarial code verify)"]
+  OBJ(["an objective"])
+  subgraph DES["3 designers · parallel"]
+    direction TB
+    AGG["aggressive-designer"]
+    CON["conservative-designer"]
+    GEN["genius (evidence-gated)"]
+  end
+  subgraph CIW["CI writers · parallel"]
+    direction TB
+    FCI["functional"]
+    SCI["security"]
+    NCI["nonfunctional"]
+  end
+  OBJ --> DES & CIW
+  DES --> AUF["aufheben-designer<br/>→ ONE contract"]
+  CIW --> AUF
+  AUF --> IMP["implementer<br/>(scoped edits)"]
+  IMP --> LIN["linon · code verify"] & STE["stefan · aesthetic verify"]
   LIN -- "reject (bad reference)" --> AUF
-  LIN -- "clean" --> STE["stefan<br/>(aesthetic verify)"]
-  STE --> DIFF(["one verified diff"])
+  LIN -- "clean" --> DIFF(["one verified diff"])
+  STE --> DIFF
 ```
 
 ### Execution: isolated, parallel, grounded
