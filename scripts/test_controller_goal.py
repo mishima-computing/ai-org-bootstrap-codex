@@ -223,30 +223,32 @@ def test_node_targeted_steering_hits_only_its_queue_node():
     print("ok  node-targeted steering reaches only its Queue node, not siblings")
 
 
-def test_greenfield_scaffold_leaf_is_seeded_before_the_carrier():
-    # ADR-0008: a greenfield leaf a trusted template fits gets its skeleton seeded + committed into the goal
-    # repo BEFORE the carrier runs, so the carrier builds on a known-good skeleton (no LLM, no scaffold SPOF).
+def test_scaffold_leaf_seeds_then_fans_out_its_logic_via_the_queue():
+    # ADR-0008 Phase 2: a greenfield scaffold leaf seeds a deterministic skeleton (acceptance-gated, no
+    # Linon), then FANS OUT its logic via the Queue (becomes an internal node with logic children) instead
+    # of building atomically — so a heavy leaf no longer dies at the floor, and skeleton-only is impossible.
     import tempfile, os, subprocess
     def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
-    saw = {}
-    def run_leaf(r, t):
-        saw["skeleton"] = os.path.isfile(os.path.join(r, "marketplace", "packaging", "__init__.py"))
-        return {"outcome": "converged", "commit": None}
+    ran = []
+    def run_leaf(r, t): ran.append(t["id"]); return {"outcome": "converged", "commit": None}
+    def split(goal, ctx, carrier):
+        if ctx.get("parent"):   # the fan-out call -> the LOGIC children, built ON the scaffold
+            assert "skeleton ALREADY exists" in goal, "fan-out objective tells the splitter to build on the seed"
+            return [{"id": "logic-bundler", "objective": "build the bundler", "scope": ["marketplace/packaging/bundler.py"], "depends_on": []},
+                    {"id": "logic-manifest", "objective": "build the manifest", "scope": ["marketplace/packaging/manifest.py"], "depends_on": []}]
+        return [{"id": "packaging", "objective": "scaffold the packaging python package", "scope": ["marketplace/packaging/"], "depends_on": []}]
     with tempfile.TemporaryDirectory() as d:
         repo = os.path.join(d, "r"); os.mkdir(repo)
         git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
         open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
         events = []
-        cg.run_goal(repo, "build it", run_leaf=run_leaf, emit=events.append,
-                    split=lambda g, c, ca: [{"id": "a", "objective": "scaffold the packaging python package",
-                                             "scope": ["marketplace/packaging/"], "depends_on": []}])
-        # the seed is a real commit in the goal repo, ahead of base
-        assert subprocess.run(["git", "-C", repo, "rev-list", "--count", "HEAD"],
-                              capture_output=True, text=True).stdout.strip() == "2"
-    assert saw.get("skeleton"), "the deterministic skeleton must exist in the repo when the carrier runs"
-    seed_ev = [e for e in events if e.get("type") == "scaffold_seeded"]
-    assert seed_ev and seed_ev[0]["base"] == "marketplace/packaging" and seed_ev[0]["acceptance_ok"], seed_ev
-    print("ok  greenfield scaffold leaf is seeded deterministically before the carrier (ADR-0008)")
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, emit=events.append)
+    assert any(e.get("type") == "scaffold_seeded" for e in events), "the skeleton was seeded"
+    fan = [e for e in events if e.get("type") == "scaffold_fanout"]
+    assert fan and fan[0]["base"] == "marketplace/packaging" and fan[0]["n"] == 2, fan
+    # the scaffold leaf itself did NOT run the carrier; its LOGIC children did (skeleton-only impossible)
+    assert "packaging" not in ran and "logic-bundler" in ran and "logic-manifest" in ran, ran
+    print("ok  scaffold leaf seeds then fans out its logic via the Queue — no atomic floor death (ADR-0008)")
 
 
 def test_no_progress_breaks_the_blind_retry_loop():

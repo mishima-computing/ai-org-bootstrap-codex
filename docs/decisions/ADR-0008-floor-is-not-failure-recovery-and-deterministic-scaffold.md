@@ -92,3 +92,26 @@ citing externally (claim-evidence discipline).
 | **GPT-Engineer** | greenfield generation; manual iteration on generated files (repo archived 2026-04-22). |
 | **BabyAGI** | historical task-queue generation/prioritisation; experimental, original archived. |
 | **Devin** | closed orchestration; public guidance = independent atomic slices, clear test/build, per-slice human review. |
+
+## Addendum (2026-06-20): Phase 2 = scaffold → Queue fan-out (staging), NOT floor reflection-retry
+
+Phase 2 is implemented as a **staging** of the dialectic, not a recovery retry:
+
+- A greenfield scaffold leaf **seeds the deterministic skeleton** (acceptance-gated: build/import/smoke;
+  **NO Linon** — there is no real logic to adversarially verify yet; the skeleton is the foundation, never
+  the deliverable), then **FANS OUT its logic via the Queue**: it re-splits the objective into the
+  modules/files the implementation needs and becomes an INTERNAL node. The scaffold gives the seams to
+  split along (walking-skeleton → fan-out). The node is done only when its logic children are, so a
+  **skeleton-only result is structurally impossible**, and a heavy leaf no longer dies atomically at the
+  floor (B / packaging). **Linon applies to the logic children, not the scaffold.**
+- Staging does double duty on gate placement: *bypass Linon at the scaffold stage* avoids false-rejecting
+  a bare skeleton (the loop's cause), and *apply Linon + the real tests at the logic stage* rejects a
+  skeleton-only deliverable.
+
+**Rejected alternative (and why):** a floor reflection-retry that re-runs a Linon-rejected leaf with the
+findings injected, using a hash of the **Linon findings** as the no-progress guard. Rejected — LLM output
+(findings text) varies run to run, so a content-equality no-progress guard is unreliable (never or wrongly
+triggers), and retrying a persistent Linon rejection is exactly the infinite-loop risk. The staging
+**eliminates the loop's cause** (Linon never sees the scaffold) instead of bounding it with a fragile
+guard. Loop safety for the fan-out is **deterministic only**: depth < `FLOOR_MAX_DEPTH` + the global
+budget (counters, never LLM-content comparison).

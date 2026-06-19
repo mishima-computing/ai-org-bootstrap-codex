@@ -266,22 +266,22 @@ def _failure_sig(res):
 
 def _maybe_seed_scaffold(repo, leaf, emit):
     """Before a GREENFIELD leaf that a trusted template fits, deterministically seed its skeleton into the
-    goal repo and COMMIT it (ADR-0008) — so the leaf's carrier (cut from the goal HEAD) builds on a
-    KNOWN-GOOD skeleton instead of bootstrapping greenfield (the scaffold SPOF that sank mock-suite /
-    packaging), with NO LLM. No-op when no template matches or the target dir already exists (the carrier
-    just patches it). Fail-soft: seeding never breaks a build."""
+    goal repo and COMMIT it (ADR-0008) — acceptance-gated (build/import/smoke), NO LLM, NO Linon (there is
+    no real logic to verify yet). The skeleton is the foundation, never the deliverable; the caller then
+    FANS OUT the logic on it. No-op (returns None) when no template matches or the target dir already
+    exists. Returns the seed `{base, template, files, acceptance_ok}` on success. Fail-soft."""
     try:
         obj = leaf.get("objective", "") or ""
         scope = leaf.get("scope") or []
         tid = scaffold_primitive.match_template(obj, scope)
         if tid is None:
-            return
+            return None
         base = scaffold_primitive._scope_base(obj, scope)
         if not base or (Path(repo) / base).exists():       # only GREENFIELD; an existing dir is patched
-            return
+            return None
         files = scaffold_primitive.instantiate(tid, repo, base)
         if not files:
-            return
+            return None
         gate = scaffold_primitive.acceptance(tid, repo, base)
         specs = [f":(literal){f}" for f in files]
         git_ops.ensure_identity(repo)
@@ -291,8 +291,20 @@ def _maybe_seed_scaffold(repo, leaf, emit):
                        capture_output=True)
         emit({"type": "scaffold_seeded", "id": leaf.get("id"), "template": tid, "base": base,
               "acceptance_ok": gate.get("ok"), "files": len(files)})
+        return {"base": base, "template": tid, "files": files, "acceptance_ok": gate.get("ok")}
     except Exception:                                       # noqa: BLE001 — seeding is best-effort
-        pass
+        return None
+
+
+def _scaffold_logic_objective(leaf, seeded) -> str:
+    """The objective for fanning out a scaffolded leaf's LOGIC: a deterministic skeleton is already in
+    place, so DECOMPOSE and build the REAL implementation ON it. A skeleton-only result is rejected — the
+    node is done only when its logic children are."""
+    base = seeded.get("base")
+    return ((leaf.get("objective") or "")
+            + f"\n\n[A deterministic skeleton ALREADY exists at `{base}` (it builds and imports). "
+              f"Decompose and build the REAL implementation ON it — split by the modules / files the work "
+              f"needs. Do NOT re-create the skeleton, and a skeleton-only result is rejected.]")
 
 
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
@@ -357,7 +369,21 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             exec_leaf = _apply_steering(store, goal_id, leaf, plan)
             if exec_leaf is not leaf:
                 emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
-            _maybe_seed_scaffold(repo, exec_leaf, emit)   # deterministic skeleton commit before the carrier (ADR-0008)
+            # ADR-0008 Phase 2: a GREENFIELD scaffold leaf seeds a deterministic skeleton (acceptance-gated,
+            # NO Linon — nothing to adversarially verify yet), then FANS OUT its logic via the Queue: the
+            # scaffold gives the seams to split along (walking-skeleton -> fan-out). The node is done only
+            # when its logic children are, so a skeleton-only result is impossible and a heavy leaf no
+            # longer dies atomically at the floor. Linon applies to the logic children, not the scaffold.
+            seeded = _maybe_seed_scaffold(repo, exec_leaf, emit)
+            if seeded and split is not None and (_depth_of(plan, leaf["id"]) or 0) < FLOOR_MAX_DEPTH:
+                fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": seeded["base"]}
+                children = split(_scaffold_logic_objective(leaf, seeded), fan_ctx, carrier)
+                if children and not frontier.validate_plan(children):
+                    plan = _set_children(plan, leaf["id"], children)
+                    plan = frontier.advance(plan, leaf["id"], "pending")   # internal node: done when children are
+                    emit({"type": "scaffold_fanout", "id": leaf["id"], "base": seeded["base"], "n": len(children)})
+                    continue
+                # the split produced nothing usable -> build the logic atomically on the seed (fallback)
             outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
