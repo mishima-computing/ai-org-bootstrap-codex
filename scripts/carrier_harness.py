@@ -273,6 +273,53 @@ def _ensure_carrier_view_clean(repo: Path) -> None:
         pass
 
 
+def extract_token_usage(carrier_stdout: str) -> dict | None:
+    """Pull the carrier's token + context spend from the codex `--json` event stream (each line a JSON
+    event). codex emits a CUMULATIVE token-count event as it works; we take the final total. Returns a
+    normalized dict — {input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens,
+    total_tokens, context_window, context_used_percent} (a field is absent if codex didn't report it) —
+    or None if the stream carried no usage. Robust to field-nesting differences across codex versions:
+    the usage block is found wherever it sits (msg.info.total_token_usage, or a flat dict with
+    input/output/total_tokens). This is what `/status` shows, captured for a non-interactive `exec` run."""
+    best = None
+    ctx_window = None
+    for line in carrier_stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = ev.get("msg") if isinstance(ev.get("msg"), dict) else ev
+        info = msg.get("info") if isinstance(msg.get("info"), dict) else msg
+        cw = info.get("model_context_window") or msg.get("model_context_window")
+        if isinstance(cw, int) and cw > 0:
+            ctx_window = cw
+        usage = info.get("total_token_usage") or info.get("token_usage")
+        if not isinstance(usage, dict):
+            usage = info if any(k in info for k in ("total_tokens", "input_tokens", "output_tokens")) else None
+        if not isinstance(usage, dict):
+            continue
+        total = usage.get("total_tokens")
+        if total is None:
+            total = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+        if best is None or (total or 0) >= (best.get("total_tokens") or 0):   # cumulative -> keep the max
+            best = {"input_tokens": usage.get("input_tokens"),
+                    "cached_input_tokens": usage.get("cached_input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "reasoning_output_tokens": usage.get("reasoning_output_tokens"),
+                    "total_tokens": total}
+    if best is None:
+        return None
+    if ctx_window:
+        best["context_window"] = ctx_window
+        inp = best.get("input_tokens")
+        if isinstance(inp, int) and inp >= 0:
+            best["context_used_percent"] = round(100.0 * inp / ctx_window, 1)
+    return {k: v for k, v in best.items() if v is not None}
+
+
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,
                 retries=1, prepend_discipline=True, out_dir=None, output_file=None) -> dict:
     """Launch a Codex carrier deterministically. stdin is ALWAYS closed (the fix for the hang).
@@ -301,14 +348,16 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
         log.write_text("timestamp: " + timestamp + "\n" + stdout +
                        ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
         hang = STDIN_HANG_MARKER in stdout and code != 0
+        usage = extract_token_usage(stdout)   # token + context spend, from codex's --json stream
         attempts.append({"attempt": attempt, "timestamp": timestamp, "exit": code,
                          "timed_out": timed_out, "stdin_hang": hang, "frozen": frozen,
                          "killed": killed, "retryable": attempt < retries,
-                         "no_output_timeout": no_output_timeout, "log": str(log)})
+                         "no_output_timeout": no_output_timeout, "log": str(log), "usage": usage})
         if code == 0 and not timed_out and not frozen and not killed and not hang:
-            return {"ok": True, "attempts": attempts, "log": str(log)}
+            return {"ok": True, "attempts": attempts, "log": str(log), "usage": usage}
         # else retry (timeout/hang/nonzero)
-    return {"ok": False, "attempts": attempts, "log": attempts[-1]["log"]}
+    return {"ok": False, "attempts": attempts, "log": attempts[-1]["log"],
+            "usage": attempts[-1].get("usage")}
 
 
 def cmd_run(args) -> int:
@@ -362,6 +411,20 @@ def self_test() -> int:
     dev = scope_deviations(["demos/a.html", "roles/x.md", "scripts/y.py"], ["demos/**", "scripts/*.py"])
     assert dev == ["roles/x.md"], dev
     assert scope_deviations(["demos/a.html"], []) == [], "no globs = no enforcement"
+    # 5. token/context extraction from a codex --json stream: cumulative -> final total; context %.
+    stream = "\n".join([
+        '{"id":"1","msg":{"type":"task_started"}}',
+        '{"msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"total_tokens":1060},"model_context_window":272000}}}',
+        '{"msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3000,"output_tokens":400,"total_tokens":3400},"model_context_window":272000}}}',
+        'not json — a heartbeat line',
+    ])
+    u = extract_token_usage(stream)
+    if not u or u.get("total_tokens") != 3400 or u.get("input_tokens") != 3000:
+        fails.append(f"extract_token_usage must take the final cumulative total: {u}")
+    if not u or u.get("context_window") != 272000 or "context_used_percent" not in u:
+        fails.append("extract_token_usage must capture context_window + percent")
+    if extract_token_usage("no events here") is not None:
+        fails.append("extract_token_usage must return None when no usage is present")
     if fails:
         for f in fails:
             print("FAIL " + f, file=sys.stderr)

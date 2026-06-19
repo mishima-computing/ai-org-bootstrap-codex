@@ -389,8 +389,13 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     _record_stage_errors(report_dict, stage_errors)
     stage = _stage_record(repo, role, entry, contract, result, result_path, result_sha256,
                           report_dict, stage_run_id, stage_ok, started_at, finished_at)
+    # the stage's TOKEN + CONTEXT spend (from codex's --json stream, captured per attempt by the harness)
+    # rides the stage_done event onto the shared stream, so a host (Shagiri) can show what /status shows.
+    # None on a cache hit — a replayed stage spends ~0 tokens, which is the honest number.
+    usage = next((a.get("usage") for a in reversed(report_dict.get("attempts") or []) if a.get("usage")), None)
     _stream_append(repo, {"source": role, "type": "stage_done", "run_id": stage_run_id,
-                          "ok": bool(stage_ok), "unresolved": report_dict.get("unresolved_failures") or []})
+                          "ok": bool(stage_ok), "unresolved": report_dict.get("unresolved_failures") or [],
+                          "usage": usage})
     return stage_ok, result, report_dict, stage
 
 
