@@ -64,6 +64,23 @@ def stream_emit(repo):
     return emit
 
 
+_SPEECH_CAP = 16000   # max serialized chars of the splitter's decomposition that rides the stream verbatim
+
+
+def _emit_splitter_speech(emit, run_id, plan) -> None:
+    """Stream the splitter's actual output — the task DAG it produced — as an `agent_message` event, the same
+    shape the pipeline uses for designer/implementer/linon speech. goal_split/scaffold_fanout carry only a
+    COUNT; the decomposition itself is what a host (Shagiri) needs to show "what the splitter said", and the
+    stream is its only durable home (the carrier log lives in an ephemeral leaf worktree). Bound, legibly."""
+    import json as _json
+    try:
+        s = _json.dumps(plan, ensure_ascii=False)
+        speech = plan if len(s) <= _SPEECH_CAP else {"_truncated": True, "_chars": len(s), "_preview": s[:_SPEECH_CAP]}
+    except Exception:                                          # noqa: BLE001
+        speech = {"_preview": str(plan)[:_SPEECH_CAP]}
+    emit({"type": "agent_message", "source": "splitter", "run_id": run_id, "speech": speech})
+
+
 def codex_carrier(repo, *, model=None):
     """The real split carrier: run a read-only codex carrier that emits the child-DAG JSON to an output
     file, and return it (fail-soft '[]' on any error, so split() yields no children rather than crash).
@@ -369,6 +386,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         emit({"type": "split_invalid", "goal": goal, "errors": errs})
         return _finalize(plan)
     emit({"type": "goal_split", "goal": goal, "n": len(plan)})
+    _emit_splitter_speech(emit, goal_id, plan)
 
     spent = 0
     while True:
@@ -404,6 +422,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     plan = _set_children(plan, leaf["id"], children)
                     plan = frontier.advance(plan, leaf["id"], "pending")   # internal node: done when children are
                     emit({"type": "scaffold_fanout", "id": leaf["id"], "base": base, "n": len(children)})
+                    _emit_splitter_speech(emit, leaf["id"], children)
                     continue
                 # no in-base children -> build the logic atomically on the seed (fallback)
             outcome = run_leaf(repo, exec_leaf)
@@ -451,6 +470,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})
+            _emit_splitter_speech(emit, leaf["id"], children)
     emit({"type": "goal_done", "goal": goal})
     return _finalize(plan)
 

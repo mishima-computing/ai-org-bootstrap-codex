@@ -340,6 +340,36 @@ def _stream_append(repo, event: dict) -> None:
         pass
 
 
+SPEECH_CAP = 16000   # max serialized chars of a role's speech that ride the stream verbatim
+
+
+def _bounded_speech(result):
+    """A role's actual output (its validated packet — proposal, findings, contract) shaped to ride the
+    shared stream. The stream is the only DURABLE record of what each agent said: the per-stage result.json
+    is preserved inside the stage's worktree, which for a wave role is an ephemeral sub-worktree removed
+    after the wave — so a host (Shagiri) that wants to show "what this agent said" cannot read it back, only
+    the stream survives (log-is-the-state-source). Emitting just ok/usage on stage_done was the poor-minimal
+    -log time bomb: the speech was computed, then dropped. Oversized packets are previewed (not silently cut)
+    so the truncation is legible rather than a hidden data loss."""
+    if result is None:
+        return None
+    try:
+        s = json.dumps(result, ensure_ascii=False)
+    except Exception:                                          # noqa: BLE001 — a non-serializable packet still streams as text
+        s = str(result)
+    if len(s) <= SPEECH_CAP:
+        return result
+    return {"_truncated": True, "_chars": len(s), "_preview": s[:SPEECH_CAP]}
+
+
+def _stream_speech(repo, role: str, stage_run_id: str, result) -> None:
+    """Tee a role's speech onto the shared stream as its own `agent_message` event (distinct from stage_done
+    so existing consumers are untouched), making the dialectic's CONTENT — not just its timing — durable and
+    host-readable."""
+    _stream_append(repo, {"source": role, "type": "agent_message", "run_id": stage_run_id,
+                          "speech": _bounded_speech(result)})
+
+
 def _linon_via_codex_review_enabled() -> bool:
     return os.environ.get("LINON_VIA_CODEX_REVIEW", "") not in ("", "0", "false", "no")
 
@@ -370,6 +400,7 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     stage = {"role": "linon", "run_id": stage_run_id, "ok": stage_ok, "reviewer": "codex-review",
              "started_at": _iso8601_utc(started_at), "finished_at": _iso8601_utc(finished_at),
              "findings_count": len(findings)}
+    _stream_speech(repo, "linon", stage_run_id, result)       # the findings themselves (durable on the stream)
     _stream_append(repo, {"source": "linon", "type": "stage_done", "run_id": stage_run_id,
                           "ok": stage_ok, "unresolved": unresolved})
     return stage_ok, result, report_dict, stage
@@ -393,6 +424,7 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     # rides the stage_done event onto the shared stream, so a host (Shagiri) can show what /status shows.
     # None on a cache hit — a replayed stage spends ~0 tokens, which is the honest number.
     usage = next((a.get("usage") for a in reversed(report_dict.get("attempts") or []) if a.get("usage")), None)
+    _stream_speech(repo, role, stage_run_id, result)          # the CONTENT the role produced (durable on the stream)
     _stream_append(repo, {"source": role, "type": "stage_done", "run_id": stage_run_id,
                           "ok": bool(stage_ok), "unresolved": report_dict.get("unresolved_failures") or [],
                           "usage": usage})

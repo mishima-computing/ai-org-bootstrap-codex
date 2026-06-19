@@ -273,6 +273,25 @@ def test_no_progress_breaks_the_blind_retry_loop():
     print("ok  no-progress (same diff twice) breaks the blind-retry loop (ADR-0008)")
 
 
+def test_splitter_speech_streams_as_agent_message():
+    # log-is-the-state-source: goal_split carries only a COUNT; the decomposition itself (the splitter's
+    # speech) must ride the stream so a host can show "what the splitter said" without scraping an ephemeral
+    # leaf worktree. The decomposition is emitted as an `agent_message` with source="splitter".
+    import tempfile
+    plan_out = [_leaf("a", ["x.py"]), _leaf("b", ["y.py"])]
+    events = []
+    with tempfile.TemporaryDirectory() as d:
+        cg.run_goal(d, "build it", run_leaf=lambda r, t: "converged",
+                    split=lambda g, c, ca: plan_out, emit=events.append, goal_id="goal-spk")
+    speeches = [e for e in events if e.get("type") == "agent_message" and e.get("source") == "splitter"]
+    assert speeches, "splitter must stream its decomposition as an agent_message"
+    sp = speeches[0]
+    assert sp.get("run_id") == "goal-spk", sp
+    ids = {t.get("id") for t in (sp.get("speech") or [])}
+    assert ids == {"a", "b"}, ("the streamed speech IS the task DAG the splitter produced", sp.get("speech"))
+    print("ok  splitter streams its decomposition as an agent_message (log-is-the-state-source)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
