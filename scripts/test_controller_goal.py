@@ -173,6 +173,10 @@ def test_goal_id_makes_the_org_own_its_state():
         # rich log: the org's terminal state (status + wip) flows into its own Stream
         gf = [e for e in events if e.get("type") == "goal_finished"]
         assert gf and gf[0]["status"] == "done" and gf[0]["wip"] == rec["wip"], gf
+        # leaf lifecycle events carry goal_id, so a consumer (the town / steer UI) attributes each Queue
+        # node to its goal — the basis for picking a node to steer.
+        assert any(e.get("type") == "leaf_start" and e.get("goal_id") == "goal-own1" for e in events), \
+            "leaf_start carries goal_id"
         print("ok  goal_id -> the org owns its goal state (record + wip) AND flows it to its rich log")
 
 

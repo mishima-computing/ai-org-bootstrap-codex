@@ -302,12 +302,12 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 return _finalize(plan)
             spent += 1
             plan = frontier.advance(plan, leaf["id"], "running")
-            emit({"type": "leaf_start", "id": leaf["id"]})
+            emit({"type": "leaf_start", "id": leaf["id"], "goal_id": goal_id})   # goal_id attributes the node
             # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
             # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
             exec_leaf = _apply_steering(store, goal_id, leaf, plan)
             if exec_leaf is not leaf:
-                emit({"type": "steer_applied", "id": leaf["id"]})
+                emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
             outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
@@ -324,7 +324,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 plan = frontier.advance(plan, leaf["id"], "done")
                 leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)
                 # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"
-                emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit")})
+                emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit"), "goal_id": goal_id})
                 continue
             depth = _depth_of(plan, leaf["id"]) or 0
             if at_floor(leaf, depth):                       # floor reached -> fail it, never split forever
@@ -343,7 +343,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 continue
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
-            emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth})
+            emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})
     emit({"type": "goal_done", "goal": goal})
     return _finalize(plan)
 
