@@ -24,6 +24,7 @@ import os  # noqa: E402
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
 import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the host)
+import scaffold_primitive  # noqa: E402 — ADR-0008 deterministic, LLM-free scaffold skeleton
 import splitter  # noqa: E402
 
 
@@ -246,6 +247,37 @@ def _apply_steering(store, goal_id, leaf, plan):
     return steered
 
 
+def _maybe_seed_scaffold(repo, leaf, emit):
+    """Before a GREENFIELD leaf that a trusted template fits, deterministically seed its skeleton into the
+    goal repo and COMMIT it (ADR-0008) — so the leaf's carrier (cut from the goal HEAD) builds on a
+    KNOWN-GOOD skeleton instead of bootstrapping greenfield (the scaffold SPOF that sank mock-suite /
+    packaging), with NO LLM. No-op when no template matches or the target dir already exists (the carrier
+    just patches it). Fail-soft: seeding never breaks a build."""
+    try:
+        obj = leaf.get("objective", "") or ""
+        scope = leaf.get("scope") or []
+        tid = scaffold_primitive.match_template(obj, scope)
+        if tid is None:
+            return
+        base = scaffold_primitive._scope_base(obj, scope)
+        if not base or (Path(repo) / base).exists():       # only GREENFIELD; an existing dir is patched
+            return
+        files = scaffold_primitive.instantiate(tid, repo, base)
+        if not files:
+            return
+        gate = scaffold_primitive.acceptance(tid, repo, base)
+        specs = [f":(literal){f}" for f in files]
+        git_ops.ensure_identity(repo)
+        subprocess.run(["git", "-C", str(repo), "add", "--", *specs], capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        f"scaffold: {base} (deterministic skeleton, ADR-0008)", "--", *specs],
+                       capture_output=True)
+        emit({"type": "scaffold_seeded", "id": leaf.get("id"), "template": tid, "base": base,
+              "acceptance_ok": gate.get("ok"), "files": len(files)})
+    except Exception:                                       # noqa: BLE001 — seeding is best-effort
+        pass
+
+
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
              context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
@@ -308,6 +340,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             exec_leaf = _apply_steering(store, goal_id, leaf, plan)
             if exec_leaf is not leaf:
                 emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
+            _maybe_seed_scaffold(repo, exec_leaf, emit)   # deterministic skeleton commit before the carrier (ADR-0008)
             outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
