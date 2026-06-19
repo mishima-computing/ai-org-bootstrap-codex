@@ -36,7 +36,14 @@ from pathlib import Path
 # codex's signature for the stdin-wait hang this harness exists to prevent.
 STDIN_HANG_MARKER = "Reading additional input from stdin"
 NO_OUTPUT_TIMEOUT_ENV = "CODEX_CARRIER_NO_OUTPUT_TIMEOUT_SECONDS"
-DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS = 120.0
+# No-output liveness watchdog. `codex --json` emits an event per ITEM (tool start/complete), not per
+# token, so the model's generation between a completed tool call and the next action is a legitimate
+# SILENT window. On large contexts (observed 165k input tokens) that think-time routinely exceeds 120s,
+# and the old 120s watchdog killed ~9% of otherwise-healthy carriers mid-turn (frozen), stalling
+# convergence. 300s clears realistic large-context model latency while still catching a genuinely stuck
+# child command; the 600s hard wall remains the real ceiling, and the stdin-wait hang is already
+# prevented by stdin=DEVNULL — so the tight 120s no longer earns its false positives.
+DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS = 300.0
 
 
 def _iso8601_utc() -> str:
