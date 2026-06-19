@@ -1,5 +1,8 @@
 # AI Org Bootstrap Codex
 
+> 🤖 **AI agents:** your operating instructions are in **[AGENTS.md](AGENTS.md)** — read it first.
+> This README is the human-facing overview of what the system is and how it works.
+
 Private Codex-native operating kit for repo work under `mishima-computing`. Not a multi-carrier prompt
 pack — the Codex-only build of AI Org Bootstrap: role contracts, Codex adapters, schema-gated handoffs,
 deterministic validation, and one merge-gate path.
@@ -106,6 +109,16 @@ python3 -m unittest discover -s packages/codex-org-bootstrap/tests   # the diale
 python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 scripts/test_controller_goal.py
 ```
 
+## Documentation
+
+- [`AGENTS.md`](AGENTS.md) — the agent operating directive (the bootstrap an AI reads to run in this repo).
+- [`docs/architecture.md`](docs/architecture.md) — the system in depth.
+- [`docs/decisions/`](docs/decisions/) — Architecture Decision Records (why the engine behaves as it does):
+  ADR-0001 Codex-only · ADR-0004 controller-python-ification · ADR-0005 settledness-not-dumbing ·
+  ADR-0007 the org owns its state · ADR-0008 floor-is-not-failure (recovery + deterministic scaffold).
+- [`docs/codex-carrier-capabilities.md`](docs/codex-carrier-capabilities.md) — what the Codex carrier can and cannot do.
+- [`docs/evidence/`](docs/evidence/) — measured results (role timing & pipelining, cone-recall).
+
 ## Source of truth
 
 - `registry/runtime-registry.yaml`: role, adapter, schema, write scope, and output target map.
@@ -119,7 +132,8 @@ python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 
 - `scripts/verify-linon-packet.py`, `scripts/stefan-aesthetic-review.py`, `scripts/measure-result-screen.py`: verifier instruments (code / aesthetics / rendered-pixel measurement).
 - `packages/codex-org-bootstrap`: importable deterministic runtime.
 
-## Hard Boundary
+## Hard boundary
 
-This repository is Codex-only. It must not contain non-Codex carrier directories, invocation procedures,
-adapters, or fallback instructions.
+This repository is **Codex-only**: it must not contain non-Codex carrier directories, invocation
+procedures, adapters, or fallback instructions. The agent-facing form of this rule — and the rest of the
+operating directive — is in [AGENTS.md](AGENTS.md).
