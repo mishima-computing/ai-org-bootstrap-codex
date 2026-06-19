@@ -270,6 +270,8 @@ def _maybe_seed_scaffold(repo, leaf, emit):
     no real logic to verify yet). The skeleton is the foundation, never the deliverable; the caller then
     FANS OUT the logic on it. No-op (returns None) when no template matches or the target dir already
     exists. Returns the seed `{base, template, files, acceptance_ok}` on success. Fail-soft."""
+    if leaf.get("_scaffolded"):           # already inside a scaffolded subtree -> build on the seed, never re-seed
+        return None
     try:
         obj = leaf.get("objective", "") or ""
         scope = leaf.get("scope") or []
@@ -298,13 +300,25 @@ def _maybe_seed_scaffold(repo, leaf, emit):
 
 def _scaffold_logic_objective(leaf, seeded) -> str:
     """The objective for fanning out a scaffolded leaf's LOGIC: a deterministic skeleton is already in
-    place, so DECOMPOSE and build the REAL implementation ON it. A skeleton-only result is rejected — the
-    node is done only when its logic children are."""
+    place, so DECOMPOSE and build the REAL implementation ON it, scoped INSIDE the skeleton's directory. A
+    skeleton-only result is rejected — the node is done only when its logic children are."""
     base = seeded.get("base")
+    files = ", ".join(seeded.get("files") or [])
     return ((leaf.get("objective") or "")
-            + f"\n\n[A deterministic skeleton ALREADY exists at `{base}` (it builds and imports). "
-              f"Decompose and build the REAL implementation ON it — split by the modules / files the work "
-              f"needs. Do NOT re-create the skeleton, and a skeleton-only result is rejected.]")
+            + f"\n\n[A deterministic skeleton ALREADY exists at `{base}/` (files: {files}). Build the REAL "
+              f"implementation ON it. EVERY sub-task's scope MUST be a path under `{base}/` — do NOT invent "
+              f"any other directory. Split by the modules / files the work needs WITHIN `{base}/`. Do not "
+              f"re-create the skeleton; a skeleton-only result is rejected.]")
+
+
+def _scope_under_base(task, base) -> bool:
+    """True only when EVERY scope path of a fan-out child sits under the scaffold base — rejects a splitter
+    that drifted to invented directories (implement/, replace/) instead of building in the skeleton."""
+    base = str(base or "").strip().strip("/")
+    scope = task.get("scope") or []
+    if not base or not scope:
+        return False
+    return all((lambda p: p == base or p.startswith(base + "/"))(str(s).strip().strip("/")) for s in scope)
 
 
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
@@ -376,14 +390,18 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             # longer dies atomically at the floor. Linon applies to the logic children, not the scaffold.
             seeded = _maybe_seed_scaffold(repo, exec_leaf, emit)
             if seeded and split is not None and (_depth_of(plan, leaf["id"]) or 0) < FLOOR_MAX_DEPTH:
-                fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": seeded["base"]}
+                base = seeded["base"]
+                fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": base}
                 children = split(_scaffold_logic_objective(leaf, seeded), fan_ctx, carrier)
+                children = [c for c in (children or []) if _scope_under_base(c, base)]   # G1: drop scope-drifters
                 if children and not frontier.validate_plan(children):
+                    for c in children:                          # G2: descendants build ON the seed, never re-scaffold
+                        c["_scaffolded"] = True
                     plan = _set_children(plan, leaf["id"], children)
                     plan = frontier.advance(plan, leaf["id"], "pending")   # internal node: done when children are
-                    emit({"type": "scaffold_fanout", "id": leaf["id"], "base": seeded["base"], "n": len(children)})
+                    emit({"type": "scaffold_fanout", "id": leaf["id"], "base": base, "n": len(children)})
                     continue
-                # the split produced nothing usable -> build the logic atomically on the seed (fallback)
+                # no in-base children -> build the logic atomically on the seed (fallback)
             outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
@@ -423,6 +441,9 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 plan = frontier.advance(plan, leaf["id"], "failed")   # bad/empty split -> stop this branch
                 emit({"type": "split_unusable", "id": leaf["id"]})
                 continue
+            if leaf.get("_scaffolded"):                  # re-split inside a scaffolded subtree stays scaffolded
+                for c in children:
+                    c["_scaffolded"] = True
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})

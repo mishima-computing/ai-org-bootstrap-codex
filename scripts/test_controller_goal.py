@@ -223,19 +223,20 @@ def test_node_targeted_steering_hits_only_its_queue_node():
     print("ok  node-targeted steering reaches only its Queue node, not siblings")
 
 
-def test_scaffold_leaf_seeds_then_fans_out_its_logic_via_the_queue():
-    # ADR-0008 Phase 2: a greenfield scaffold leaf seeds a deterministic skeleton (acceptance-gated, no
-    # Linon), then FANS OUT its logic via the Queue (becomes an internal node with logic children) instead
-    # of building atomically — so a heavy leaf no longer dies at the floor, and skeleton-only is impossible.
+def test_scaffold_fanout_scopes_children_in_base_and_suppresses_re_scaffold():
+    # ADR-0008 Phase 2 guards (found live on B/packaging): a scaffolded leaf fans out its logic INTO the
+    # base; a child whose scope DRIFTED outside the base (implement/, replace/) is dropped; and the logic
+    # children do NOT re-scaffold (no deep recursive re-seeding to the floor).
     import tempfile, os, subprocess
     def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
-    ran = []
-    def run_leaf(r, t): ran.append(t["id"]); return {"outcome": "converged", "commit": None}
+    ran, tagged = [], []
+    def run_leaf(r, t): ran.append(t["id"]); tagged.append(t.get("_scaffolded")); return {"outcome": "converged", "commit": None}
     def split(goal, ctx, carrier):
-        if ctx.get("parent"):   # the fan-out call -> the LOGIC children, built ON the scaffold
-            assert "skeleton ALREADY exists" in goal, "fan-out objective tells the splitter to build on the seed"
+        if ctx.get("parent"):   # fan-out: two in-base children + one that DRIFTED outside the base
+            assert "scope MUST be a path under" in goal, "fan-out objective constrains scope to the base"
             return [{"id": "logic-bundler", "objective": "build the bundler", "scope": ["marketplace/packaging/bundler.py"], "depends_on": []},
-                    {"id": "logic-manifest", "objective": "build the manifest", "scope": ["marketplace/packaging/manifest.py"], "depends_on": []}]
+                    {"id": "logic-manifest", "objective": "build the manifest", "scope": ["marketplace/packaging/manifest.py"], "depends_on": []},
+                    {"id": "logic-drift", "objective": "build core", "scope": ["implement/core.py"], "depends_on": []}]
         return [{"id": "packaging", "objective": "scaffold the packaging python package", "scope": ["marketplace/packaging/"], "depends_on": []}]
     with tempfile.TemporaryDirectory() as d:
         repo = os.path.join(d, "r"); os.mkdir(repo)
@@ -243,12 +244,14 @@ def test_scaffold_leaf_seeds_then_fans_out_its_logic_via_the_queue():
         open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
         events = []
         cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, emit=events.append)
-    assert any(e.get("type") == "scaffold_seeded" for e in events), "the skeleton was seeded"
     fan = [e for e in events if e.get("type") == "scaffold_fanout"]
-    assert fan and fan[0]["base"] == "marketplace/packaging" and fan[0]["n"] == 2, fan
-    # the scaffold leaf itself did NOT run the carrier; its LOGIC children did (skeleton-only impossible)
-    assert "packaging" not in ran and "logic-bundler" in ran and "logic-manifest" in ran, ran
-    print("ok  scaffold leaf seeds then fans out its logic via the Queue — no atomic floor death (ADR-0008)")
+    # G1: the scope-drifter is dropped -> only the two in-base children fan out and run
+    assert fan and fan[0]["n"] == 2, ("only in-base children fan out", fan)
+    assert "logic-drift" not in ran and "logic-bundler" in ran and "logic-manifest" in ran, ran
+    # G2: the logic children are tagged _scaffolded and do NOT re-scaffold (exactly one seed, no recursion)
+    assert ran and all(tagged), ("logic children are tagged _scaffolded", ran, tagged)
+    assert sum(1 for e in events if e.get("type") == "scaffold_seeded") == 1, "no recursive re-scaffold"
+    print("ok  scaffold fan-out scopes children in-base (drift dropped) + suppresses re-scaffold (ADR-0008)")
 
 
 def test_no_progress_breaks_the_blind_retry_loop():
