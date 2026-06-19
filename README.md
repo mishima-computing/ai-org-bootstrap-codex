@@ -55,8 +55,15 @@ judging) that needs an LLM, plus a **mechanical harness** that must be right eve
 ## The autonomous builder (a goal → PRs)
 
 ```sh
-python3 scripts/controller_goal.py --repo R --goal "..." [--budget N]
+python3 scripts/controller_goal.py --repo R --goal "..." [--budget N] [--goal-id ID] [--resume-from ID]
 ```
+
+**You drive the org by INJECTING a goal — that command IS the unit of operation.** One goal is one
+independent process: a goal in, PRs out. **Inject several at once to run goals in PARALLEL** — each goal is
+its own `controller_goal` process, and they all append to the same `STREAM_LOG`, so you observe the
+concurrent runs together. (This in-process concurrency is on top of the *in-goal* parallelism below, where
+a single goal's disjoint leaves and write roles already run in parallel.) `--budget` bounds a run;
+`--goal-id` lets a host track and `--resume-from` resume a goal's state.
 
 `controller_goal.run_goal` is the org's recursive **Splitter-Queue** — the Splitter and the Queue are
 one node (`run()` a leaf via the dialectic; `split()` it when it cannot converge):
