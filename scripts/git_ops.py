@@ -66,13 +66,14 @@ def _rollback(repo, rels: list[str]) -> None:
                 p.unlink()
 
 
-def merge_and_commit_leaf(goal_repo, leaf_worktree, leaf_id, objective) -> bool:
+def merge_and_commit_leaf(goal_repo, leaf_worktree, leaf_id, objective):
     """Merge a converged leaf's files from its worktree into the goal worktree and commit them as ONE
     commit — the handoff to dependent leaves (the next leaf worktree is cut from the goal HEAD), so leaves
     accumulate as commits and the goal's single PR reads as a series of sub-task commits.
 
-    Returns True if committed (or there was nothing to commit), False if the handoff FAILED — in which
-    case the leaf paths are rolled back to HEAD and the caller must fail the leaf (mechanical)."""
+    Returns the new commit SHA (so the caller can flow it into the rich log) — or "" when there was nothing
+    to commit, or None when the handoff FAILED (the leaf paths are rolled back to HEAD and the caller must
+    fail the leaf, mechanical). Note: "" is success; only None is failure."""
     import shutil
     goal_repo, leaf_worktree = Path(goal_repo), Path(leaf_worktree)
     leaf_files = leaf_changed_files(leaf_worktree)
@@ -84,20 +85,20 @@ def merge_and_commit_leaf(goal_repo, leaf_worktree, leaf_id, objective) -> bool:
         elif not src.exists() and dst.is_file():
             dst.unlink()
     if not leaf_files:
-        return True
+        return ""
     specs = [f":(literal){r}" for r in leaf_files]
     if _git(goal_repo, "add", "--", *specs).returncode != 0:
         _rollback(goal_repo, leaf_files)
-        return False
+        return None
     if _git(goal_repo, "diff", "--cached", "--quiet", "--", *specs).returncode == 0:
-        return True                                        # nothing staged (already committed / no change)
+        return ""                                          # nothing staged (already committed / no change)
     ensure_identity(goal_repo)
     obj = (objective or leaf_id or "leaf").strip()
     subject = obj.splitlines()[0][:72] if obj else "leaf"
     if _git(goal_repo, "commit", "-q", "-m", subject, "-m", f"leaf: {leaf_id}", "--", *specs).returncode != 0:
         _rollback(goal_repo, leaf_files)
-        return False
-    return True
+        return None
+    return _git(goal_repo, "rev-parse", "HEAD").stdout.strip()
 
 
 def self_test() -> int:
@@ -112,8 +113,8 @@ def self_test() -> int:
         # leaf creates an untracked DIRECTORY (porcelain collapses to `?? pages/`) + a metacharacter name
         (wt / "pages").mkdir(); (wt / "pages" / "[id].tsx").write_text("route\n"); (wt / "app.py").write_text("x=2\n")
         (repo / "pages").mkdir(exist_ok=True); (repo / "pages" / "i.tsx").write_text("UNRELATED dirty\n")  # glob bait
-        ok = merge_and_commit_leaf(repo, wt, "leaf-a", "add route + edit app")
-        assert ok, "leaf should commit"
+        sha = merge_and_commit_leaf(repo, wt, "leaf-a", "add route + edit app")
+        assert sha and len(sha) == 40, ("leaf should commit and return its sha", sha)
         committed = run(repo, "show", "--name-only", "--format=", "HEAD").stdout.split()
         assert "pages/[id].tsx" in committed and "app.py" in committed, committed
         assert "pages/i.tsx" not in committed, ("glob swept unrelated", committed)        # literal pathspec held
@@ -126,8 +127,8 @@ def self_test() -> int:
             hook = repo / hook
         hook.parent.mkdir(parents=True, exist_ok=True); hook.write_text("#!/bin/sh\nexit 1\n"); hook.chmod(0o755)
         (wt / "b.py").write_text("new\n")
-        ok2 = merge_and_commit_leaf(repo, wt, "leaf-b", "add b")
-        assert ok2 is False, "a failed commit must fail the leaf"
+        failed = merge_and_commit_leaf(repo, wt, "leaf-b", "add b")
+        assert failed is None, "a failed commit must return None (fail the leaf)"
         assert not (repo / "b.py").exists(), "the failed leaf's new file must be rolled back"
         dirty = run(repo, "status", "--porcelain").stdout
         assert "b.py" not in dirty, ("failed leaf work must not linger", dirty)   # the i.tsx bait may remain

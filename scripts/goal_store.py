@@ -2,15 +2,15 @@
 """Durable, method-encapsulated state OWNED BY THE AI ORG — its goals' state is the org's, not
 the host's. A host (Shagiri) only READS this via the same record/refs; it never writes them.
 
-The AI Org holds state once goals can be resumed. This is that state, behind a CLUD method surface
-(Create / Load / Update / Delete) so callers never touch the backing store directly — the backend can
+The AI Org holds state once goals can be resumed. This is that state, behind a CLRUD method surface
+(Create / Load / Read / Update / Delete — Load OPERATES on state, Read only observes) so callers never touch the backing store directly — the backend can
 become sqlite later without changing a single caller.
 
 Layout (all under <repo>/.agent-runs/goals/):
   - <goal_id>.json            one record per goal: status, prompt, org, resumed_from, and the two work
                               fields `wip` (in-progress) and `done` (completed) — each a git commit SHA.
   - refs/goals/<id>/wip,done  the actual work, held IN GIT (a commit off the goal's base), not a loose
-                              patch. Resume "calls it with git": restore_wip cherry-picks the wip commit
+                              patch. Resume "calls it with git": Load cherry-picks the wip commit range
                               into a fresh worktree. Refs live in the repo's object store, so they survive
                               worktree cleanup AND cockpit restarts.
 
@@ -43,7 +43,9 @@ class GoalStore:
     def _ref(goal_id: str, kind: str) -> str:
         return f"refs/goals/{goal_id}/{kind}"
 
-    # --- CLUD: Create / Load / Update / Delete ----------------------------------------------------
+    # --- CLRUD: Create / Load / Read / Update / Delete --------------------------------------------
+    # Load and Read are DISTINCT: Load *operates* — it makes the target BECOME the stored state (sets git
+    # to the goal's committed version). Read is the SAFE check that observes the record and mutates nothing.
     def create(self, goal_id: str, goal: str, org: str, resumed_from: str | None = None) -> dict:
         """C — open a goal record (status running). wip/done start empty (filled as work is committed)."""
         rec = {"goal_id": goal_id, "goal": goal, "org": org, "status": "running",
@@ -52,8 +54,8 @@ class GoalStore:
         self._write(goal_id, rec)
         return rec
 
-    def load(self, goal_id: str) -> dict | None:
-        """L — read one record (None if absent)."""
+    def read(self, goal_id: str) -> dict | None:
+        """Read — observe one record (None if absent). Returns the data; mutates nothing."""
         p = self._path(goal_id)
         if not p.is_file():
             return None
@@ -62,8 +64,8 @@ class GoalStore:
         except (json.JSONDecodeError, OSError):
             return None
 
-    def load_all(self) -> dict[str, dict]:
-        """L — every record, keyed by goal_id (used to rebuild the in-memory index on startup)."""
+    def read_all(self) -> dict[str, dict]:
+        """Read — every record, keyed by goal_id (used to rebuild the in-memory index on startup)."""
         out: dict[str, dict] = {}
         if not self.root.is_dir():
             return out
@@ -76,10 +78,16 @@ class GoalStore:
                 continue
         return out
 
+    def find(self, **criteria) -> list[dict]:
+        """Read (1:N) — every record matching ALL criteria, e.g. find(status="failed"), find(wip=sha). The
+        flexible lookup: state is resolvable from various ids/fields, and an id may map to many (1:N)."""
+        return [r for r in self.read_all().values()
+                if all(r.get(k) == v for k, v in criteria.items())]
+
     def update(self, goal_id: str, **fields) -> dict:
         """U — merge fields into a record (read-modify-write under a lock; atomic temp+rename)."""
         with self._lock:
-            rec = self.load(goal_id) or {"goal_id": goal_id}
+            rec = self.read(goal_id) or {"goal_id": goal_id}
             rec.update(fields)
             self._write(goal_id, rec)
             return rec
@@ -92,17 +100,20 @@ class GoalStore:
             _git(self.repo, "update-ref", "-d", self._ref(goal_id, kind))
 
     # --- git-backed work fields (the record's wip/done point here) --------------------------------
-    def commit_wip(self, goal_id: str, work: str) -> str | None:
+    def save_wip(self, goal_id: str, work: str) -> str | None:    # SAVE the current build as wip (<-> load)
         return self._commit_work(goal_id, work, "wip")
 
-    def commit_done(self, goal_id: str, work: str) -> str | None:
+    def save_done(self, goal_id: str, work: str) -> str | None:   # SAVE the delivered build as done
         return self._commit_work(goal_id, work, "done")
 
-    def restore_wip(self, goal_id: str, work: str) -> bool:
-        """Resume: replay the in-progress work into a fresh worktree. `wip` is the TIP of a chain of
-        per-leaf commits (one commit per converged leaf), so we cherry-pick the whole RANGE base..wip —
-        base being the fork point (merge-base of wip and this fresh worktree's HEAD). Accepts a goal_id or
-        a raw SHA/ref. Returns True if work was restored."""
+    def load(self, goal_id: str, work: str | None = None) -> bool:
+        """L of CLRUD — Load(id) makes the target BECOME that goal's state. `goal_id` IDENTIFIES which
+        state; `work` is the target to load it into (defaults to the store's repo). This is an OPERATION,
+        not a read — it sets the target's git to the goal's committed version (`wip`). `wip` is the TIP of
+        a chain of per-leaf commits, so cherry-pick the whole RANGE base..wip — base being the fork point
+        (merge-base of wip and the target's HEAD). Accepts a goal_id or a raw SHA/ref. Returns True if the
+        state was loaded."""
+        work = work or self.repo
         sha = self._resolve(goal_id, "wip")
         if not sha:
             return False
@@ -140,7 +151,7 @@ class GoalStore:
         return sha
 
     def _resolve(self, goal_id_or_sha: str, kind: str) -> str | None:
-        rec = self.load(goal_id_or_sha)
+        rec = self.read(goal_id_or_sha)
         if rec and rec.get(kind):
             return rec[kind]
         for cand in (self._ref(goal_id_or_sha, kind), goal_id_or_sha):
@@ -165,24 +176,24 @@ def self_test() -> int:
         (repo / "a.txt").write_text("base\n"); _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "base")
         st = GoalStore(str(repo))
         st.create("goal-x", "build it", "codex")
-        assert st.load("goal-x")["status"] == "running"
+        assert st.read("goal-x")["status"] == "running"
         # partial work in a goal worktree -> commit_wip
         w1 = Path(d) / "w1"; _git(repo, "worktree", "add", "-q", "--detach", str(w1), "HEAD")
         (w1 / "new.py").write_text("partial\n"); (w1 / "a.txt").write_text("base+edit\n")
         (w1 / "result.json").write_text("{}\n")                        # must be excluded
-        sha = st.commit_wip("goal-x", str(w1))
-        assert sha and st.load("goal-x")["wip"] == sha, "wip field holds the commit sha"
+        sha = st.save_wip("goal-x", str(w1))
+        assert sha and st.read("goal-x")["wip"] == sha, "wip field holds the commit sha"
         _git(repo, "worktree", "remove", "--force", str(w1))
         st.update("goal-x", status="failed")
-        # resume: fresh worktree, restore_wip
+        # Load: make a fresh worktree BECOME the goal's wip state
         w2 = Path(d) / "w2"; _git(repo, "worktree", "add", "-q", "--detach", str(w2), "HEAD")
-        assert st.restore_wip("goal-x", str(w2)) is True
+        assert st.load("goal-x", str(w2)) is True
         assert (w2 / "new.py").is_file() and "edit" in (w2 / "a.txt").read_text(), "wip restored via git"
         assert not (w2 / "result.json").exists(), "result.json was excluded from wip"
         # load_all + delete
-        assert "goal-x" in st.load_all()
+        assert "goal-x" in st.read_all()
         st.delete("goal-x")
-        assert st.load("goal-x") is None and _git(repo, "rev-parse", "--verify", "--quiet",
+        assert st.read("goal-x") is None and _git(repo, "rev-parse", "--verify", "--quiet",
                                                   "refs/goals/goal-x/wip").returncode != 0
         print("goal_store self-test passed (CLUD + git-backed wip restore, result.json excluded).")
     return 0

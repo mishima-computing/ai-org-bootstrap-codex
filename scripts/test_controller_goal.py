@@ -165,11 +165,15 @@ def test_goal_id_makes_the_org_own_its_state():
         def run_leaf(r, t):
             open(os.path.join(repo, "x.py"), "w").write("done\n")
             return "converged"
-        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="goal-own1")
-        rec = goal_store.GoalStore(repo).load("goal-own1")
+        events = []
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="goal-own1", emit=events.append)
+        rec = goal_store.GoalStore(repo).read("goal-own1")            # Read = safe observe (not Load)
         assert rec and rec["status"] == "done" and rec["goal"] == "build it", rec
         assert rec.get("wip"), ("the org records its build state (wip commit)", rec)
-        print("ok  goal_id -> the org owns its goal state (record + wip), independent of any host")
+        # rich log: the org's terminal state (status + wip) flows into its own Stream
+        gf = [e for e in events if e.get("type") == "goal_finished"]
+        assert gf and gf[0]["status"] == "done" and gf[0]["wip"] == rec["wip"], gf
+        print("ok  goal_id -> the org owns its goal state (record + wip) AND flows it to its rich log")
 
 
 if __name__ == "__main__":

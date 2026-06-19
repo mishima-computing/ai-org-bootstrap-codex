@@ -139,9 +139,10 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
         # merge the leaf's files into the goal worktree and commit them as ONE commit (the handoff to
         # dependent leaves). Every git-state guard — dir expansion, literal pathspecs, scratch exclusion,
         # identity, add/commit-failure rollback — lives ONCE in git_ops.merge_and_commit_leaf, not inline.
-        if not git_ops.merge_and_commit_leaf(repo, wt, task.get("id"), task.get("objective")):
-            return fail(reason="mechanical")                  # commit handoff failed; leaf paths rolled back
-        return {"outcome": "converged"}
+        sha = git_ops.merge_and_commit_leaf(repo, wt, task.get("id"), task.get("objective"))
+        if sha is None:                                       # None = handoff FAILED (paths rolled back)
+            return fail(reason="mechanical")                  # "" = nothing to commit (still converged)
+        return {"outcome": "converged", "commit": sha or None}
     except Exception:                                          # noqa: BLE001 - a leaf crash is mechanical
         return fail(reason="mechanical")
     finally:
@@ -194,8 +195,8 @@ def _set_children(tasks: list, task_id: str, children: list) -> list:
     return out
 
 
-def run_goal(repo, goal, run_leaf=None, *, goal_id=None, split=splitter.split, context=None, carrier=None,
-             budget=None, emit=None) -> list:
+def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
+             context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
 
     run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
@@ -208,13 +209,20 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, split=splitter.split, c
     emit = emit or stream_emit(repo)
     store = goal_store.GoalStore(repo) if goal_id else None
     if store is not None:
-        store.create(goal_id, goal, org="")           # the received goal is now the ORG's state
+        store.create(goal_id, goal, org="", resumed_from=resume_from)   # received goal is now the ORG's
+        if resume_from and store.load(resume_from, repo):   # Load(prior id): the worktree BECOMES that state
+            emit({"type": "goal_resumed", "goal_id": goal_id, "resume_from": resume_from})
 
     def _finalize(final_plan):
-        if store is not None:                          # the org's state = its build (wip commits) + outcome
-            store.commit_wip(goal_id, repo)
-            done = all(frontier.node_status(t) == "done" for t in final_plan)
-            store.update(goal_id, status="done" if done else "failed")
+        done = all(frontier.node_status(t) == "done" for t in final_plan)
+        status = "done" if done else "failed"
+        wip = None
+        if store is not None:                          # OPERATE the org's state: record its build + outcome
+            wip = store.save_wip(goal_id, repo)
+            store.update(goal_id, status=status)
+        # rich log: the org flows its TERMINAL state (outcome + the wip commit) into its own Stream, so the
+        # state is reconstructible from the log too — the log is the best resource for grasping state.
+        emit({"type": "goal_finished", "status": status, "wip": wip})
         return final_plan
 
     if carrier is None and split is splitter.split:    # real run: decompose via codex (tests inject split)
@@ -252,7 +260,8 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, split=splitter.split, c
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             if res.get("outcome") == "converged":
                 plan = frontier.advance(plan, leaf["id"], "done")
-                emit({"type": "leaf_done", "id": leaf["id"]})
+                # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"
+                emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit")})
                 continue
             depth = _depth_of(plan, leaf["id"]) or 0
             if at_floor(leaf, depth):                       # floor reached -> fail it, never split forever
@@ -284,9 +293,11 @@ def main(argv=None) -> int:
     p.add_argument("--goal", required=True)
     p.add_argument("--goal-id", default=None, help="the org records THIS goal's state under this id (it "
                    "owns its state); a host passes the id it dispatched with so it can read the org's state")
+    p.add_argument("--resume-from", default=None, help="a prior goal_id (or sha/ref): the org LOADS that "
+                   "state into the worktree before building, so it resumes its own prior work (org behavior)")
     p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")
     a = p.parse_args(argv)
-    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, budget=a.budget)
+    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
     return 0 if all(frontier.node_status(t) == "done" for t in plan) else 1
 
