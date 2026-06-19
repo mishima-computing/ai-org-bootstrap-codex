@@ -96,6 +96,15 @@ def _call_leaf(run_leaf, repo, task, resume_diff=None):
         return run_leaf(repo, task)
 
 
+def _ensure_git_identity(repo) -> None:
+    """A fresh / CI repo may have no user.name/user.email, which makes `git commit` fail. Set a fallback
+    identity (idempotent: only when unset) so the per-leaf commit handoff doesn't break on bare repos."""
+    for key, val in (("user.email", "ai-org@localhost"), ("user.name", "AI Org")):
+        got = subprocess.run(["git", "-C", str(repo), "config", key], capture_output=True, text=True)
+        if got.returncode != 0 or not got.stdout.strip():
+            subprocess.run(["git", "-C", str(repo), "config", key, val], capture_output=True)
+
+
 def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
     never collide on the shared repo (per-run isolation, ADR-0009). Returns
@@ -136,6 +145,7 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
             return fail(reason="mechanical", diff=_preserve_diff(repo, wt, task))   # resume-able
         porcelain = subprocess.run(["git", "-C", wt, "status", "--porcelain"],
                                    capture_output=True, text=True).stdout
+        leaf_files = []                                        # exactly the paths THIS leaf produced
         for line in porcelain.splitlines():
             rel = line[3:].strip()
             if not rel or rel.startswith(".agent-runs") or rel == "result.json":
@@ -146,6 +156,45 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
                 shutil.copy2(src, dst)
             elif not src.exists() and dst.is_file():
                 dst.unlink()
+            leaf_files.append(rel)
+        # commit THIS leaf's converged work as one commit on the goal worktree: leaves accumulate as
+        # COMMITS so the goal's single PR (one per request) reads as a series of meaningful sub-task
+        # commits, never a squash. Stage ONLY this leaf's files (not `add -A`, which would sweep in
+        # unrelated pre-existing worktree changes under this leaf's subject). The commit IS the handoff to
+        # dependent leaves (the next worktree is cut from HEAD), so a failed commit must FAIL the leaf, not
+        # silently mark it converged with its work stranded uncommitted.
+        if leaf_files:
+            # LITERAL pathspecs: a leaf path with glob metacharacters (e.g. `pages/[id].tsx`) must not be
+            # interpreted as a pattern that could also match a pre-existing dirty `pages/i.tsx` and sweep
+            # it into this leaf's commit (same guard delivery uses).
+            specs = [f":(literal){f}" for f in leaf_files]
+            subprocess.run(["git", "-C", str(repo), "add", "--", *specs], capture_output=True)
+            staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet", "--", *specs])
+            if staged.returncode != 0:
+                _ensure_git_identity(repo)                    # fresh/CI repos may lack user.name/email
+                obj = (task.get("objective") or task.get("id") or "leaf").strip()
+                subject = obj.splitlines()[0][:72] if obj else "leaf"
+                committed = subprocess.run(                   # commit ONLY this leaf's paths (partial commit)
+                    ["git", "-C", str(repo), "commit", "-q", "-m", subject,
+                     "-m", f"leaf: {task.get('id')}", "--", *specs], capture_output=True)
+                if committed.returncode != 0:
+                    # the leaf's files were already copied + staged; the commit failing (a pre-commit hook,
+                    # commit.gpgsign without a key, ...) must NOT leave that work in the shared checkout to
+                    # contaminate later leaves / delivery. Roll each leaf path back to HEAD before failing —
+                    # PER FILE, since one new path (absent at HEAD) would otherwise fail the whole checkout
+                    # and strand the tracked ones.
+                    subprocess.run(["git", "-C", str(repo), "reset", "-q", "HEAD", "--", *specs], capture_output=True)
+                    for rel in leaf_files:
+                        at_head = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"HEAD:{rel}"],
+                                                 capture_output=True)
+                        if at_head.returncode == 0:                  # existed at HEAD -> restore it
+                            subprocess.run(["git", "-C", str(repo), "checkout", "-q", "HEAD", "--",
+                                            f":(literal){rel}"], capture_output=True)
+                        else:                                        # new file -> remove it
+                            p = Path(repo) / rel
+                            if p.exists():
+                                p.unlink()
+                    return fail(reason="mechanical")
         return {"outcome": "converged"}
     except Exception:                                          # noqa: BLE001 - a leaf crash is mechanical
         return fail(reason="mechanical")
