@@ -152,6 +152,26 @@ def test_run_goal_streams_to_log():
         print("ok  run_goal streams goal/leaf events to the shared log by default")
 
 
+def test_goal_id_makes_the_org_own_its_state():
+    # the received goal becomes the ORG's state at receipt: with a goal_id, run_goal records the goal,
+    # commits its build (wip), and its outcome in its own GoalStore — independent of any host.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        split = lambda goal, ctx, carrier: [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}]
+        def run_leaf(r, t):
+            open(os.path.join(repo, "x.py"), "w").write("done\n")
+            return "converged"
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="goal-own1")
+        rec = goal_store.GoalStore(repo).load("goal-own1")
+        assert rec and rec["status"] == "done" and rec["goal"] == "build it", rec
+        assert rec.get("wip"), ("the org records its build state (wip commit)", rec)
+        print("ok  goal_id -> the org owns its goal state (record + wip), independent of any host")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

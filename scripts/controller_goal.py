@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
+import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the host)
 import splitter  # noqa: E402
 
 FLOOR_MAX_DEPTH = 3
@@ -193,23 +194,36 @@ def _set_children(tasks: list, task_id: str, children: list) -> list:
     return out
 
 
-def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, carrier=None,
+def run_goal(repo, goal, run_leaf=None, *, goal_id=None, split=splitter.split, context=None, carrier=None,
              budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
 
     run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
     default_run_leaf, which runs controller_pipeline in an isolated worktree; a stub in tests). budget
     caps the number of leaf runs (None = unbounded, bounded only by the floor). emit(event) streams
-    progress (ADR-0009). Returns the final task tree."""
+    progress (ADR-0009). When `goal_id` is given, the ORG OWNS this goal's state — the received goal
+    becomes the org's at receipt: it records the goal, commits its build (wip) and its outcome, in its own
+    GoalStore. A host (Shagiri) only READS that state. Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
     emit = emit or stream_emit(repo)
+    store = goal_store.GoalStore(repo) if goal_id else None
+    if store is not None:
+        store.create(goal_id, goal, org="")           # the received goal is now the ORG's state
+
+    def _finalize(final_plan):
+        if store is not None:                          # the org's state = its build (wip commits) + outcome
+            store.commit_wip(goal_id, repo)
+            done = all(frontier.node_status(t) == "done" for t in final_plan)
+            store.update(goal_id, status="done" if done else "failed")
+        return final_plan
+
     if carrier is None and split is splitter.split:    # real run: decompose via codex (tests inject split)
         carrier = codex_carrier(repo)
     plan = split(goal, context or {}, carrier)
     errs = frontier.validate_plan(plan)
     if errs:
         emit({"type": "split_invalid", "goal": goal, "errors": errs})
-        return plan
+        return _finalize(plan)
     emit({"type": "goal_split", "goal": goal, "n": len(plan)})
 
     spent = 0
@@ -220,7 +234,7 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
         for leaf in ready:
             if budget is not None and spent >= budget:
                 emit({"type": "budget_exhausted", "spent": spent})
-                return plan
+                return _finalize(plan)
             spent += 1
             plan = frontier.advance(plan, leaf["id"], "running")
             emit({"type": "leaf_start", "id": leaf["id"]})
@@ -259,7 +273,7 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth})
     emit({"type": "goal_done", "goal": goal})
-    return plan
+    return _finalize(plan)
 
 
 def main(argv=None) -> int:
@@ -268,9 +282,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Run a GOAL through the org's autonomous builder (ADR-0008).")
     p.add_argument("--repo", required=True)
     p.add_argument("--goal", required=True)
+    p.add_argument("--goal-id", default=None, help="the org records THIS goal's state under this id (it "
+                   "owns its state); a host passes the id it dispatched with so it can read the org's state")
     p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")
     a = p.parse_args(argv)
-    plan = run_goal(a.repo, a.goal, budget=a.budget)
+    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, budget=a.budget)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
     return 0 if all(frontier.node_status(t) == "done" for t in plan) else 1
 
