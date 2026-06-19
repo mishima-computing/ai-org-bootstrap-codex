@@ -147,6 +147,35 @@ def enforce(repo, allowed_globs, *, baseline=None, baseline_snapshot=None,
                        scope_ok=scope_ok)
 
 
+def strip_to_scope(repo, allowed_globs, *, baseline_snapshot=None, forbidden=DEFAULT_FORBIDDEN) -> list[str]:
+    """Mechanical scope PREVENTION (ADR-0008): deterministically REVERT a carrier's out-of-scope edits —
+    revert tracked to HEAD, delete newly-added — so an overreach is TRIMMED to the contract instead of
+    failing the leaf. No LLM, no human. Two paths are NOT stripped: a FORBIDDEN touch (it stays a hard
+    failure for `enforce` to surface — never silently hidden), and a pre-run BASELINE-dirty path (not the
+    carrier's fresh work). Mutates `baseline_snapshot` for each reverted path so the revert doesn't
+    resurface as a delete-vs-baseline deviation (same care as the coordination strip). No-op without an
+    allow-list (an empty allow-list is a contract problem, not a strip case). Returns the stripped paths."""
+    if not allowed_globs:
+        return []
+    snap = baseline_snapshot if baseline_snapshot is not None else {}
+    stripped: list[str] = []
+    for f in porcelain_touched(Path(repo)):
+        if f in snap:                                           # pre-run dirty -> not the carrier's fresh work
+            continue
+        if any(fnmatch.fnmatch(f, g) for g in forbidden):      # forbidden -> let enforce() fail it loudly
+            continue
+        if any(fnmatch.fnmatch(f, g) for g in allowed_globs):  # in scope -> keep
+            continue
+        subprocess.run(["git", "-C", str(repo), "reset", "-q", "HEAD", "--", f], capture_output=True)
+        co = subprocess.run(["git", "-C", str(repo), "checkout", "-q", "HEAD", "--", f], capture_output=True)
+        p = Path(repo) / f
+        if co.returncode != 0 and p.exists():                  # not at HEAD -> newly added; remove it
+            p.unlink()
+        snap.pop(f, None)
+        stripped.append(f)
+    return sorted(stripped)
+
+
 def dirty_submodules(repo: Path) -> list[str]:
     """Submodule paths whose internals changed. `git status` collapses these to the submodule path,
     so the inner files escape scope checks; flag them as deviations (NN3 — don't hide nested changes)."""

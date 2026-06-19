@@ -179,6 +179,13 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
         if stripped:
             journal.append("strip_coordination_forbidden", {"stripped": stripped})
 
+    # mechanical scope PREVENTION (ADR-0008): TRIM the carrier's out-of-scope edits to the contract instead
+    # of failing the leaf — deterministic, no LLM, no human. Forbidden touches are NOT stripped (enforce()
+    # below still fails them loudly); a scope overreach simply doesn't kill the leaf any more.
+    oos_stripped = scope.strip_to_scope(repo, allowed, baseline_snapshot=snapshot, forbidden=forbidden)
+    if oos_stripped:
+        journal.append("scope_strip_out_of_scope", {"stripped": oos_stripped})
+
     scope_report = scope.enforce(repo, allowed, baseline_snapshot=snapshot,
                                  forbidden=forbidden, declared=declared)
     journal.append("enforce_scope", scope_report.to_dict())

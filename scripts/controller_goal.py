@@ -247,6 +247,23 @@ def _apply_steering(store, goal_id, leaf, plan):
     return steered
 
 
+def _failure_sig(res):
+    """A signature of a mechanical failure: the sha256 of its preserved work (the diff). When two
+    consecutive resumes preserve the SAME diff, the leaf is making NO PROGRESS — a blind retry won't fix a
+    deterministic failure (Reflexion / FeedbackEval), so the loop stops and lets the floor / re-split handle
+    it instead of burning the budget. None when there is no diff to compare on."""
+    if not isinstance(res, dict):
+        return None
+    d = res.get("diff")
+    try:
+        if d and Path(d).is_file():
+            import hashlib
+            return hashlib.sha256(Path(d).read_bytes()).hexdigest()
+    except Exception:                                          # noqa: BLE001 — signatures are best-effort
+        pass
+    return None
+
+
 def _maybe_seed_scaffold(repo, leaf, emit):
     """Before a GREENFIELD leaf that a trusted template fits, deterministically seed its skeleton into the
     goal repo and COMMIT it (ADR-0008) — so the leaf's carrier (cut from the goal HEAD) builds on a
@@ -346,6 +363,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
             # is not a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
             tries = 0
+            prev_sig = _failure_sig(res)
             while res.get("outcome") != "converged" and res.get("reason") == "mechanical" \
                     and tries < MECH_RETRY_CAP and not (budget is not None and spent >= budget):
                 tries += 1
@@ -353,6 +371,11 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 emit({"type": "leaf_resume", "id": leaf["id"], "attempt": tries})
                 outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"))
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
+                sig = _failure_sig(res)
+                if res.get("outcome") != "converged" and sig is not None and sig == prev_sig:
+                    emit({"type": "leaf_no_progress", "id": leaf["id"], "attempt": tries})
+                    break        # same preserved work twice -> blind retry won't help; let floor/re-split run
+                prev_sig = sig
             if res.get("outcome") == "converged":
                 plan = frontier.advance(plan, leaf["id"], "done")
                 leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)

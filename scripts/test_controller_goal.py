@@ -249,6 +249,25 @@ def test_greenfield_scaffold_leaf_is_seeded_before_the_carrier():
     print("ok  greenfield scaffold leaf is seeded deterministically before the carrier (ADR-0008)")
 
 
+def test_no_progress_breaks_the_blind_retry_loop():
+    # ADR-0008: two consecutive resumes that preserve the SAME diff make no progress -> stop blind-retrying
+    # (a deterministic failure won't yield to a blind retry), instead of burning the whole MECH_RETRY budget.
+    import tempfile, os
+    calls = {"n": 0}
+    box = {"diff": None}
+    def run_leaf(r, t, resume_diff=None):
+        calls["n"] += 1
+        return {"outcome": "failed", "reason": "mechanical", "diff": box["diff"]}   # same preserved work each time
+    with tempfile.TemporaryDirectory() as d:
+        box["diff"] = os.path.join(d, "x.patch"); open(box["diff"], "w").write("SAME FAILING WORK\n")
+        events = []
+        cg.run_goal("/repo", "build it", run_leaf=run_leaf, emit=events.append,
+                    split=lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}])
+    assert any(e.get("type") == "leaf_no_progress" for e in events), "no-progress must be detected"
+    assert calls["n"] == 2, ("loop stops after one no-progress retry, not the full MECH_RETRY cap", calls["n"])
+    print("ok  no-progress (same diff twice) breaks the blind-retry loop (ADR-0008)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
