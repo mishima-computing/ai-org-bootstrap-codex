@@ -222,6 +222,33 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
     return stdout, stderr, code, timed_out, frozen, killed
 
 
+def _ensure_scratch_excluded(repo: Path) -> None:
+    """Keep the controller's runtime scratch (`.agent-runs/`) OUT of the file range the carrier can see.
+    Codex discovers files through gitignore-respecting search (ripgrep) and listing, so a git-excluded
+    path is never surfaced to the model. We write `.agent-runs/` to `.git/info/exclude` (NOT the tracked
+    `.gitignore`), which works for ANY target repo without modifying its files and is shared across its
+    worktrees. Without this, a reviewer carrier free-reads the controller's own journals under
+    `.agent-runs/` and reviews the bookkeeping instead of the deliverable — looping forever on a finding
+    no code change can clear (observed: a scaffold leaf failing linon r0..r3 on `.agent-runs/.../journal`).
+    A repo that already ignores it (most do) is a no-op."""
+    try:
+        gp = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+                            capture_output=True, text=True, timeout=10)
+        if gp.returncode != 0:
+            return
+        raw = gp.stdout.strip()
+        excl = Path(raw) if os.path.isabs(raw) else (repo / raw)
+        existing = excl.read_text(encoding="utf-8") if excl.is_file() else ""
+        if not any(tok in (".agent-runs", ".agent-runs/") for tok in existing.split()):
+            excl.parent.mkdir(parents=True, exist_ok=True)
+            with excl.open("a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(".agent-runs/\n")
+    except Exception:  # noqa: BLE001 — scratch-hiding is best-effort, never break a run
+        pass
+
+
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,
                 retries=1, prepend_discipline=True, out_dir=None, output_file=None) -> dict:
     """Launch a Codex carrier deterministically. stdin is ALWAYS closed (the fix for the hang).
@@ -230,6 +257,7 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
     the controller's schema gate validates it in Python — `--output-schema` is avoided since strict
     OpenAI schemas reject optional properties, F12)."""
     repo = Path(repo).resolve()
+    _ensure_scratch_excluded(repo)   # the carrier must never see the controller's .agent-runs/ scratch
     out_dir = Path(out_dir) if out_dir else (repo / ".agent-runs" / "carrier")
     out_dir.mkdir(parents=True, exist_ok=True)
     full_prompt = compose_prompt(prompt, repo_carrier_discipline(repo), prepend_discipline)

@@ -486,6 +486,31 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertFalse(result["attempts"][1]["killed"])
         self.assertEqual(result["attempts"][1]["exit"], 0)
 
+    def test_carrier_hides_agent_runs_scratch_from_its_view(self):
+        # A reviewer carrier free-reads the worktree, so the controller's own .agent-runs/ journals must be
+        # OUT of its file range — else it reviews the bookkeeping ("packet says ok but the journal shows a
+        # command exited 1") instead of the deliverable, looping on a finding no code change can clear
+        # (observed: a scaffold leaf failing linon r0..r3 on .agent-runs/.../journal). Excluded via
+        # .git/info/exclude (not the tracked .gitignore), so it holds for any target repo without touching
+        # its files; codex discovers files through gitignore-respecting search, so excluded == unseen.
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            sp.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+            (repo / ".agent-runs" / "controller").mkdir(parents=True)
+            (repo / ".agent-runs" / "controller" / "journal.jsonl").write_text('{"ok": true}\n')
+            (repo / "code.py").write_text("print(1)\n")
+            carrier_harness._ensure_scratch_excluded(repo)
+            ign = sp.run(["git", "-C", str(repo), "check-ignore",
+                          ".agent-runs/controller/journal.jsonl"], capture_output=True)
+            self.assertEqual(ign.returncode, 0, "the controller journal must be git-excluded (unseen)")
+            vis = sp.run(["git", "-C", str(repo), "check-ignore", "code.py"], capture_output=True)
+            self.assertNotEqual(vis.returncode, 0, "real code must stay visible to the reviewer")
+            carrier_harness._ensure_scratch_excluded(repo)   # idempotent — no duplicate entry
+            excl = sp.run(["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+                          capture_output=True, text=True).stdout.strip()
+            self.assertEqual((repo / excl).read_text().count(".agent-runs/"), 1)
+
 
 class WriteRoleRetriesTests(unittest.TestCase):
     """Write roles carry an extra carrier retry so codex's transient non-zero 'submission failed'
