@@ -46,6 +46,9 @@ class GoalStore:
     def _ref(goal_id: str, kind: str) -> str:
         return f"refs/goals/{goal_id}/{kind}"
 
+    def _steer_path(self, goal_id: str) -> Path:
+        return self.root / f"{goal_id}.steering.jsonl"
+
     # --- CLRUD: Create / Load / Read / Update / Delete --------------------------------------------
     # Load and Read are DISTINCT: Load *operates* — it makes the target BECOME the stored state (sets git
     # to the goal's committed version). Read is the SAFE check that observes the record and mutates nothing.
@@ -98,12 +101,52 @@ class GoalStore:
         return rec
 
     def delete(self, goal_id: str) -> None:
-        """D — drop the record and both git refs."""
+        """D — drop the record, its steering sidecar, and both git refs."""
         with self._lock:
             self._path(goal_id).unlink(missing_ok=True)
+            self._steer_path(goal_id).unlink(missing_ok=True)
         for kind in ("wip", "done"):
             _git(self.repo, "update-ref", "-d", self._ref(goal_id, kind))
         self._emit({"type": "state", "op": "delete", "goal_id": goal_id})
+
+    # --- steering: additive mid-run guidance (steer a running goal WITHOUT kill + re-fire) ---------
+    # Steering lives in an APPEND-ONLY sidecar (<id>.steering.jsonl), NOT the record. A host appends notes
+    # here while the org keeps writing the record; append-only + a separate file means the two PROCESSES
+    # never clobber each other (the record stays the org's, steering is host-ingress / org-read-only). The
+    # org folds the notes into its not-yet-dispatched leaves at the next boundary — no work is discarded.
+    def steer(self, goal_id: str, text: str) -> dict | None:
+        """U-like OPERATION — append one steering note to a running goal; flowed to the log. Returns the
+        entry with its 1-based `seq`, or None for empty text / an unknown goal."""
+        text = (text or "").strip()
+        if not text or self.read(goal_id) is None:
+            return None
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._steer_path(goal_id).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")   # O_APPEND -> atomic per line
+        seq = self._steer_count(goal_id)
+        self._emit({"type": "state", "op": "steer", "goal_id": goal_id, "seq": seq, "text": text})
+        return {"seq": seq, "text": text}
+
+    def read_steering(self, goal_id: str, since: int = 0) -> list[dict]:
+        """Read (safe) — the goal's steering notes with seq > `since` (1-based line order); since=0 returns
+        all. Lets a consumer apply only what is NEW since it last looked. Mutates nothing."""
+        p = self._steer_path(goal_id)
+        if not p.is_file():
+            return []
+        out: list[dict] = []
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+            line = line.strip()
+            if not line or i <= since:
+                continue
+            try:
+                out.append({"seq": i, "text": json.loads(line).get("text", "")})
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    def _steer_count(self, goal_id: str) -> int:
+        p = self._steer_path(goal_id)
+        return sum(1 for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()) if p.is_file() else 0
 
     # --- git-backed work fields (the record's wip/done point here) --------------------------------
     def save_wip(self, goal_id: str, work: str) -> str | None:    # SAVE the current build as wip (<-> load)
@@ -200,12 +243,18 @@ def self_test() -> int:
         assert st.load("goal-x", str(w2)) is True
         assert (w2 / "new.py").is_file() and "edit" in (w2 / "a.txt").read_text(), "wip restored via git"
         assert not (w2 / "result.json").exists(), "result.json was excluded from wip"
+        # steering: an additive note appends to the sidecar; read_steering returns it; since= filters new
+        assert st.steer("goal-x", "prefer official tools") == {"seq": 1, "text": "prefer official tools"}
+        assert st.steer("goal-x", "  ") is None and st.steer("nope", "x") is None, "empty/unknown -> None"
+        st.steer("goal-x", "also add tests")
+        assert [n["text"] for n in st.read_steering("goal-x")] == ["prefer official tools", "also add tests"]
+        assert st.read_steering("goal-x", since=1) == [{"seq": 2, "text": "also add tests"}], "since= filters"
         # load_all + delete
         assert "goal-x" in st.read_all()
         st.delete("goal-x")
-        assert st.read("goal-x") is None and _git(repo, "rev-parse", "--verify", "--quiet",
-                                                  "refs/goals/goal-x/wip").returncode != 0
-        print("goal_store self-test passed (CLUD + git-backed wip restore, result.json excluded).")
+        assert st.read("goal-x") is None and not st._steer_path("goal-x").is_file() and _git(
+            repo, "rev-parse", "--verify", "--quiet", "refs/goals/goal-x/wip").returncode != 0
+        print("goal_store self-test passed (CLUD + git-backed wip restore + steering sidecar).")
     return 0
 
 

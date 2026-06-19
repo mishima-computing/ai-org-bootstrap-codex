@@ -208,6 +208,24 @@ def _set_children(tasks: list, task_id: str, children: list) -> list:
     return out
 
 
+def _apply_steering(store, goal_id, leaf):
+    """Fold the goal's current STEERING (additive mid-run guidance) into THIS leaf's objective at dispatch,
+    so an injection reaches every not-yet-dispatched leaf WITHOUT a kill + re-fire. Returns a COPY of the
+    leaf (never mutates the plan / the split source) with the notes appended as must-follow guidance, or
+    the leaf UNCHANGED when there is no steering. Standing guidance — re-applied to each new leaf at its
+    own dispatch (so re-split children pick it up when they run)."""
+    if store is None or not goal_id:
+        return leaf
+    notes = store.read_steering(goal_id)
+    if not notes:
+        return leaf
+    block = "\n".join(f"- {n['text']}" for n in notes)
+    steered = dict(leaf)
+    steered["objective"] = ((leaf.get("objective") or "")
+                            + "\n\n[STEERING added mid-run — additional guidance you MUST follow]:\n" + block)
+    return steered
+
+
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
              context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
@@ -265,7 +283,12 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             spent += 1
             plan = frontier.advance(plan, leaf["id"], "running")
             emit({"type": "leaf_start", "id": leaf["id"]})
-            outcome = run_leaf(repo, leaf)
+            # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
+            # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
+            exec_leaf = _apply_steering(store, goal_id, leaf)
+            if exec_leaf is not leaf:
+                emit({"type": "steer_applied", "id": leaf["id"]})
+            outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
             # is not a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
@@ -275,7 +298,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 tries += 1
                 spent += 1
                 emit({"type": "leaf_resume", "id": leaf["id"], "attempt": tries})
-                outcome = _call_leaf(run_leaf, repo, leaf, res.get("diff"))
+                outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"))
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             if res.get("outcome") == "converged":
                 plan = frontier.advance(plan, leaf["id"], "done")

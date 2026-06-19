@@ -176,6 +176,27 @@ def test_goal_id_makes_the_org_own_its_state():
         print("ok  goal_id -> the org owns its goal state (record + wip) AND flows it to its rich log")
 
 
+def test_additive_steering_reaches_the_dispatched_leaf():
+    # a steering note added to a RUNNING goal is folded into the objective the leaf-runner actually
+    # executes — the org consumes mid-run guidance at dispatch, with NO kill + re-fire (no work discarded).
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    seen = []
+    def run_leaf(r, t): seen.append(t["objective"]); return {"outcome": "converged", "commit": None}
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo)
+        st.create("goal-steer1", "build it", "codex")
+        st.steer("goal-steer1", "prefer official tools")             # injected BEFORE the leaf is dispatched
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, goal_id="goal-steer1",
+                    split=lambda goal, ctx, carrier: [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}])
+    assert seen and "prefer official tools" in seen[0], ("steering folded into the dispatched leaf", seen)
+    assert "do a" in seen[0], "the original objective is preserved, the steering is appended"
+    print("ok  additive steering reaches the dispatched leaf's objective (no kill+re-fire)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
