@@ -79,6 +79,18 @@ def test_floor_stops_recursion():
     print("ok  atomic failing leaf fails at the floor (no infinite split, no human)")
 
 
+def test_declared_smallest_is_floor():
+    # a task that NAMES itself minimal/scaffold, with a MULTI-file scope (so the len(scope)<=1 floor does
+    # NOT apply), must still fail at the floor and never split — honoring the "minimal" claim stops the
+    # infinite 'minimal -> minimal' regression (the scaffold loop).
+    split = lambda goal, ctx, carrier: [_leaf("minimal-package-scaffold", ["a.py", "b.py", "c.py"])]
+    plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: "failed", split=split)
+    assert _statuses(plan) == {"minimal-package-scaffold": "failed"}, _statuses(plan)
+    assert cg.at_floor({"id": "x", "objective": "scaffold the project", "scope": ["a", "b"]}, 0)
+    assert not cg.at_floor({"id": "x", "objective": "add feature", "scope": ["a", "b"]}, 0)
+    print("ok  self-declared 'minimal'/scaffold fails at the floor, never splits (no infinite regression)")
+
+
 def test_budget_stops():
     split = lambda goal, ctx, carrier: [_leaf("a", ["x.py"]), _leaf("b", ["y.py"]), _leaf("c", ["z.py"])]
     plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: "converged", split=split, budget=1)

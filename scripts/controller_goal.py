@@ -112,10 +112,25 @@ def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def _declares_smallest(task: dict) -> bool:
+    """True when a task is already the smallest meaningful unit and must NOT be split. Two ways in:
+    (1) it DECLARES itself minimal/atomic (splitting 'minimal' into more 'minimal' is the infinite
+        regression — atom → proton → quark → … — so honor the word: floor it the moment it appears);
+    (2) it is structurally ANTI-decomposable — a scaffold / greenfield skeleton whose interdependent
+        files (manifest, entry module, config) must all exist together and cannot be built one at a time.
+    Such a task is built whole or fails; it is never split (that only yields more failing sub-units)."""
+    text = ((task.get("id") or "") + " " + (task.get("objective") or "")).lower()
+    return any(k in text for k in (
+        "minimal", "smallest", "atomic", "indivisible",                 # self-declared smallest unit
+        "scaffold", "materialize", "bootstrap the", "skeleton",         # anti-decomposable greenfield
+        "set up the project", "create the project", "project structure"))
+
+
 def at_floor(task: dict, depth: int) -> bool:
-    """A node not worth splitting further: at max depth, or atomic (<= 1 file in scope). The floor makes
-    the recursion FINITE (a smallest step), so it always terminates without a human (ADR-0008)."""
-    return depth >= FLOOR_MAX_DEPTH or len(task.get("scope") or []) <= 1
+    """A node not worth splitting further: at max depth, atomic (<= 1 file in scope), or one that is
+    already the smallest unit (self-declared minimal/atomic, or a scaffold — see _declares_smallest). The
+    floor makes the recursion FINITE, so it always terminates without a human (ADR-0008)."""
+    return depth >= FLOOR_MAX_DEPTH or len(task.get("scope") or []) <= 1 or _declares_smallest(task)
 
 
 def _depth_of(tasks: list, task_id: str, depth: int = 0):
