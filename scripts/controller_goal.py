@@ -20,10 +20,23 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import os  # noqa: E402
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
 import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the host)
 import splitter  # noqa: E402
+
+
+def _shared_state_repo(repo) -> str:
+    """The org's state STORE must be durable + shared so a host can read current state — NOT the ephemeral
+    goal worktree. STREAM_LOG points at the shared `<repo>/.agent-runs/stream.jsonl`, so its grandparent is
+    the shared repo. Falls back to `repo` (tests / no host)."""
+    sl = os.environ.get("STREAM_LOG")
+    if sl:
+        p = Path(sl)
+        if p.name == "stream.jsonl" and p.parent.name == ".agent-runs":
+            return str(p.parent.parent)
+    return str(repo)
 
 FLOOR_MAX_DEPTH = 3
 MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
@@ -207,11 +220,14 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     GoalStore. A host (Shagiri) only READS that state. Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
     emit = emit or stream_emit(repo)
-    store = goal_store.GoalStore(repo) if goal_id else None
+    # the org's state STORE is durable + SHARED (so a host can READ current state, DB-style): write it where
+    # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already
+    # shared. `emit` is threaded in so every state OPERATION (create/load/save/update) also lands in the log.
+    store = goal_store.GoalStore(_shared_state_repo(repo), emit=emit) if goal_id else None
     if store is not None:
         store.create(goal_id, goal, org="", resumed_from=resume_from)   # received goal is now the ORG's
         if resume_from and store.load(resume_from, repo):   # Load(prior id): the worktree BECOMES that state
-            emit({"type": "goal_resumed", "goal_id": goal_id, "resume_from": resume_from})
+            pass                                            # store.load already logs the op
 
     def _finalize(final_plan):
         done = all(frontier.node_status(t) == "done" for t in final_plan)

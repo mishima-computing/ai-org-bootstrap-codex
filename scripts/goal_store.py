@@ -30,10 +30,13 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
 
 
 class GoalStore:
-    def __init__(self, repo: str):
+    def __init__(self, repo: str, emit=None):
         self.repo = str(repo)
         self.root = Path(repo).expanduser().resolve() / ".agent-runs" / "goals"
         self._lock = threading.Lock()
+        # every OPERATION on state is also flowed to the log (the store is the current-state authority; the
+        # log is the audit/observability of what was DONE to it — incl. Load). `emit` is the host's Stream.
+        self._emit = emit if callable(emit) else (lambda e: None)
 
     # --- paths / refs -----------------------------------------------------------------------------
     def _path(self, goal_id: str) -> Path:
@@ -52,6 +55,7 @@ class GoalStore:
                "resumed_from": resumed_from or None, "wip": None, "done": None,
                "result": None, "delivery": None}
         self._write(goal_id, rec)
+        self._emit({"type": "state", "op": "create", "goal_id": goal_id, "status": "running"})
         return rec
 
     def read(self, goal_id: str) -> dict | None:
@@ -90,7 +94,8 @@ class GoalStore:
             rec = self.read(goal_id) or {"goal_id": goal_id}
             rec.update(fields)
             self._write(goal_id, rec)
-            return rec
+        self._emit({"type": "state", "op": "update", "goal_id": goal_id, **fields})
+        return rec
 
     def delete(self, goal_id: str) -> None:
         """D — drop the record and both git refs."""
@@ -98,6 +103,7 @@ class GoalStore:
             self._path(goal_id).unlink(missing_ok=True)
         for kind in ("wip", "done"):
             _git(self.repo, "update-ref", "-d", self._ref(goal_id, kind))
+        self._emit({"type": "state", "op": "delete", "goal_id": goal_id})
 
     # --- git-backed work fields (the record's wip/done point here) --------------------------------
     def save_wip(self, goal_id: str, work: str) -> str | None:    # SAVE the current build as wip (<-> load)
@@ -129,7 +135,10 @@ class GoalStore:
                 return False
             ap = subprocess.run(["git", "-C", str(work), "apply", "--whitespace=nowarn"],
                                 input=patch, text=True, capture_output=True)
+            if ap.returncode == 0:
+                self._emit({"type": "state", "op": "load", "goal_id": goal_id, "wip": sha})
             return ap.returncode == 0
+        self._emit({"type": "state", "op": "load", "goal_id": goal_id, "wip": sha})
         return True
 
     # --- internals --------------------------------------------------------------------------------
@@ -148,6 +157,7 @@ class GoalStore:
             return None
         _git(work, "update-ref", self._ref(goal_id, kind), sha)        # shared ref store -> durable
         self.update(goal_id, **{kind: sha})
+        self._emit({"type": "state", "op": "save", "goal_id": goal_id, "kind": kind, "sha": sha})
         return sha
 
     def _resolve(self, goal_id_or_sha: str, kind: str) -> str | None:
