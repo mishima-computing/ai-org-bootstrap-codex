@@ -91,6 +91,34 @@ def test_declared_smallest_is_floor():
     print("ok  self-declared 'minimal'/scaffold fails at the floor, never splits (no infinite regression)")
 
 
+def test_mechanical_failure_resumes_same_leaf():
+    # a non-quality (mechanical) failure retries the SAME leaf (resume), and must NOT re-split.
+    seq = iter([{"outcome": "failed", "reason": "mechanical", "diff": None}, {"outcome": "converged"}])
+    split = lambda goal, ctx, carrier: [_leaf("m", ["x.py"])]
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: next(seq), split=split, emit=events.append)
+    assert _statuses(plan) == {"m": "done"}, _statuses(plan)
+    assert any(e["type"] == "leaf_resume" for e in events), "mechanical fail should RESUME"
+    assert not any(e["type"] == "leaf_split" for e in events), "mechanical fail must not re-split"
+    print("ok  mechanical (non-Linon) failure resumes the same leaf, no re-split")
+
+
+def test_linon_failure_carries_findings_to_children():
+    # a Linon rejection (bad reference) re-splits AND passes its findings to the children's split context.
+    seen = {}
+    def split(goal, ctx, carrier):
+        seen.update(ctx)
+        return [_leaf("big", ["a.py", "b.py"])] if "parent" not in ctx else [_leaf("big.1", ["a.py"])]
+    def run_leaf(r, t):
+        if t["id"] == "big":
+            return {"outcome": "failed", "reason": "linon", "findings": ["NN2: unverified claim"]}
+        return "converged"
+    plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split)
+    assert _statuses(plan).get("big.1") == "done", _statuses(plan)
+    assert seen.get("prior_rejected_findings") == ["NN2: unverified claim"], seen
+    print("ok  Linon rejection re-splits and carries its findings as retry context")
+
+
 def test_budget_stops():
     split = lambda goal, ctx, carrier: [_leaf("a", ["x.py"]), _leaf("b", ["y.py"]), _leaf("c", ["z.py"])]
     plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: "converged", split=split, budget=1)

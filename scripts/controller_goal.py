@@ -24,6 +24,7 @@ import frontier  # noqa: E402
 import splitter  # noqa: E402
 
 FLOOR_MAX_DEPTH = 3
+MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
 
 
 def stream_emit(repo):
@@ -68,16 +69,50 @@ def codex_carrier(repo, *, model=None):
     return carrier
 
 
-def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
+def _preserve_diff(repo, wt, task):
+    """Save a non-Linon-failed leaf's partial work as a patch under `.agent-runs/resume/<id>.patch`, so a
+    retry can RESUME on it instead of starting from scratch (the work was interrupted, not quality-rejected).
+    Excludes scratch. Fail-soft -> None."""
+    try:
+        subprocess.run(["git", "-C", str(wt), "add", "-A"], capture_output=True)
+        diff = subprocess.run(["git", "-C", str(wt), "diff", "--cached", "HEAD", "--",
+                               ".", ":(exclude).agent-runs", ":(exclude)result.json"],
+                              capture_output=True, text=True).stdout
+        if not diff.strip():
+            return None
+        out = Path(repo) / ".agent-runs" / "resume" / (str(task.get("id")).replace("/", "_") + ".patch")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(diff, encoding="utf-8")
+        return str(out)
+    except Exception:                                          # noqa: BLE001 - preservation is best-effort
+        return None
+
+
+def _call_leaf(run_leaf, repo, task, resume_diff=None):
+    """Call run_leaf, passing resume_diff only if it accepts it (test stubs take just (repo, task))."""
+    try:
+        return run_leaf(repo, task, resume_diff=resume_diff)
+    except TypeError:
+        return run_leaf(repo, task)
+
+
+def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
-    never collide on the shared repo (the per-run isolation, ADR-0009). On convergence (linon passed,
-    no findings) merge the leaf's changed files back into the shared repo (disjoint scopes apply
-    cleanly) and return "converged"; else "failed". The worktree is always removed."""
+    never collide on the shared repo (per-run isolation, ADR-0009). Returns
+    {"outcome": "converged"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
+      - converged -> the leaf's changed files merge back into the shared repo.
+      - failed/"linon" -> Linon reviewed the diff and rejected it: a BAD REFERENCE. Its findings come back
+        to carry as CONTEXT to a re-split (what was tried and rejected), never as a base to build on.
+      - failed/"mechanical" -> it failed for a non-quality reason (carrier timeout/hang, scope, malformed
+        output); the partial work is preserved (`diff`) so a retry can RESUME on it.
+    `resume_diff` (a patch path) is applied to the fresh worktree before the run, to resume prior work.
+    The worktree is always removed."""
+    fail = lambda **k: {"outcome": "failed", **k}              # noqa: E731
     if run_pipeline is None:
         import controller_pipeline
         run_pipeline = controller_pipeline.run_pipeline
     if not (Path(repo) / ".git").exists():
-        return "failed"
+        return fail()
     run_id = "goal-" + uuid.uuid4().hex[:10]
     # bridge the task (what the goal-layer leaf events carry) to the run_id (what the per-stage events
     # carry, as <run_id>-<role>), so a consumer can attribute each leaf's stage-marmots to its task.
@@ -87,11 +122,18 @@ def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
                          capture_output=True, text=True)
     if add.returncode != 0:
         shutil.rmtree(wt, ignore_errors=True)
-        return "failed"
+        return fail()
+    if resume_diff and Path(resume_diff).is_file():            # RESUME prior (non-quality-rejected) work
+        subprocess.run(["git", "-C", wt, "apply", "--whitespace=nowarn", str(resume_diff)],
+                       capture_output=True)
     try:
         result = run_pipeline(wt, task["objective"], run_id)
         if not bool(result.get("converged")):
-            return "failed"
+            if (result.get("linon_findings_count") or 0) > 0:  # Linon judged the diff -> a bad reference
+                lin = (result.get("results") or {}).get("linon") or {}
+                return fail(reason="linon",
+                            findings=lin.get("findings") if isinstance(lin, dict) else None)
+            return fail(reason="mechanical", diff=_preserve_diff(repo, wt, task))   # resume-able
         porcelain = subprocess.run(["git", "-C", wt, "status", "--porcelain"],
                                    capture_output=True, text=True).stdout
         for line in porcelain.splitlines():
@@ -104,9 +146,9 @@ def default_run_leaf(repo, task, *, run_pipeline=None) -> str:
                 shutil.copy2(src, dst)
             elif not src.exists() and dst.is_file():
                 dst.unlink()
-        return "converged"
-    except Exception:                                          # noqa: BLE001 - a leaf crash is just a failure
-        return "failed"
+        return {"outcome": "converged"}
+    except Exception:                                          # noqa: BLE001 - a leaf crash is mechanical
+        return fail(reason="mechanical")
     finally:
         subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], capture_output=True)
         shutil.rmtree(wt, ignore_errors=True)
@@ -189,7 +231,18 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
             plan = frontier.advance(plan, leaf["id"], "running")
             emit({"type": "leaf_start", "id": leaf["id"]})
             outcome = run_leaf(repo, leaf)
-            if outcome == "converged":
+            res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
+            # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
+            # is not a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
+            tries = 0
+            while res.get("outcome") != "converged" and res.get("reason") == "mechanical" \
+                    and tries < MECH_RETRY_CAP and not (budget is not None and spent >= budget):
+                tries += 1
+                spent += 1
+                emit({"type": "leaf_resume", "id": leaf["id"], "attempt": tries})
+                outcome = _call_leaf(run_leaf, repo, leaf, res.get("diff"))
+                res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
+            if res.get("outcome") == "converged":
                 plan = frontier.advance(plan, leaf["id"], "done")
                 emit({"type": "leaf_done", "id": leaf["id"]})
                 continue
@@ -198,7 +251,12 @@ def run_goal(repo, goal, run_leaf=None, *, split=splitter.split, context=None, c
                 plan = frontier.advance(plan, leaf["id"], "failed")
                 emit({"type": "leaf_failed_floor", "id": leaf["id"], "depth": depth})
                 continue
-            children = split(leaf["objective"], {**(context or {}), "parent": leaf["id"]}, carrier)
+            # a Linon rejection is a BAD REFERENCE: re-split, but carry its findings as retry CONTEXT (what
+            # was tried and rejected) so the children do not repeat the rejected approach.
+            child_ctx = {**(context or {}), "parent": leaf["id"]}
+            if res.get("findings"):
+                child_ctx["prior_rejected_findings"] = res["findings"]
+            children = split(leaf["objective"], child_ctx, carrier)
             if not children or frontier.validate_plan(children):
                 plan = frontier.advance(plan, leaf["id"], "failed")   # bad/empty split -> stop this branch
                 emit({"type": "split_unusable", "id": leaf["id"]})
