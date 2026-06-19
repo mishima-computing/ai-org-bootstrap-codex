@@ -24,6 +24,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCRATCH_PREFIXES = (".agent-runs/", ".git/")
+# transient build / cache artifacts — never source, never a scope change. A greenfield repo may have no
+# .gitignore yet, so running pytest leaves `tests/__pycache__/*.pyc` that would otherwise count as a
+# spurious deviation and fail the stage. Excluded at the single chokepoint (porcelain_touched), so the
+# pre-run baseline and the post-run set agree.
+SCRATCH_GLOBS = ("*.pyc", "*.pyo", "*.pyd", "*.egg-info", "*.egg-info/*")
+SCRATCH_SEGMENTS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox")
+
+
+def _is_scratch(p: str) -> bool:
+    if any(p == pre.rstrip("/") or p.startswith(pre) for pre in SCRATCH_PREFIXES):
+        return True
+    if any(fnmatch.fnmatch(p, g) for g in SCRATCH_GLOBS):
+        return True
+    return any(seg in p.split("/") for seg in SCRATCH_SEGMENTS)
+
+
 # Non-Codex carrier-adapter directories. Tokens are concatenated so this Codex-only file does not
 # itself contain the forbidden literals (same technique as the residue scanners).
 _FB1 = "." + "clau" + "de"
@@ -91,7 +107,7 @@ def porcelain_touched(repo: Path) -> set[str]:
             if i < len(fields) and fields[i]:
                 touched.add(fields[i])
         i += 1
-    return {p for p in touched if p and not any(p == s.rstrip("/") or p.startswith(s) for s in SCRATCH_PREFIXES)}
+    return {p for p in touched if p and not _is_scratch(p)}
 
 
 def enforce(repo, allowed_globs, *, baseline=None, baseline_snapshot=None,
