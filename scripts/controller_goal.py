@@ -228,6 +228,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         store.create(goal_id, goal, org="", resumed_from=resume_from)   # received goal is now the ORG's
         if resume_from and store.load(resume_from, repo):   # Load(prior id): the worktree BECOMES that state
             pass                                            # store.load already logs the op
+    leaf_commits: dict = {}                             # leaf_id -> its own commit sha (git scatters per leaf)
 
     def _finalize(final_plan):
         done = all(frontier.node_status(t) == "done" for t in final_plan)
@@ -235,7 +236,9 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         wip = None
         if store is not None:                          # OPERATE the org's state: record its build + outcome
             wip = store.save_wip(goal_id, repo)
-            store.update(goal_id, status=status)
+            # the state EXPRESSES the per-Queue git scattering: the Queue itself (the recursive split tree)
+            # plus each leaf's OWN commit — git scatters one worktree/commit per leaf, not just the wip tip.
+            store.update(goal_id, status=status, queue=final_plan, leaf_commits=leaf_commits)
         # rich log: the org flows its TERMINAL state (outcome + the wip commit) into its own Stream, so the
         # state is reconstructible from the log too — the log is the best resource for grasping state.
         emit({"type": "goal_finished", "status": status, "wip": wip})
@@ -276,6 +279,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             if res.get("outcome") == "converged":
                 plan = frontier.advance(plan, leaf["id"], "done")
+                leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)
                 # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"
                 emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit")})
                 continue
