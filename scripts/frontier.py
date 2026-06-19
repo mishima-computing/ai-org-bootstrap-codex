@@ -11,6 +11,14 @@ from __future__ import annotations
 
 import fnmatch
 
+__all__ = [
+    "validate_plan",
+    "ready_tasks",
+    "advance",
+    "node_status",
+    "scope_conflict",
+]
+
 
 def _copy_task(task):
     copied = dict(task)
