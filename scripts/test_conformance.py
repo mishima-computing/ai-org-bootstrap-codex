@@ -166,7 +166,7 @@ def test_dispatch_routes_cli_and_empty_slots():
     profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
     cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
     assert cli["applicable"] and cli["passed"], cli
-    for kind in ("library", "http_service", "rpc_service", "batch_job"):
+    for kind in ("library", "rpc_service", "batch_job"):  # http_service now has a real checker
         rep = conf.run_conformance({"deliverable_kind": kind, "conformance": {kind: {}}}, fake_runner({}))
         assert rep["applicable"] is False and rep["passed"] is True, (kind, rep)
         assert rep["slot"] == kind and rep["status"] == "no-checker-yet", (kind, rep)
@@ -208,7 +208,7 @@ def test_schema_other_kinds_have_optional_slots():
             "fallback_plan": "f", "handoff_to_implementer": "h"}
     # the other kinds are valid deliverable_kinds and their conformance slot is OPTIONAL (empty slot — not
     # yet enforced), so declaring the kind without a profile still validates.
-    for kind in ("library", "http_service", "rpc_service", "batch_job"):
+    for kind in ("library", "rpc_service", "batch_job"):  # http_service now has a real checker
         assert v.is_valid({**base, "deliverable_kind": kind}), (kind, "kind alone must validate")
         assert v.is_valid({**base, "deliverable_kind": kind, "conformance": {kind: {}}}), (kind, "empty profile ok")
     print("ok  schema: other-kind slots present and optional (empty slots, not enforced)")
@@ -368,6 +368,73 @@ def test_subprocess_runner_is_resource_bounded():
     slow = run("sleep 5")
     assert slow.returncode == 124 and "timeout" in slow.stderr, slow
     print("ok  subprocess_runner: normal run ok, output capped, slow run -> 124 timeout")
+
+# ---- http_service conformance (ADR-0009 #5, ported from an AI Org build) ----
+class _Handle:
+    def __init__(self, owner): self.owner = owner
+    def stop(self): self.owner.stopped = True
+
+
+class FakeBoot:
+    """A runner with the http_service .start()/.stop() lifecycle shape."""
+    def __init__(self, fail_start=False): self.started = False; self.stopped = False; self.fail_start = fail_start
+    def start(self, command, cwd=None):
+        if self.fail_start: raise RuntimeError("boot failed")
+        self.started = True; return _Handle(self)
+
+
+def _http_contract(profile):
+    return {"role_id": "aufheben-designer", "deliverable_kind": "http_service", "conformance": {"http_service": profile}}
+
+
+_HTTP_PROFILE = {"start": {"command": "serve"}, "base_url": "http://x", "readiness_timeout_seconds": 1,
+                 "examples": [{"method": "GET", "path": "/health", "expected_status": 200,
+                               "expected_body_contains": ["ok"]}]}
+
+
+def _http_req(status=200, body=b"ok", ready=True):
+    def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+        if not ready:
+            raise conf.urllib.error.URLError("refused")
+        return conf.HttpResponse(status, body)
+    return req
+
+
+def test_http_service_missing_profile_is_critical():
+    rep = conf.run_http_service_conformance(_http_contract({"base_url": "http://x"}), FakeBoot(), http_request=_http_req())
+    assert rep["applicable"] and rep["passed"] is False
+    assert rep["findings"][0]["check"] == "profile" and rep["findings"][0]["severity"] == "critical", rep
+    print("ok  http_service: an incomplete profile -> one critical profile finding")
+
+
+def test_http_service_success_boots_checks_and_stops():
+    boot = FakeBoot()
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(200, b"ok"))
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert boot.started and boot.stopped, "service is started and stopped"
+    print("ok  http_service: boot -> ready -> examples pass -> stopped")
+
+
+def test_http_service_status_mismatch_is_major():
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), FakeBoot(), http_request=_http_req(500, b"ok"))
+    checks = {f["check"] for f in rep["findings"]}
+    assert "status" in checks and not rep["passed"], rep["findings"]
+    print("ok  http_service: wrong status -> major status finding")
+
+
+def test_http_service_readiness_timeout_skips_examples():
+    boot = FakeBoot()
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(ready=False))
+    assert not rep["passed"] and any(f["check"] == "lifecycle" for f in rep["findings"]), rep
+    assert boot.stopped, "the service is still stopped after a readiness timeout"
+    print("ok  http_service: readiness timeout -> critical lifecycle, examples skipped, still stopped")
+
+
+def test_http_service_not_applicable_for_non_http():
+    rep = conf.run_conformance(_cli_contract({"entrypoint": {"invocation": "t"}, "examples": []}),
+                               fake_runner({"t": R(0, "", "")}))
+    assert rep.get("applicable") is True   # cli path still works through the dispatcher
+    print("ok  dispatcher still routes cli (http_service port did not break it)")
 
 
 if __name__ == "__main__":

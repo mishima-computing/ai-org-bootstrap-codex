@@ -175,7 +175,7 @@
       ]
     },
     "conformance": {
-      "description": "ADR-0009: the EXECUTABLE part of the contract — what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
+      "description": "ADR-0009: the EXECUTABLE part of the contract \u2014 what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
       "type": "object",
       "properties": {
         "cli": {
@@ -200,7 +200,7 @@
   "additionalProperties": false,
   "allOf": [
     {
-      "$comment": "When this contract declares a CLI deliverable, it MUST carry a checkable cli conformance profile — the design agent chooses and encodes the interface; the gate verifies it (ADR-0009).",
+      "$comment": "When this contract declares a CLI deliverable, it MUST carry a checkable cli conformance profile \u2014 the design agent chooses and encodes the interface; the gate verifies it (ADR-0009).",
       "if": {
         "required": [
           "deliverable_kind"
@@ -219,6 +219,31 @@
           "conformance": {
             "required": [
               "cli"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A http_service deliverable MUST carry a checkable http_service conformance profile (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "http_service"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "http_service"
             ]
           }
         }
@@ -301,7 +326,7 @@
           "additionalProperties": false
         },
         "examples": {
-          "description": "Concrete golden invocations. Each pins the exit status; stdout/stderr are checked by substring (preferred — robust to volatile output) or, when given, by normalized exact match. Avoid indiscriminate whole-output snapshots.",
+          "description": "Concrete golden invocations. Each pins the exit status; stdout/stderr are checked by substring (preferred \u2014 robust to volatile output) or, when given, by normalized exact match. Avoid indiscriminate whole-output snapshots.",
           "type": "array",
           "minItems": 1,
           "items": {
@@ -345,19 +370,98 @@
       "additionalProperties": false
     },
     "library_profile": {
-      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended fields: packages, modules, exported_symbols, signatures, compatibility{baseline_version, allowed_breaking_changes}. Checker is NOT subprocess execution (a library has no entrypoint to run) — it is language-specific API introspection (import the built package, assert declared symbols resolve and signatures match) plus an API-diff gate against the baseline (cargo-semver-checks / japicmp / go apidiff / TS API Extractor). Filled when a library deliverable first needs it.",
+      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. Intended fields: packages, modules, exported_symbols, signatures, compatibility{baseline_version, allowed_breaking_changes}. Checker is NOT subprocess execution (a library has no entrypoint to run) \u2014 it is language-specific API introspection (import the built package, assert declared symbols resolve and signatures match) plus an API-diff gate against the baseline (cargo-semver-checks / japicmp / go apidiff / TS API Extractor). Filled when a library deliverable first needs it.",
       "type": "object"
     },
     "http_service_profile": {
-      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended: an OpenAPI document (or ref) plus example request/response pairs with status codes. Checker BOOTS the service then drives it over HTTP (schema-validate responses, exercise status/error paths via Schemathesis/Dredd; consumer contracts via Pact; lint via Spectral; compatibility via oasdiff definite-vs-potential). Needs port/readiness/teardown lifecycle, unlike the CLI checker. Filled when an http_service deliverable first needs it.",
-      "type": "object"
+      "description": "Black-box HTTP service contract: declared start command, readiness URL, and concrete request->response examples. The checker starts the service, waits until base_url returns any HTTP response, then compares status and capped body substrings for each example.",
+      "type": "object",
+      "required": [
+        "start",
+        "base_url",
+        "readiness_timeout_seconds",
+        "examples"
+      ],
+      "properties": {
+        "start": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "description": "Shell command used to start the service in the conformance sandbox.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "base_url": {
+          "description": "Base URL polled for readiness and used to resolve example paths.",
+          "type": "string",
+          "format": "uri"
+        },
+        "readiness_timeout_seconds": {
+          "description": "Maximum time to wait for base_url to produce any HTTP response before skipping derived example checks.",
+          "type": "number",
+          "minimum": 0
+        },
+        "examples": {
+          "description": "Concrete golden HTTP requests. Each pins the response status; body checks are substring matches against a capped decoded response body.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "method",
+              "path",
+              "expected_status"
+            ],
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "json": {
+                "description": "Optional JSON request body sent with the example.",
+                "type": [
+                  "object",
+                  "array",
+                  "string",
+                  "number",
+                  "boolean",
+                  "null"
+                ]
+              },
+              "expected_status": {
+                "type": "integer"
+              },
+              "expected_body_contains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "rpc_service_profile": {
-      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended: the service definition (Protobuf/gRPC or AsyncAPI) plus example call/response pairs. Checker boots the service and drives it over the RPC/message transport, with Buf-style backwards-compatibility checks against the baseline. Filled when an rpc_service deliverable first needs it.",
+      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. Intended: the service definition (Protobuf/gRPC or AsyncAPI) plus example call/response pairs. Checker boots the service and drives it over the RPC/message transport, with Buf-style backwards-compatibility checks against the baseline. Filled when an rpc_service deliverable first needs it.",
       "type": "object"
     },
     "batch_job_profile": {
-      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. The closest sibling to cli_profile: run the job and assert exit status plus produced_artifacts (files/rows/objects) against declared expectations. Likely reuses most of the cli checker; kept a distinct slot so its run-then-inspect-outputs semantics are explicit. Filled when a batch_job deliverable first needs it.",
+      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. The closest sibling to cli_profile: run the job and assert exit status plus produced_artifacts (files/rows/objects) against declared expectations. Likely reuses most of the cli checker; kept a distinct slot so its run-then-inspect-outputs semantics are explicit. Filled when a batch_job deliverable first needs it.",
       "type": "object"
     }
   }

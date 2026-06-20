@@ -26,6 +26,10 @@ from __future__ import annotations
 
 import os
 import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Callable, NamedTuple, Optional
 
 
@@ -34,6 +38,12 @@ class RunResult(NamedTuple):
     returncode: int
     stdout: str
     stderr: str
+
+
+class HttpResponse(NamedTuple):
+    """The HTTP checker's bounded, testable response shape."""
+    status: int
+    body: bytes
 
 
 # A runner executes one shell command and returns a RunResult. In tests it is a fake keyed by command; in
@@ -217,12 +227,6 @@ def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str
     return _empty_slot("library")
 
 
-def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
-    """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over HTTP (Schemathesis/Dredd schema +
-    status/error paths, Pact consumer contracts, oasdiff compatibility) with port/readiness/teardown."""
-    return _empty_slot("http_service")
-
-
 def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
     """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over the RPC/message transport, Buf-style
     backwards-compatibility checks against the baseline."""
@@ -237,13 +241,195 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
 
 _SLOT_CHECKERS = {
     "library": run_library_conformance,
-    "http_service": run_http_service_conformance,
     "rpc_service": run_rpc_service_conformance,
     "batch_job": run_batch_job_conformance,
 }
 
 
-def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+_HTTP_BODY_LIMIT = 8192
+_HTTP_REQUEST_TIMEOUT_SECONDS = 2.0
+_HTTP_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _http_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
+    f = {"source": "http-conformance", "check": check, "severity": severity, "passed": passed, "detail": detail}
+    f.update(extra)
+    return f
+
+
+def _decode_http_body(body: bytes, limit: int = _HTTP_BODY_LIMIT) -> str:
+    body = body or b""
+    clipped = body[:limit]
+    text = clipped.decode("utf-8", errors="replace")
+    if len(body) > limit:
+        text += f"\n<conformance: response body truncated at {limit} bytes>"
+    return text
+
+
+def _read_http_response(resp, limit: int = _HTTP_BODY_LIMIT) -> bytes:
+    return resp.read(limit + 1)
+
+
+def _stdlib_http_request(method: str, url: str, *, json_body=None, has_json_body: bool = False,
+                         timeout: Optional[float] = None) -> HttpResponse:
+    data = None
+    headers = {"Accept": "application/json, text/plain, */*"}
+    has_json_body = has_json_body or json_body is not None
+    if has_json_body:
+        data = json.dumps(json_body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or _HTTP_REQUEST_TIMEOUT_SECONDS) as resp:
+            return HttpResponse(resp.status, _read_http_response(resp))
+    except urllib.error.HTTPError as exc:
+        return HttpResponse(exc.code, _read_http_response(exc))
+
+
+def _join_http_url(base_url: str, path: str) -> str:
+    return urllib.parse.urljoin(base_url.rstrip("/") + "/", (path or "").lstrip("/"))
+
+
+def _wait_for_http_readiness(profile: dict, http_request) -> Optional[dict]:
+    timeout = float(profile.get("readiness_timeout_seconds", 0))
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_error = None
+    while True:
+        remaining = deadline - time.monotonic()
+        request_timeout = min(_HTTP_REQUEST_TIMEOUT_SECONDS, max(0.05, remaining if remaining > 0 else 0.05))
+        try:
+            http_request("GET", profile["base_url"], timeout=request_timeout)
+            return None
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(_HTTP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+    detail = f"service did not become ready before timeout ({timeout:g}s)"
+    return _http_finding("lifecycle", "critical", False, detail, error=type(last_error).__name__)
+
+
+def _http_example_findings(profile: dict, http_request) -> list[dict]:
+    findings: list[dict] = []
+    base_url = profile["base_url"]
+    for i, ex in enumerate(profile.get("examples", [])):
+        method = ex.get("method", "GET").upper()
+        path = ex.get("path", "")
+        url = _join_http_url(base_url, path)
+        has_json_body = "json" in ex
+        try:
+            resp = http_request(
+                method, url, json_body=ex.get("json"), has_json_body=has_json_body,
+                timeout=_HTTP_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            findings.append(_http_finding(
+                "request", "major", False,
+                f"example {i} {method} {path}: request failed",
+                example=i, method=method, path=path, error=type(exc).__name__,
+            ))
+            continue
+
+        if resp.status != ex.get("expected_status"):
+            findings.append(_http_finding(
+                "status", "major", False,
+                f"example {i} {method} {path}: expected status {ex.get('expected_status')}, got {resp.status}",
+                example=i, method=method, path=path, expected=ex.get("expected_status"), actual=resp.status,
+            ))
+
+        decoded = None
+        for needle in ex.get("expected_body_contains", []):
+            if decoded is None:
+                decoded = _decode_http_body(resp.body)
+            if needle not in decoded:
+                findings.append(_http_finding(
+                    "body_contains", "major", False,
+                    f"example {i} {method} {path}: response body missing expected substring {needle!r}",
+                    example=i, method=method, path=path, expected=needle, actual=decoded,
+                ))
+    return findings
+
+
+def _http_profile_findings(profile) -> list[dict]:
+    missing: list[str] = []
+    if not isinstance(profile, dict):
+        missing.append("conformance.http_service")
+    else:
+        start = profile.get("start")
+        if not isinstance(start, dict) or not start.get("command"):
+            missing.append("start.command")
+        if not profile.get("base_url"):
+            missing.append("base_url")
+        if "readiness_timeout_seconds" not in profile:
+            missing.append("readiness_timeout_seconds")
+        examples = profile.get("examples")
+        if not isinstance(examples, list) or not examples:
+            missing.append("examples")
+    if not missing:
+        return []
+    return [_http_finding(
+        "profile", "critical", False,
+        "http_service conformance profile is missing required fields",
+        missing=missing,
+    )]
+
+
+def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
+                                 http_request=None) -> dict:
+    """Boot the declared HTTP service, wait for shallow readiness, then compare black-box examples."""
+    profile = (contract.get("conformance") or {}).get("http_service")
+    if contract.get("deliverable_kind") != "http_service":
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    http_request = http_request or _stdlib_http_request
+    findings: list[dict] = _http_profile_findings(profile)
+    checks_run = 0
+    if findings:
+        return {
+            "applicable": True,
+            "passed": False,
+            "findings": findings,
+            "checks_run": checks_run,
+        }
+
+    handle = None
+    try:
+        start = getattr(runner, "start")
+        handle = start(profile["start"]["command"], cwd=cwd)
+        checks_run += 1
+        readiness = _wait_for_http_readiness(profile, http_request)
+        if readiness:
+            findings.append(readiness)
+        else:
+            example_findings = _http_example_findings(profile, http_request)
+            findings.extend(example_findings)
+            checks_run += len(profile.get("examples", []))
+    except Exception as exc:
+        findings.append(_http_finding(
+            "lifecycle", "critical", False,
+            "service lifecycle setup failed",
+            error=type(exc).__name__,
+        ))
+    finally:
+        if handle is not None:
+            try:
+                handle.stop()
+            except Exception as exc:
+                findings.append(_http_finding(
+                    "lifecycle", "critical", False,
+                    "service lifecycle cleanup failed",
+                    error=type(exc).__name__,
+                ))
+
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": checks_run,
+    }
+
+
+def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None, http_request=None) -> dict:
     """Dispatch the conformance gate on `deliverable_kind`. CLI is the one real checker today; the other kinds
     route to their empty slot (recognized, unchecked). A contract with no kind / no profile is not applicable.
     This is the single entry point the pipeline calls, so adding a real checker later is a one-line wiring in
@@ -251,6 +437,8 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
     kind = contract.get("deliverable_kind")
     if kind == "cli":
         return run_cli_conformance(contract, runner, cwd=cwd)
+    if kind == "http_service":
+        return run_http_service_conformance(contract, runner, cwd=cwd, http_request=http_request)
     checker = _SLOT_CHECKERS.get(kind)
     if checker is not None:
         return checker(contract, runner, cwd=cwd)
