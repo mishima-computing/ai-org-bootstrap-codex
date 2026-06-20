@@ -350,19 +350,85 @@ def test_schema_json_profile_requires_files():
     print("ok  schema: json profile requires non-empty files, each with a path")
 
 
+def _batch_contract(profile):
+    return {"role_id": "aufheben-designer", "deliverable_kind": "batch_job", "conformance": {"batch_job": profile}}
+
+
+def test_batch_job_success_and_artifacts_pass():
+    profile = {"run": {"command": "python3 job.py"}, "produced_artifacts": ["out.csv"]}
+    runner = fake_runner({"python3 job.py": R(0, "", ""), "test -e out.csv": R(0, "", "")})
+    rep = conf.run_batch_job_conformance(_batch_contract(profile), runner)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert rep["checks_run"] == 2, rep  # the run + one artifact probe
+    print("ok  batch_job: job exits 0 and the declared artifact exists -> passes")
+
+
+def test_batch_job_exit_status_mismatch_is_major():
+    runner = fake_runner({"python3 job.py": R(3, "", "boom")})
+    rep = conf.run_batch_job_conformance(_batch_contract({"run": {"command": "python3 job.py"}}), runner)
+    es = [f for f in rep["findings"] if f["check"] == "exit_status"]
+    assert not rep["passed"] and es and es[0]["expected"] == 0 and es[0]["actual"] == 3, rep
+    print("ok  batch_job: a non-zero (vs expected) exit -> exit_status major")
+
+
+def test_batch_job_expected_status_honored():
+    profile = {"run": {"command": "python3 job.py"}, "expected_status": 2}
+    rep = conf.run_batch_job_conformance(_batch_contract(profile), fake_runner({"python3 job.py": R(2, "", "")}))
+    assert rep["passed"], rep  # exit 2 matches the declared expected_status
+    print("ok  batch_job: a declared non-zero expected_status is honored")
+
+
+def test_batch_job_missing_artifact_is_major():
+    profile = {"run": {"command": "j"}, "produced_artifacts": ["out.csv", "report.json"]}
+    runner = fake_runner({"j": R(0, "", ""), "test -e out.csv": R(0, "", ""), "test -e report.json": R(1, "", "")})
+    rep = conf.run_batch_job_conformance(_batch_contract(profile), runner)
+    miss = [f for f in rep["findings"] if f["check"] == "produced_artifact"]
+    assert not rep["passed"] and miss and miss[0]["artifact"] == "report.json", rep
+    print("ok  batch_job: a declared artifact the job did not produce -> produced_artifact major")
+
+
+def test_batch_job_build_failure_skips_run():
+    profile = {"run": {"command": "j"}, "build_and_install": {"commands": ["make"]}}
+    rep = conf.run_batch_job_conformance(_batch_contract(profile), fake_runner({"make": R(1, "", "compile error")}))
+    assert not rep["passed"]
+    assert any(f["check"] == "build_and_install" and f["severity"] == "critical" for f in rep["findings"]), rep
+    assert not any(f["check"] in ("exit_status", "produced_artifact") for f in rep["findings"]), rep
+    print("ok  batch_job: a broken build is critical and skips the job run")
+
+
+def test_schema_batch_job_profile_requires_run():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    ok = {**base, "deliverable_kind": "batch_job", "conformance": {"batch_job": {"run": {"command": "j"}}}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert not v.is_valid({**base, "deliverable_kind": "batch_job"}), "batch_job deliverable must require a profile"
+    assert not v.is_valid({**base, "deliverable_kind": "batch_job", "conformance": {"batch_job": {}}}), \
+        "the batch_job profile requires run.command"
+    print("ok  schema: batch_job profile requires a run.command")
+
+
 def test_dispatch_routes_cli_and_empty_slots():
     # the single entry point: cli routes to the real checker; the other four kinds route to their empty slot
     # (recognized, unchecked, never a silent pass); an unknown/absent kind is simply not applicable.
     profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
     cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
     assert cli["applicable"] and cli["passed"], cli
-    for kind in ("rpc_service", "batch_job"):  # cli, http_service, library now have real checkers
+    for kind in ("rpc_service",):  # cli, http_service, library, json, batch_job now have real checkers
         rep = conf.run_conformance({"deliverable_kind": kind, "conformance": {kind: {}}}, fake_runner({}))
         assert rep["applicable"] is False and rep["passed"] is True, (kind, rep)
         assert rep["slot"] == kind and rep["status"] == "no-checker-yet", (kind, rep)
     assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
         "applicable": False, "passed": True, "findings": [], "checks_run": 0}
-    print("ok  dispatch: cli -> real checker, 2 remaining kinds -> empty slot, none -> not applicable")
+    print("ok  dispatch: cli -> real checker, rpc_service -> empty slot, none -> not applicable")
 
 
 def test_slot_kind_is_streamed_not_silent():
@@ -398,10 +464,10 @@ def test_schema_other_kinds_have_optional_slots():
             "fallback_plan": "f", "handoff_to_implementer": "h"}
     # the other kinds are valid deliverable_kinds and their conformance slot is OPTIONAL (empty slot — not
     # yet enforced), so declaring the kind without a profile still validates.
-    for kind in ("rpc_service", "batch_job"):  # cli, http_service, library now require their own profile
+    for kind in ("rpc_service",):  # cli, http_service, library, json, batch_job now require their own profile
         assert v.is_valid({**base, "deliverable_kind": kind}), (kind, "kind alone must validate")
         assert v.is_valid({**base, "deliverable_kind": kind, "conformance": {kind: {}}}), (kind, "empty profile ok")
-    print("ok  schema: remaining-kind slots present and optional (empty slots, not enforced)")
+    print("ok  schema: remaining slot kind (rpc_service) present and optional (empty slot, not enforced)")
 
 
 def test_schema_cli_profile_required_iff_cli():

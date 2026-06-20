@@ -211,9 +211,9 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
 # replicated for free. The per-kind CHECKER is the real, differentiated work and is NOT done: a library has
 # no process to run (it needs API introspection + API-diff), a service needs boot + protocol-driven testing.
 # Each slot below exists so a future checker drops in here; until then it returns an HONEST no-op that is
-# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass. `cli`, `http_service`, and
-# `library` are now real checkers; `rpc_service` and `batch_job` remain slots.
-_SLOT_KINDS = ("rpc_service", "batch_job")
+# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass. `cli`, `http_service`,
+# `library`, `json`, and `batch_job` are now real checkers; only `rpc_service` remains a slot.
+_SLOT_KINDS = ("rpc_service",)
 
 
 def _empty_slot(kind: str) -> dict:
@@ -395,9 +395,41 @@ def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional
 
 
 def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
-    """SLOT (ADR-0009 #1). Closest to the CLI checker: run the job, assert exit status + produced_artifacts
-    against declared expectations. Likely reuses most of run_cli_conformance when filled."""
-    return _empty_slot("batch_job")
+    """Black-box batch-job checker (ADR-0009 #1). Runs the declared build/install, runs the job once, asserts
+    its exit status (default 0), and asserts each declared produced_artifact exists — the existence probe runs
+    THROUGH the runner (`test -e`), so it holds inside the execution sandbox, not only on the host. A broken
+    build skips the run (its failure would be derived)."""
+    profile = (contract.get("conformance") or {}).get("batch_job")
+    if contract.get("deliverable_kind") != "batch_job" or not profile:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    findings = install_findings(profile, runner, cwd=cwd)
+    checks_run = len(profile.get("build_and_install", {}).get("commands", []))
+    if not any(f["check"] == "build_and_install" for f in findings):
+        command = (profile.get("run") or {}).get("command") or ""
+        expected = profile.get("expected_status", 0)
+        res = runner(command, cwd=cwd)
+        checks_run += 1
+        if res.returncode != expected:
+            findings.append(_finding(
+                "exit_status", "major", False,
+                f"batch job `{command}`: expected exit {expected}, got {res.returncode}",
+                command=command, expected=expected, actual=res.returncode,
+                stderr_tail=_normalize(res.stderr)[-800:]))
+        for art in profile.get("produced_artifacts", []):
+            checks_run += 1
+            probe = runner(f"test -e {shlex.quote(art)}", cwd=cwd)
+            if probe.returncode != 0:
+                findings.append(_finding(
+                    "produced_artifact", "major", False,
+                    f"batch job did not produce the declared artifact '{art}'", artifact=art))
+
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": checks_run,
+    }
 
 
 _SLOT_CHECKERS = {

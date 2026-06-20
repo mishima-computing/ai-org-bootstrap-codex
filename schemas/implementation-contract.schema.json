@@ -303,6 +303,31 @@
           }
         }
       }
+    },
+    {
+      "$comment": "A batch_job deliverable MUST carry a checkable batch_job conformance profile (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "batch_job"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "batch_job"
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -560,8 +585,52 @@
       "type": "object"
     },
     "batch_job_profile": {
-      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. The closest sibling to cli_profile: run the job and assert exit status plus produced_artifacts (files/rows/objects) against declared expectations. Likely reuses most of the cli checker; kept a distinct slot so its run-then-inspect-outputs semantics are explicit. Filled when a batch_job deliverable first needs it.",
-      "type": "object"
+      "description": "Black-box batch-job contract: run the job once and assert its exit status plus the artifacts it was supposed to produce. The closest sibling to the CLI checker \u2014 it runs through the same runner (the inner-box exec in production) \u2014 but its semantics are run-then-inspect-outputs rather than per-example invocation, so it is a distinct profile. Artifact existence is checked THROUGH the runner (a `test -e` in the run environment), so it holds inside the box, not only on the host.",
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "properties": {
+        "build_and_install": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "description": "Shell commands that build/install the job in a clean environment, run in order before the job. A non-zero exit is a critical conformance finding.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "run": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "description": "The full shell command that runs the job once.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "expected_status": {
+          "description": "The exit code the job must return (default 0). A mismatch is a major finding.",
+          "type": "integer"
+        },
+        "produced_artifacts": {
+          "description": "Paths (relative to the run environment) that MUST exist after the job runs \u2014 the outputs it was supposed to produce. Each missing one is a major finding. Existence is checked through the runner, so it holds inside the execution sandbox.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "json_profile": {
       "description": "Black-box contract for a produced JSON document. The checker reads each declared file, parses it, validates it against a declared JSON Schema (inline or referenced), and asserts declared key paths resolve. It is the only profile that runs NO process \u2014 pure structural validation of the produced data \u2014 so it executes nothing untrusted and needs no isolation. Use it when the deliverable IS a JSON artifact (config, API spec, schema, manifest, data fixture); a CLI/service that merely emits JSON stays a cli/http_service deliverable and is checked through its own profile's output assertions.",
