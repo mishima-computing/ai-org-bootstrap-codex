@@ -416,58 +416,177 @@ def test_schema_batch_job_profile_requires_run():
     print("ok  schema: batch_job profile requires a run.command")
 
 
-def test_dispatch_routes_cli_and_empty_slots():
-    # the single entry point: cli routes to the real checker; the other four kinds route to their empty slot
-    # (recognized, unchecked, never a silent pass); an unknown/absent kind is simply not applicable.
-    profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
-    cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
-    assert cli["applicable"] and cli["passed"], cli
-    for kind in ("rpc_service",):  # cli, http_service, library, json, batch_job now have real checkers
-        rep = conf.run_conformance({"deliverable_kind": kind, "conformance": {kind: {}}}, fake_runner({}))
-        assert rep["applicable"] is False and rep["passed"] is True, (kind, rep)
-        assert rep["slot"] == kind and rep["status"] == "no-checker-yet", (kind, rep)
-    assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
-        "applicable": False, "passed": True, "findings": [], "checks_run": 0}
-    print("ok  dispatch: cli -> real checker, rpc_service -> empty slot, none -> not applicable")
+def _rpc_contract(profile):
+    return {"role_id": "aufheben-designer", "deliverable_kind": "rpc_service", "conformance": {"rpc_service": profile}}
 
 
-def test_slot_kind_is_streamed_not_silent():
-    # a recognized-but-unchecked kind must emit a `slot_unchecked` stream event (no silent cap), while the
-    # convergence findings stay untouched.
-    results = {"aufheben-designer": {"deliverable_kind": "rpc_service", "conformance": {"rpc_service": {}}}}
-    events = []
-    orig = cp._stream_append
-    cp._stream_append = lambda repo, ev: events.append(ev)
-    try:
-        rep = cp._shadow_conformance("/tmp/leaf", results, "run-rpc", runner=fake_runner({}))
-    finally:
-        cp._stream_append = orig
-    assert rep and rep.get("slot") == "rpc_service", rep
-    slot_events = [e for e in events if e.get("type") == "slot_unchecked"]
-    assert slot_events and slot_events[0]["slot"] == "rpc_service", events
-    assert cp._apply_conformance_gate([], rep, "block") == [], "an empty slot folds no findings even in block"
-    print("ok  empty slot streams slot_unchecked (visible, not silent); folds nothing")
+class _SvcRunner:
+    """A service runner: .start(command) returns a handle whose .stop() records that the service was torn down."""
+    def __init__(self):
+        self.stopped = False
+
+    def start(self, command, *, cwd=None):
+        outer = self
+
+        class _Handle:
+            def stop(self):
+                outer.stopped = True
+
+        return _Handle()
 
 
-def test_schema_other_kinds_have_optional_slots():
+def _json_rpc_request(by_method):
+    """A fake http_request: GET (readiness) returns 200; a JSON-RPC POST returns the canned envelope for its
+    method, always over HTTP 200 (the JSON-RPC convention the checker must look past)."""
+    def _req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+        if method == "GET":
+            return conf.HttpResponse(200, b"ready")
+        env = {"jsonrpc": "2.0", "id": json_body["id"], **by_method.get(json_body["method"], {"result": None})}
+        return conf.HttpResponse(200, json.dumps(env).encode())
+    return _req
+
+
+def test_rpc_json_rpc_call_passes_and_stops_service():
+    profile = {"start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+               "calls": [{"method": "add", "params": {"a": 1, "b": 2}, "expected_result_contains": ["3"]}]}
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
+                                           http_request=_json_rpc_request({"add": {"result": 3}}))
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert runner.stopped, "the service must be stopped after the calls"
+    print("ok  rpc(json_rpc_http): a real call whose result matches -> passes; service stopped")
+
+
+def test_rpc_json_rpc_unexpected_error_is_major_not_gated_on_http_status():
+    profile = {"start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+               "calls": [{"method": "add", "params": {}}]}
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(),
+        http_request=_json_rpc_request({"add": {"error": {"code": -32000, "message": "boom"}}}))
+    assert not rep["passed"] and any(f["check"] == "error" for f in rep["findings"]), rep
+    print("ok  rpc(json_rpc_http): an error in the body (over HTTP 200) -> major, not a pass")
+
+
+def test_rpc_json_rpc_expected_error_code_matches():
+    profile = {"start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+               "calls": [{"method": "bad", "expected_error_code": -32601}]}
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(),
+        http_request=_json_rpc_request({"bad": {"error": {"code": -32601, "message": "no method"}}}))
+    assert rep["passed"], rep
+    print("ok  rpc(json_rpc_http): a declared expected_error_code that matches -> passes")
+
+
+def test_rpc_unsupported_transport_is_critical_without_boot():
+    profile = {"start": {"command": "serve"}, "base_url": "x", "transport": "thrift", "calls": [{"method": "m"}]}
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner)
+    assert not rep["passed"], rep
+    assert any(f["check"] == "transport" and f["severity"] == "critical" for f in rep["findings"]), rep
+    assert not runner.stopped, "an unsupported transport is caught before booting"
+    print("ok  rpc: an unsupported transport -> critical, no boot")
+
+
+def test_rpc_grpc_real_invocation_with_injected_invoker_passes():
+    profile = {"start": {"command": "serve"}, "base_url": "h:50051", "transport": "grpc",
+               "calls": [{"method": "pkg.Svc/Get", "params": {"id": 1}, "expected_result_contains": ["ok"]}]}
+
+    def invoker(method, params):
+        assert method == "pkg.Svc/Get" and params == {"id": 1}
+        return ({"status": "ok"}, None)
+
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(), grpc_invoker=invoker)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    print("ok  rpc(grpc): a real dynamic invocation (injected) whose result matches -> passes")
+
+
+def test_rpc_grpc_unavailable_machinery_is_a_finding_not_silent():
+    # no injected invoker and (no descriptor_set_path / no grpcio) -> ONE transport_unavailable finding: the
+    # heavy machinery is loaded lazily and its absence is surfaced, never a silent pass nor an always-on dep.
+    profile = {"start": {"command": "serve"}, "base_url": "h:50051", "transport": "grpc",
+               "calls": [{"method": "pkg.Svc/Get"}]}
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner())
+    assert not rep["passed"] and any(f["check"] == "transport_unavailable" for f in rep["findings"]), rep
+    print("ok  rpc(grpc): missing transport machinery -> transport_unavailable finding (lazy, not silent)")
+
+
+def test_schema_rpc_profile_requires_start_base_transport_calls():
     try:
         import jsonschema
     except ImportError:
         print("skip  jsonschema not installed")
         return
-    schema = json.loads(SCHEMA.read_text())
-    v = jsonschema.Draft202012Validator(schema)
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
     base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
             "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
             "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
             "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
             "fallback_plan": "f", "handoff_to_implementer": "h"}
-    # the other kinds are valid deliverable_kinds and their conformance slot is OPTIONAL (empty slot — not
-    # yet enforced), so declaring the kind without a profile still validates.
-    for kind in ("rpc_service",):  # cli, http_service, library, json, batch_job now require their own profile
-        assert v.is_valid({**base, "deliverable_kind": kind}), (kind, "kind alone must validate")
-        assert v.is_valid({**base, "deliverable_kind": kind, "conformance": {kind: {}}}), (kind, "empty profile ok")
-    print("ok  schema: remaining slot kind (rpc_service) present and optional (empty slot, not enforced)")
+    ok = {**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
+        "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+        "calls": [{"method": "ping"}]}}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    incomplete = {**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
+        "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http"}}}  # no calls
+    assert not v.is_valid(incomplete), "rpc profile requires calls"
+    assert not v.is_valid({**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
+        "start": {"command": "s"}, "base_url": "x", "transport": "smoke-signals", "calls": [{"method": "m"}]}}}), \
+        "transport is constrained to the supported set"
+    print("ok  schema: rpc profile requires start/base_url/transport/calls; transport is an enum")
+
+
+def test_dispatch_routes_every_kind_to_a_real_checker():
+    # the single entry point: every recognized kind now routes to a real checker (no empty slots remain); an
+    # unknown/absent kind is simply not applicable, never a silent pass.
+    profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
+    cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
+    assert cli["applicable"] and cli["passed"], cli
+    assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
+        "applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    unknown = conf.run_conformance({"deliverable_kind": "mystery", "conformance": {"mystery": {}}}, fake_runner({}))
+    assert unknown["applicable"] is False, unknown
+    print("ok  dispatch: cli -> real checker; unknown kind -> not applicable (no empty slots remain)")
+
+
+def test_slot_kind_is_streamed_not_silent():
+    # a recognized-but-unchecked kind must emit a `slot_unchecked` stream event (no silent cap), while the
+    # convergence findings stay untouched.
+    # No current kind is an empty slot (all have real checkers), but the mechanism is RETAINED for a future
+    # kind added before its checker. Verify it still streams slot_unchecked (visible, never silent) and folds
+    # nothing, by standing in a fabricated future-kind slot report.
+    results = {"aufheben-designer": {"deliverable_kind": "futurekind", "conformance": {"futurekind": {}}}}
+    events = []
+    orig_run, orig_stream = conf.run_conformance, cp._stream_append
+    conf.run_conformance = lambda *a, **k: conf._empty_slot("futurekind")
+    cp._stream_append = lambda repo, ev: events.append(ev)
+    try:
+        rep = cp._shadow_conformance("/tmp/leaf", results, "run-fk", runner=fake_runner({}))
+    finally:
+        conf.run_conformance, cp._stream_append = orig_run, orig_stream
+    assert rep and rep.get("slot") == "futurekind", rep
+    slot_events = [e for e in events if e.get("type") == "slot_unchecked"]
+    assert slot_events and slot_events[0]["slot"] == "futurekind", events
+    assert cp._apply_conformance_gate([], rep, "block") == [], "an empty slot folds no findings even in block"
+    print("ok  slot mechanism (retained for future kinds) streams slot_unchecked; folds nothing")
+
+
+def test_schema_every_executable_kind_requires_its_profile():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    # every executable kind now REQUIRES its conformance profile — no optional slots remain.
+    for kind in ("cli", "http_service", "library", "json", "batch_job", "rpc_service"):
+        assert not v.is_valid({**base, "deliverable_kind": kind}), (kind, "executable kind must require its profile")
+    # 'none' and an absent deliverable_kind need no conformance (no-interface / backward compatible).
+    assert v.is_valid({**base, "deliverable_kind": "none"}), "none needs no profile"
+    assert v.is_valid(base), "a legacy contract without deliverable_kind still validates"
+    print("ok  schema: every executable kind requires its profile; none/legacy need none")
 
 
 def test_schema_cli_profile_required_iff_cli():

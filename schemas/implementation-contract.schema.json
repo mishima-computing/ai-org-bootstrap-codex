@@ -328,6 +328,31 @@
           }
         }
       }
+    },
+    {
+      "$comment": "An rpc_service deliverable MUST carry a checkable rpc_service conformance profile (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "rpc_service"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "rpc_service"
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -581,8 +606,88 @@
       "additionalProperties": false
     },
     "rpc_service_profile": {
-      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. Intended: the service definition (Protobuf/gRPC or AsyncAPI) plus example call/response pairs. Checker boots the service and drives it over the RPC/message transport, with Buf-style backwards-compatibility checks against the baseline. Filled when an rpc_service deliverable first needs it.",
-      "type": "object"
+      "description": "Black-box RPC contract: boot the service and ACTUALLY INVOKE each declared call over the declared transport (not a static shape check). `json_rpc_http` posts JSON-RPC 2.0 over stdlib HTTP and checks the result/error (an application error rides HTTP 200, so the HTTP status alone is not the contract); `grpc` invokes dynamically via a compiled descriptor set, with grpcio imported lazily only when a grpc deliverable is checked. Buf-style backwards-compatibility diffing against a baseline is a later addition.",
+      "type": "object",
+      "required": [
+        "start",
+        "base_url",
+        "transport",
+        "calls"
+      ],
+      "properties": {
+        "start": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "description": "Shell command that starts the service (run through the runner; stopped after the calls).",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "base_url": {
+          "description": "The endpoint: a full URL for json_rpc_http (the JSON-RPC POST target, also polled for readiness), or host:port for grpc.",
+          "type": "string"
+        },
+        "readiness_timeout_seconds": {
+          "description": "How long to wait for json_rpc_http readiness before invoking (default 0).",
+          "type": "number",
+          "minimum": 0
+        },
+        "transport": {
+          "description": "How calls are invoked.",
+          "type": "string",
+          "enum": [
+            "json_rpc_http",
+            "grpc"
+          ]
+        },
+        "descriptor_set_path": {
+          "description": "grpc only: workspace-relative path to a compiled FileDescriptorSet (e.g. `protoc --descriptor_set_out` / `buf build -o`) used to invoke methods dynamically.",
+          "type": "string"
+        },
+        "calls": {
+          "description": "Concrete RPC calls to invoke. Each pins either an expected result (no error, with optional result substrings) or an expected error code.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "description": "The JSON-RPC method name, or the gRPC `package.Service/Method` path.",
+                "type": "string"
+              },
+              "params": {
+                "description": "The request params (JSON-RPC) or request message (gRPC, mapped into the protobuf message).",
+                "type": [
+                  "object",
+                  "array"
+                ]
+              },
+              "expected_result_contains": {
+                "description": "Substrings that must appear in the JSON-serialized result.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expected_error_code": {
+                "description": "When set, the call MUST fail with this error code (JSON-RPC error.code / gRPC status).",
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "batch_job_profile": {
       "description": "Black-box batch-job contract: run the job once and assert its exit status plus the artifacts it was supposed to produce. The closest sibling to the CLI checker \u2014 it runs through the same runner (the inner-box exec in production) \u2014 but its semantics are run-then-inspect-outputs rather than per-example invocation, so it is a distinct profile. Artifact existence is checked THROUGH the runner (a `test -e` in the run environment), so it holds inside the box, not only on the host.",

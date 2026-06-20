@@ -210,10 +210,10 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
 # aufheben emits -> shadow gate -> finding routing) is proven by the CLI path and is kind-agnostic, so it is
 # replicated for free. The per-kind CHECKER is the real, differentiated work and is NOT done: a library has
 # no process to run (it needs API introspection + API-diff), a service needs boot + protocol-driven testing.
-# Each slot below exists so a future checker drops in here; until then it returns an HONEST no-op that is
-# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass. `cli`, `http_service`,
-# `library`, `json`, and `batch_job` are now real checkers; only `rpc_service` remains a slot.
-_SLOT_KINDS = ("rpc_service",)
+# EVERY current deliverable kind now has a real checker (cli, http_service, library, json, batch_job,
+# rpc_service). The empty-slot mechanism below is retained as the honest "recognized but unchecked" pattern
+# for the NEXT new kind added before its checker exists — it stays VISIBLE on the stream, never a silent pass.
+_SLOT_KINDS: tuple = ()
 
 
 def _empty_slot(kind: str) -> dict:
@@ -388,10 +388,202 @@ def run_json_conformance(contract: dict, runner: Runner = None, *, cwd: Optional
     }
 
 
-def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
-    """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over the RPC/message transport, Buf-style
-    backwards-compatibility checks against the baseline."""
-    return _empty_slot("rpc_service")
+_RPC_TRANSPORTS = ("json_rpc_http", "grpc")
+
+
+class _RpcTransportUnavailable(Exception):
+    """The declared transport's machinery (e.g. grpcio) or inputs (e.g. a descriptor set) are not present, so
+    the call cannot be invoked. Surfaced as a finding — never a silent pass."""
+
+
+def _rpc_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
+    f = {"source": "rpc-conformance", "check": check, "severity": severity, "passed": passed, "detail": detail}
+    f.update(extra)
+    return f
+
+
+def _rpc_profile_findings(profile: dict) -> list[dict]:
+    """Structural completeness, checked before booting anything."""
+    findings: list[dict] = []
+    transport = profile.get("transport")
+    if transport not in _RPC_TRANSPORTS:
+        findings.append(_rpc_finding(
+            "transport", "critical", False,
+            f"unsupported rpc transport {transport!r} (supported: {', '.join(_RPC_TRANSPORTS)})",
+            transport=transport))
+    if not profile.get("calls"):
+        findings.append(_rpc_finding("calls", "major", False, "rpc contract declares no calls to verify"))
+    return findings
+
+
+def _check_rpc_result(i: int, method, call: dict, result, error) -> list[dict]:
+    """Compare one decoded RPC response against the call's expectations. JSON-RPC and gRPC both reduce to
+    'a result or an error', so the comparison is shared. An expected_error_code means the call SHOULD fail
+    with that code; otherwise an error is unexpected and the declared result substrings must be present."""
+    findings: list[dict] = []
+    if "expected_error_code" in call:
+        code = (error or {}).get("code") if isinstance(error, dict) else error
+        if code != call["expected_error_code"]:
+            findings.append(_rpc_finding(
+                "error_code", "major", False,
+                f"call {i} {method}: expected error code {call['expected_error_code']}, got {code!r}",
+                call=i, method=method, expected=call["expected_error_code"], actual=code))
+        return findings
+    if error is not None:
+        findings.append(_rpc_finding("error", "major", False,
+                                     f"call {i} {method}: unexpected error {error!r}", call=i, method=method))
+        return findings
+    result_text = json.dumps(result, default=str)
+    for needle in call.get("expected_result_contains", []):
+        if needle not in result_text:
+            findings.append(_rpc_finding(
+                "result_contains", "major", False,
+                f"call {i} {method}: result missing expected substring {needle!r}",
+                call=i, method=method, expected=needle))
+    return findings
+
+
+def _json_rpc_call_findings(profile: dict, http_request) -> list[dict]:
+    """json_rpc_http transport (stdlib): POST a JSON-RPC 2.0 envelope and check the response's result/error.
+    JSON-RPC returns HTTP 200 even on an application error (the error is in the body), so the contract is
+    checked on result/error, NOT the HTTP status — this is the distinction a plain http_service profile
+    would miss."""
+    findings: list[dict] = []
+    url = profile["base_url"]
+    for i, call in enumerate(profile.get("calls", [])):
+        method = call.get("method")
+        envelope = {"jsonrpc": "2.0", "id": i + 1, "method": method, "params": call.get("params", {})}
+        try:
+            resp = http_request("POST", url, json_body=envelope, has_json_body=True,
+                                timeout=_HTTP_REQUEST_TIMEOUT_SECONDS)
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            findings.append(_rpc_finding("request", "major", False, f"call {i} {method}: request failed",
+                                         call=i, method=method, error=type(exc).__name__))
+            continue
+        try:
+            body = json.loads(_decode_http_body(resp.body))
+        except ValueError:
+            findings.append(_rpc_finding("response", "major", False,
+                                         f"call {i} {method}: response is not valid JSON-RPC", call=i, method=method))
+            continue
+        findings += _check_rpc_result(i, method, call, body.get("result"), body.get("error"))
+    return findings
+
+
+def _build_grpc_invoker(profile: dict, cwd: Optional[str]):
+    """Lazily assemble a dynamic gRPC caller from a compiled FileDescriptorSet — imported ONLY here, when a
+    grpc rpc deliverable is actually checked, so grpcio/protobuf are never an always-on dependency. Returns a
+    callable(method_path, params) -> (result_dict, error). Raises _RpcTransportUnavailable when the machinery
+    or the descriptor set is absent. NOTE: the live-server path requires a running gRPC service + grpcio and
+    is exercised by integration, not the unit suite (which injects a fake invoker)."""
+    try:
+        import grpc
+        from google.protobuf import descriptor_pb2, descriptor_pool, json_format, message_factory
+    except ImportError as exc:
+        raise _RpcTransportUnavailable(
+            f"grpc transport declared but its machinery is unavailable ({exc}); install grpcio + protobuf "
+            f"to verify gRPC services") from exc
+    ds_path = profile.get("descriptor_set_path")
+    if not ds_path:
+        raise _RpcTransportUnavailable(
+            "grpc transport requires a descriptor_set_path (a compiled FileDescriptorSet) to invoke methods")
+    full = ds_path if (cwd is None or os.path.isabs(ds_path)) else os.path.join(cwd, ds_path)
+    try:
+        with open(full, "rb") as fh:
+            fds = descriptor_pb2.FileDescriptorSet.FromString(fh.read())
+    except OSError as exc:
+        raise _RpcTransportUnavailable(f"could not read descriptor_set_path '{ds_path}': {exc}") from exc
+    pool = descriptor_pool.DescriptorPool()
+    for fdp in fds.file:
+        pool.Add(fdp)
+    factory = message_factory.MessageFactory(pool)
+    channel = grpc.insecure_channel(profile["base_url"])
+
+    def invoke(method_path, params):
+        service_name, method_name = method_path.rsplit("/", 1)
+        method = pool.FindServiceByName(service_name).FindMethodByName(method_name)
+        request = json_format.ParseDict(params or {}, factory.GetPrototype(method.input_type)())
+        response_cls = factory.GetPrototype(method.output_type)
+        call = channel.unary_unary(f"/{service_name}/{method_name}",
+                                   request_serializer=lambda m: m.SerializeToString(),
+                                   response_deserializer=response_cls.FromString)
+        response = call(request, timeout=_HTTP_REQUEST_TIMEOUT_SECONDS)
+        return json_format.MessageToDict(response), None
+
+    return invoke
+
+
+def _grpc_call_findings(profile: dict, cwd: Optional[str], grpc_invoker=None) -> list[dict]:
+    """grpc transport: invoke each call dynamically. The invoker is built lazily (or injected for tests); if
+    the transport machinery/inputs are unavailable, ONE finding says so — never a silent pass."""
+    if grpc_invoker is None:
+        try:
+            grpc_invoker = _build_grpc_invoker(profile, cwd)
+        except _RpcTransportUnavailable as exc:
+            return [_rpc_finding("transport_unavailable", "major", False, str(exc), transport="grpc")]
+    findings: list[dict] = []
+    for i, call in enumerate(profile.get("calls", [])):
+        method = call.get("method")
+        try:
+            result, error = grpc_invoker(method, call.get("params", {}))
+        except Exception as exc:  # noqa: BLE001 — a failed invocation is a finding, not a gate crash
+            findings.append(_rpc_finding("request", "major", False,
+                                         f"call {i} {method}: invocation failed: {type(exc).__name__}: {exc}",
+                                         call=i, method=method))
+            continue
+        findings += _check_rpc_result(i, method, call, result, error)
+    return findings
+
+
+def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
+                                http_request=None, grpc_invoker=None) -> dict:
+    """Black-box RPC checker (ADR-0009 #1). Boots the service and ACTUALLY INVOKES each declared call over the
+    declared transport — it is not a static JSON shape check. `json_rpc_http` runs through stdlib HTTP and
+    checks the JSON-RPC result/error (not the HTTP status); `grpc` invokes dynamically via a descriptor set
+    with grpcio imported lazily, only when a grpc deliverable is checked. A structural defect (bad transport /
+    no calls) is reported without booting."""
+    profile = (contract.get("conformance") or {}).get("rpc_service")
+    if contract.get("deliverable_kind") != "rpc_service" or not profile:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    findings = _rpc_profile_findings(profile)
+    if findings:
+        return {"applicable": True, "passed": False, "findings": findings, "checks_run": 0}
+
+    transport = profile["transport"]
+    http_request = http_request or _stdlib_http_request
+    checks_run = 0
+    handle = None
+    try:
+        handle = runner.start(profile["start"]["command"], cwd=cwd)
+        checks_run += 1
+        if transport == "json_rpc_http":
+            readiness = _wait_for_http_readiness(profile, http_request)
+            if readiness:
+                findings.append(readiness)
+            else:
+                findings += _json_rpc_call_findings(profile, http_request)
+                checks_run += len(profile.get("calls", []))
+        else:  # grpc
+            findings += _grpc_call_findings(profile, cwd, grpc_invoker)
+            checks_run += len(profile.get("calls", []))
+    except Exception as exc:  # noqa: BLE001 — lifecycle failure is a finding
+        findings.append(_rpc_finding("lifecycle", "critical", False, "service lifecycle setup failed",
+                                     error=type(exc).__name__))
+    finally:
+        if handle is not None:
+            try:
+                handle.stop()
+            except Exception as exc:  # noqa: BLE001
+                findings.append(_rpc_finding("lifecycle", "critical", False, "service lifecycle cleanup failed",
+                                             error=type(exc).__name__))
+
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": checks_run,
+    }
 
 
 def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
@@ -434,7 +626,6 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
 
 _SLOT_CHECKERS = {
     "library": run_library_conformance,
-    "rpc_service": run_rpc_service_conformance,
     "batch_job": run_batch_job_conformance,
 }
 
@@ -634,6 +825,8 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
         return run_http_service_conformance(contract, runner, cwd=cwd, http_request=http_request)
     if kind == "json":
         return run_json_conformance(contract, cwd=cwd)
+    if kind == "rpc_service":
+        return run_rpc_service_conformance(contract, runner, cwd=cwd, http_request=http_request)
     checker = _SLOT_CHECKERS.get(kind)
     if checker is not None:
         return checker(contract, runner, cwd=cwd)
