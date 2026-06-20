@@ -23,9 +23,11 @@ from pathlib import Path
 
 # gitleaks rule ids (and id fragments) that name a KNOWN provider credential or a private key — high
 # confidence, so a hit is critical. Everything else (notably generic-api-key / high-entropy) is advisory.
+# (One vendor's rule id is omitted here because this repo is codex-only and forbids that vendor's name in
+# tracked files; its `sk-`-prefixed key format is still caught at critical by the fallback _CRITICAL_PATTERNS.)
 _CRITICAL_RULES = {
     "aws-access-token", "aws-secret-key", "github-pat", "github-fine-grained-pat", "github-oauth",
-    "github-app-token", "gitlab-pat", "gitlab-ci-token", "openai-api-key", "anthropic-api-key",
+    "github-app-token", "gitlab-pat", "gitlab-ci-token", "openai-api-key",
     "stripe-access-token", "stripe-api-key", "slack-bot-token", "slack-user-token", "slack-app-token",
     "slack-webhook-url", "gcp-api-key", "gcp-service-account", "google-api-key", "twilio-api-key",
     "sendgrid-api-token", "npm-access-token", "pypi-upload-token", "square-access-token",
