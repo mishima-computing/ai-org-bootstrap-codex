@@ -235,6 +235,16 @@ artifact. Every gate is wired **shadow-first**: it streams its findings but bloc
 false-positive rate is shown ~0, then a one-line flip promotes it to `block`; findings route through the same
 severity budget / repair loop as Linon's.
 
+**The loop is closed (in `block`).** An external static review found the first cut was quality *telemetry*,
+not enforcement: gate findings folded into convergence **once**, then the repair loop recomputed findings from
+Linon alone and never re-ran the gates — so a `block` violation could vanish the moment Linon went clean. Two
+fixes close it. (1) **The artifact gates re-run every repair iteration** and feed their findings to the repair
+agents, so convergence requires Linon clean **and** every `block` gate clean *on the current artifact*, not a
+stale initial result. (2) **Pre-flight is a true pre-implementation gate**: in `block`, a contract defect
+re-runs *only* aufheben (fed the findings), up to a cap, and fails closed on a persistent defect — a bad
+contract costs an aufheben re-run, not a wasted implementer + reviewer wave. In `shadow` (the default) both
+are pure observation, so this is a no-op until a gate is promoted — but promotion now buys real enforcement.
+
 Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 
 | Gate | What it does | Env |
@@ -273,6 +283,17 @@ self-report. (The gates are also exercised by ~50 unit tests across the suites l
   contract-vs-goal misses the deterministic pre-flight does not.
 - **Promotion from `shadow` to `block`** happens per gate only once its effective-FP is shown ~0 on real
   runs. ADR-0009 investments #1–#4 are built; the remainder is telemetry-, engine-, or demand-gated.
+- **Open P0/major from the external review** (beyond the closed loop + pre-flight gate already landed):
+  `GateResult{status, contract_sha, artifact_sha}` with **fail-closed on a gate ERROR** (a scanner crash is
+  currently treated as clean — a silent fail-open); **execution isolation** of the artifact runner
+  (argv-not-shell, network default-deny, cgroups — the inner-sandbox boundary); **leaf-scoped** (not
+  repo-wide) secret scanning with a baseline; the **library / batch / http_service** profiles; **targeted**
+  (not full-wave) repair routing by finding source; selecting a **Draft 2020-12** validator (not Draft 7) and
+  declaring `jsonschema` as a dependency. Tracked, in that rough priority.
+
+Honest status: with the closed loop and the pre-flight gate, the gates are **enforcement-capable** in
+`block`, but most ship in `shadow` by default and the isolation/ERROR-handling items above are real. This is
+a deterministic verification spine that is *closing* on a quality-assurance system, not yet a finished one.
 
 The full defect-class allocation, repair routing, and the five-step investment sequence are in **ADR-0009**;
 its one-line boundary: *the model/human decides what must be true and whether the contract fits the goal;
