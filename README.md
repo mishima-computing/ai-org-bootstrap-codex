@@ -257,11 +257,39 @@ cross-lane revert (the prompt could eventually go).
 The same split, applied to **verification**. The dividing line is not "binary defect vs contextual defect";
 it is: **choosing** the contract/policy is judgment, **checking and enforcing** the chosen contract is
 deterministic. So the design agents emit an *executable* contract and deterministic gates prove the build
-obeys it — **"B produces an executable A."** This corrects an earlier review that was almost entirely *static*
-(Linon reads the diff; the implementer self-reports its tests) by adding a *dynamic* tier that **runs** the
-artifact. Every gate is wired **shadow-first**: it streams its findings but blocks nothing until its effective
+obeys it — **"B produces an executable A."** This corrects an earlier review that was almost entirely *static* —
+it read and reasoned over the code but never independently **ran** it (the implementer self-reports its tests) —
+by adding a *dynamic* tier that executes the artifact. Every gate is wired **shadow-first**: it streams its findings but blocks nothing until its effective
 false-positive rate is shown ~0, then a one-line flip promotes it to `block`; findings route through the same
 severity budget / repair loop as Linon's.
+
+**The review half is an unanchored adversary — and stays that way.** The deterministic gates above are the
+*enforcement* half; `linon` is the *judgment* half, and the two are kept deliberately apart. **Linon is not
+given the goal or the implementation contract.** That is not an oversight: a reviewer told what a change is
+*supposed* to do tends to confirm that intent and stop smelling the things no one framed — the broken caller in
+an *unchanged* file, the resource leak the contract never mentioned, the edge case outside the spec. Its value
+is precisely the *unframed* find, so it reviews the change cold. "Does the artifact satisfy the goal/contract?"
+is a different question, and it is answered better *deterministically* — by the conformance gate (golden
+examples the implementer never saw) and the pre-implementation contract review — than by dulling the adversary's
+nose. The improvement axis that follows is the important one: when first-pass review fails (it does ~55% of the
+time), the fix is to make the **designers and implementers** good enough to satisfy an independent adversary —
+never to anchor the adversary to make itself easier to pass.
+
+**How Linon reads — `codex review`'s scope behaviour (verified, not assumed).** Linon runs through Codex's
+native `codex review` (`scripts/codex_review.py`), whose reading scope was probed directly:
+
+- **The diff is an *anchor*, not a read-limit.** It starts from the change set (`--uncommitted`: staged +
+  unstaged + untracked, or `--base <branch>`) but reads the **full changed files, their base version, and the
+  unchanged dependents** to judge cross-file impact. In a controlled test it caught a signature change in
+  `lib.py` by reading the *unchanged* `caller.py` and naming the exact `TypeError` the existing call would
+  raise — a defect a bare-diff reviewer structurally cannot see.
+- **No hard read boundary.** Relevance is the model's call; it will also open noise (lockfiles, caches, even
+  its own log) and then correctly drop it from the findings. What it does *not* audit is code unrelated to the
+  change (the anchor keeps it from auditing the whole tree unprompted) and anything git does not surface as
+  changed (ignored/excluded paths are never in the change set, so they are never a starting point).
+- **Output is semi-structured and parseable:** `- [P<n>] <title> — <file>:<line>` plus an indented body
+  (`P1` blocking, `P2` major, `P3` minor). `codex_review.py` parses this into the same finding shape the repair
+  loop already consumes, so the reviewer is a drop-in for the role with no bespoke protocol.
 
 **The loop is closed (in `block`).** An external static review found the first cut was quality *telemetry*,
 not enforcement: gate findings folded into convergence **once**, then the repair loop recomputed findings from
