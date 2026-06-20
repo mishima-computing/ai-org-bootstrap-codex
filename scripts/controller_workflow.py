@@ -30,6 +30,28 @@ def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir,
 PRODUCER_OUTPUT_RETRIES = 2   # extra carrier re-runs when a producer left no deliverable
 
 
+def _cross_lane_forbidden(repo, own_allowed) -> tuple:
+    """Globs owned by OTHER write-roles' registry lanes (e.g. a CI-writer's `.github/workflows/**`) and
+    NOT in THIS role's own allowed-set. A role must never LAND nor be BLOCKED BY another role's lane: a
+    CI-writer's legitimate workflow file, left in a shared repair worktree, otherwise reads as this role's
+    out-of-scope deviation and sinks an otherwise-correct stage (observed live: a `mocks/ ONLY` goal whose
+    implementer repair blocked on a `.github` file the CI-writer had legitimately produced). Deterministic,
+    registry-derived — do NOT depend on the aufheben contract to remember to list it (#48: a goal's
+    deliverable boundary is orthogonal to infra roles' standing authority; each role stays in its own lane
+    and strays are reverted, not blocked on). Returns globs to ADD to coord_forbidden; () if the registry
+    is unreadable (the LLM-provided forbidden_paths still apply). A clean wave is unaffected — a role's own
+    worktree never holds another lane's files, so this only bites a shared repair worktree's leftover."""
+    try:
+        import controller_run
+        from ai_org_bootstrap.registry import load_runtime_registry
+        reg = load_runtime_registry(controller_run.org_root(Path(repo)) / "registry" / "runtime-registry.yaml")
+    except Exception:                                      # noqa: BLE001 — lane derivation never breaks a run
+        return ()
+    own = set(own_allowed or ())
+    lanes = {g for e in reg for g in (e.write_scope or ()) if g not in own and "/" in g}
+    return tuple(sorted(lanes))
+
+
 def _ensure_producer_output(repo, contract, output_schema, output_path, carrier, carrier_ok, journal):
     """A producing carrier can exit cleanly yet leave an EMPTY/absent result.json (a transient carrier
     miss — the model emitted no final message). The process-level retry in run_carrier never fires for
@@ -149,7 +171,8 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     # out-of-bounds extra must NOT land AND must NOT sink an otherwise-correct stage — so revert it
     # BEFORE the scope check, leaving the deliverable as exactly the in-scope work. The ABSOLUTE/security
     # set (DEFAULT_FORBIDDEN) is left to HARD-FAIL: attempting it is the signal, not a slip.
-    coord_forbidden = tuple(contract.forbidden_paths or ())
+    coord_forbidden = tuple(contract.forbidden_paths or ()) \
+        + _cross_lane_forbidden(repo, contract.files_allowed_to_change)   # #48: other roles' lanes, registry-derived
     # Strip over the FULL dirty set (porcelain_touched), not this stage's delta (changed_since), and
     # do it even when the carrier failed: a coordination-forbidden file created in an EARLIER iteration
     # that TIMED OUT (carrier_ok False -> strip skipped) would otherwise persist in the shared repair
