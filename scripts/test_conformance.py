@@ -267,6 +267,38 @@ def test_shadow_gate_dormant_for_non_cli_contract():
     print("ok  gate dormant for a non-CLI contract (no event, no exec, default mode=shadow)")
 
 
+def test_acceptance_bundle_withheld_from_implementer_only():
+    # ADR-0009 #1 immutable acceptance bundle: the implementer sees the spec (entrypoint, status_and_errors,
+    # acceptance_criteria) but NOT the golden examples; a verifier sees the full contract; results untouched.
+    contract = {
+        "role_id": "aufheben-designer", "acceptance_criteria": ["does X"],
+        "deliverable_kind": "cli",
+        "conformance": {"cli": {
+            "entrypoint": {"invocation": "t"},
+            "status_and_errors": {"success_codes": [0], "invalid_input_codes": [2]},
+            "examples": [{"invocation": "--help", "expected_status": 0},
+                         {"invocation": "", "expected_status": 2}],
+        }},
+    }
+    inputs = {"aufheben-designer": contract}
+
+    impl = cp._withhold_acceptance_bundle("implementer", inputs)
+    icli = impl["aufheben-designer"]["conformance"]["cli"]
+    assert icli["examples"] == [], "implementer must NOT see the golden examples"
+    assert icli["_examples_withheld"] == 2, "the withholding is marked, not silent"
+    assert icli["entrypoint"] == {"invocation": "t"}, "implementer keeps the entrypoint spec"
+    assert icli["status_and_errors"]["invalid_input_codes"] == [2], "implementer keeps the exit-code policy"
+    assert impl["aufheben-designer"]["acceptance_criteria"] == ["does X"], "implementer keeps acceptance_criteria"
+    # the ORIGINAL contract (what the controller/gate uses) still has the examples
+    assert len(contract["conformance"]["cli"]["examples"]) == 2, "the gate's contract is untouched"
+
+    # a verifier / any non-implementer role sees the full contract unchanged
+    same = cp._withhold_acceptance_bundle("linon", inputs)
+    assert same["aufheben-designer"]["conformance"]["cli"]["examples"], "non-implementer sees full goldens"
+    assert cp.WITHHOLD_BUNDLE == "on", "withholding is on by default"
+    print("ok  acceptance bundle withheld from implementer only (spec kept, goldens hidden, gate intact)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

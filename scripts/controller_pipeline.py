@@ -446,10 +446,38 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     return stage_ok, result, report_dict, stage
 
 
+WITHHOLD_BUNDLE = os.environ.get("WITHHOLD_ACCEPTANCE_BUNDLE", "on").lower()   # on (default) | off
+
+
+def _withhold_acceptance_bundle(role: str, inputs: dict[str, dict]) -> dict[str, dict]:
+    """ADR-0009 #1: the acceptance bundle (the golden conformance examples) is IMMUTABLE TO THE IMPLEMENTER.
+    The implementer builds to the SPEC it can see — acceptance_criteria, the entrypoint, and the exit-code
+    policy (status_and_errors) — but NOT the exact golden examples. So if it misunderstands the spec, the gate
+    (which checks goldens the implementer never saw) catches it; the implementation and its oracle cannot
+    share the same misunderstanding, and the implementer cannot hard-code to the goldens. A marker records
+    that a bundle exists and was withheld (so this is visible, not a silent strip). Only the implementer is
+    redacted; verifiers and the gate keep the full contract."""
+    if role != "implementer" or WITHHOLD_BUNDLE == "off":
+        return inputs
+    contract = inputs.get(AUFHEBEN_ROLE)
+    if not isinstance(contract, dict) or not isinstance(contract.get("conformance"), dict):
+        return inputs
+    import copy
+    redacted = dict(inputs)
+    contract = copy.deepcopy(contract)
+    for kind, profile in contract["conformance"].items():
+        if isinstance(profile, dict) and profile.get("examples"):
+            profile["_examples_withheld"] = len(profile["examples"])
+            profile["examples"] = []
+    redacted[AUFHEBEN_ROLE] = contract
+    return redacted
+
+
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
                    stage_run_id: str, cache: bool, resume_session=None) -> tuple[bool, dict | None, dict, dict]:
     if role == "linon" and _linon_via_codex_review_enabled():
         return _execute_linon_via_codex_review(repo, stage_run_id)
+    inputs = _withhold_acceptance_bundle(role, inputs)
     contract = _contract(entry, objective, inputs, resume_session)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(

@@ -154,3 +154,42 @@ cost for knowledge it already acquired. (This is the structural answer to "40% o
   shadow before blocking.
 - Boundary, stated once: **the model/human decides what must be true and whether the contract fits the goal;
   deterministic systems prove, test, or enforce that the implementation obeys it.**
+
+## Addendum — investment #1 status (structurally complete)
+
+The structural backbone of investment #1 (choose → encode → check) is **built and, for the CLI path, proven
+live** (a goal run where an unchanged org emitted a `conformance.cli` profile, built a contract-honouring CLI,
+and the gate ran the artifact and passed 6 examples). The pieces:
+
+- **Executable CLI contract + black-box conformance gate** — `cli_profile` in the schema; `conformance.py`
+  installs + runs the declared examples and checks exit status + stdout/stderr against the contract; wired
+  **shadow-first** into the per-leaf pipeline (`CONFORMANCE_GATE`). Done; live-proven.
+- **Empty slots for the other deliverable kinds** (`library`, `http_service`, `rpc_service`, `batch_job`) —
+  the kind-agnostic plumbing (schema profile → aufheben emits → shadow gate → routing) is replicated; the
+  per-kind checker is a one-line `_SLOT_CHECKERS` drop-in, deferred until a deliverable of that kind appears.
+  A recognised-but-unchecked kind streams `slot_unchecked` (no silent pass).
+- **Deterministic pre-implementation contract review** (`contract_preflight.py`) — fires the moment aufheben
+  produces the contract, *before* the implementer's wave: completeness (acceptance_criteria; CLI help/success/
+  error coverage; entrypoint) + self-consistency (example exit codes ⊆ declared policy). Shadow-first
+  (`CONTRACT_PREFLIGHT`); block folds into the repair loop, re-running aufheben.
+- **Immutable acceptance bundle** — the golden examples are **withheld from the implementer**
+  (`WITHHOLD_ACCEPTANCE_BUNDLE`, on by default): it builds to the spec it sees (acceptance_criteria,
+  entrypoint, exit-code policy) but not the goldens, so the implementation and its oracle cannot share the
+  same misunderstanding and the implementer cannot hard-code to the goldens; the controller/gate keep the
+  full bundle. A `_examples_withheld` marker keeps the withholding visible.
+
+**Consciously deferred (not part of "structurally complete"):**
+
+- **The judgment half of pre-implementation review** — an independent LLM critic of *contract-vs-goal* ("is
+  this the right interface for the goal?", omitted edge semantics, unsuitable resource policy). It overlaps
+  what the designers/aufheben already do and is closer to the role/prompt layer the sequence ranks last; add
+  it as a carrier-backed reviewer **only if telemetry shows contract-vs-goal misses** the deterministic
+  preflight and the designers do not catch.
+- **Per-kind real checkers** (library API-diff; service boot + protocol-driven testing) — built when the
+  first deliverable of that kind needs one.
+- **Shadow → block promotion** — flip each gate to blocking only after its effective-FP is shown ~0 on real
+  runs (Tricorder); cannot be decided without that telemetry.
+
+So #1 is at a clean stopping point: the deterministic, structural spine is in place and exercised; what
+remains is either telemetry-gated (promotion), demand-gated (other-kind checkers), or layer-deferred (the
+LLM judgment review).
