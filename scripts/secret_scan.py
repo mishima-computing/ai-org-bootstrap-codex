@@ -140,15 +140,78 @@ def fallback_scan(path: str) -> list[dict]:
     return findings
 
 
-def scan_dir(path: str, *, prefer_gitleaks: bool = True, run=None) -> dict:
+_ARCHIVE_SUFFIXES = (".zip", ".whl", ".jar", ".egg", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tar.xz")
+_MAX_ARCHIVE_BYTES = 50 * 1024 * 1024      # do not even open an archive larger than this
+_MAX_EXTRACT_BYTES = 200 * 1024 * 1024     # zip/tar-bomb guard: cap total extracted size
+_MAX_MEMBERS = 5000
+
+
+def _archive_suffix(name: str):
+    low = name.lower()
+    return next((s for s in _ARCHIVE_SUFFIXES if low.endswith(s)), None)
+
+
+def _safe_extract(arc: Path, dest: str) -> bool:
+    """Extract an archive into `dest`, bounded against zip/tar bombs and path traversal. Best-effort: returns
+    False (skip) on any error. A packaged secret hides inside the built artifact, so the artifact must be
+    unpacked and scanned, not only the loose source (ADR-0009 #2: scanning is not prevention if it misses the
+    shipped bundle)."""
+    import tarfile
+    import zipfile
+    try:
+        if arc.stat().st_size > _MAX_ARCHIVE_BYTES:
+            return False
+        suf = _archive_suffix(arc.name)
+        if suf in (".zip", ".whl", ".jar", ".egg"):
+            with zipfile.ZipFile(arc) as zf:
+                infos = zf.infolist()
+                if len(infos) > _MAX_MEMBERS or sum(i.file_size for i in infos) > _MAX_EXTRACT_BYTES:
+                    return False
+                zf.extractall(dest)                            # zipfile sanitizes member paths since 3.6
+        else:
+            with tarfile.open(arc) as tf:
+                members = tf.getmembers()
+                if len(members) > _MAX_MEMBERS or sum(m.size for m in members) > _MAX_EXTRACT_BYTES:
+                    return False
+                tf.extractall(dest, filter="data")             # 'data' filter blocks path traversal (3.12+)
+        return True
+    except Exception:                                          # noqa: BLE001 — fail-soft, never break the run
+        return False
+
+
+def scan_archives(path: str, *, prefer_gitleaks: bool = True, run=None) -> list[dict]:
+    """Unpack each archive under `path` and scan its contents. A finding's file is marked `<archive>!<inner>`
+    and `in_archive` so it is clear the secret ships inside the built bundle, not in the loose tree."""
+    import tempfile
+    root = Path(path)
+    findings: list[dict] = []
+    for fp in root.rglob("*"):
+        rel = str(fp.relative_to(root))
+        if not fp.is_file() or _skip_path(rel) or not _archive_suffix(fp.name):
+            continue
+        with tempfile.TemporaryDirectory(prefix="secret-archive-") as td:
+            if not _safe_extract(fp, td):
+                continue
+            inner = scan_dir(td, prefer_gitleaks=prefer_gitleaks, run=run, include_archives=False)
+            for f in inner["findings"]:
+                f["file"] = f"{rel}!{f.get('file')}"
+                f["in_archive"] = True
+                findings.append(f)
+    return findings
+
+
+def scan_dir(path: str, *, prefer_gitleaks: bool = True, run=None, include_archives: bool = True) -> dict:
     """Scan a deliverable directory. Returns {applicable, passed, findings, checks_run, backend}. `passed` is
     True only when there are NO findings at all; callers tier blocking by severity (critical hard-blocks,
-    minor is advisory)."""
+    minor is advisory). When `include_archives`, the built artifact's archives (.whl/.zip/.tar/...) are also
+    unpacked and scanned — a secret packaged into the shipped bundle is caught, not only loose source."""
     if not Path(path).is_dir():
         return {"applicable": False, "passed": True, "findings": [], "checks_run": 0, "backend": None}
     if prefer_gitleaks and gitleaks_available():
         findings, backend = scan_with_gitleaks(path, run=run), "gitleaks"
     else:
         findings, backend = fallback_scan(path), "fallback"
+    if include_archives:
+        findings = findings + scan_archives(path, prefer_gitleaks=prefer_gitleaks, run=run)
     return {"applicable": True, "passed": not findings, "findings": findings,
             "checks_run": 1, "backend": backend}

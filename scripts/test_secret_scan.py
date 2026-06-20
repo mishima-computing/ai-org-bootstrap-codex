@@ -78,6 +78,35 @@ def test_live_gitleaks_smoke():
     print("ok  live gitleaks smoke: finds + tiers (critical) + redacts a planted private key")
 
 
+def test_secret_inside_an_archive_is_caught_and_marked():
+    # a secret packaged into the built artifact (a .zip/.whl) must be caught, not only loose source — with
+    # the finding marked <archive>!<inner> + in_archive, and the value still redacted.
+    import zipfile
+    d = _tmpdir_with({"readme.txt": "nothing here"})
+    secret_file = Path(d) / "id_rsa"
+    secret_file.write_text("-----BEGIN RSA PRIVATE KEY-----\nMIIEdeadbeef\n-----END RSA PRIVATE KEY-----\n")
+    with zipfile.ZipFile(Path(d) / "dist.whl", "w") as zf:
+        zf.write(secret_file, "pkg/id_rsa")
+    secret_file.unlink()                                       # only the packaged copy remains
+    rep = ss.scan_dir(d, prefer_gitleaks=False)
+    arch = [f for f in rep["findings"] if f.get("in_archive")]
+    assert arch, ("a secret inside the .whl must be found", rep["findings"])
+    assert arch[0]["file"].startswith("dist.whl!") and "id_rsa" in arch[0]["file"], arch[0]
+    assert arch[0]["severity"] == "critical", arch[0]
+    assert "deadbeef" not in repr(rep["findings"]), "archive findings must redact the value too"
+    print("ok  secret inside an archive (.whl) is caught, marked <archive>!<inner>, redacted")
+
+
+def test_archive_scan_is_bounded_and_failsoft():
+    # a non-archive .zip-named junk file or a missing path must not raise; include_archives=False skips them.
+    d = _tmpdir_with({"not-really.zip": "this is not a zip"})
+    rep = ss.scan_dir(d, prefer_gitleaks=False)               # must not raise on the bogus archive
+    assert rep["applicable"], rep
+    rep2 = ss.scan_dir(d, prefer_gitleaks=False, include_archives=False)
+    assert rep2["applicable"], rep2
+    print("ok  archive scan is fail-soft on a bogus archive; include_archives=False skips")
+
+
 def test_wired_secret_gate_only_critical_blocks():
     # the gate streams everything but only CRITICAL folds into the convergence loop in block mode.
     crit = {"source": "secret-scan", "check": "aws-access-token", "severity": "critical", "passed": False}
