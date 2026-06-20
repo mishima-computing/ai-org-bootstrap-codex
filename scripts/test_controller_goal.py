@@ -333,6 +333,53 @@ def test_resume_feeds_restored_inventory_to_the_resplit():
     print("ok  resume feeds the re-split its restored-file inventory (idempotent re-split)")
 
 
+def test_declared_boundary_steers_the_split():
+    # #48: a goal that declares "inside X/ ONLY" feeds the splitter a scope_boundary so it scopes the plan
+    # under X/ from the start (the prose path otherwise drifted to docs/).
+    seen = {}
+    def split(goal, ctx, carrier):
+        seen["ctx"] = ctx
+        return [_leaf("a", ["mocks/a.py"])]
+    cg.run_goal("/repo", "Build it, keep ALL changes inside mocks/ ONLY.",
+                run_leaf=lambda r, t: "converged", split=split, emit=lambda e: None)
+    sb = (seen.get("ctx") or {}).get("scope_boundary")
+    assert sb and sb.get("dir") == "mocks", ("the declared boundary is injected into the split context", sb)
+    print("ok  declared boundary ('inside X/ ONLY') steers the split via scope_boundary context")
+
+
+def test_splitter_session_resumes_on_resume():
+    # the splitter session is recorded on the initial split and RESUMED on a later resume (the splitter keeps
+    # its planning memory; the frontier stays non-restored).
+    import tempfile, os, subprocess, goal_store, splitter
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    seen = {"resume": []}
+    real = cg.codex_carrier
+    def fake(repo, *, model=None, resume_session=None):
+        seen["resume"].append(resume_session)
+        c = lambda prompt: '[{"id":"a","objective":"do a","scope":["mocks/a.py"],"depends_on":[]}]'
+        c.captured = {"session_id": "splitsid-0"}
+        return c
+    cg.codex_carrier = fake
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            for a in (["init", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                git(repo, *a)
+            open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+            cg.run_goal(repo, "build inside mocks/ ONLY", run_leaf=lambda r, t: "converged",
+                        split=splitter.split, goal_id="goal-A")
+            assert ((goal_store.GoalStore(repo).read("goal-A") or {}).get("sessions") or {}).get("_goal:splitter") \
+                == "splitsid-0", "initial run records the splitter session"
+            seen["resume"].clear()
+            cg.run_goal(repo, "build inside mocks/ ONLY", run_leaf=lambda r, t: "converged",
+                        split=splitter.split, goal_id="goal-B", resume_from="goal-A")
+            assert "splitsid-0" in seen["resume"], ("the resumed top split RESUMES the prior splitter session",
+                                                    seen["resume"])
+    finally:
+        cg.codex_carrier = real
+    print("ok  splitter session recorded on initial split, RESUMED on resume (planning memory kept)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

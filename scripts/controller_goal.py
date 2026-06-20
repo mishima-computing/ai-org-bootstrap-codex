@@ -81,16 +81,26 @@ def _emit_splitter_speech(emit, run_id, plan) -> None:
     emit({"type": "agent_message", "source": "splitter", "run_id": run_id, "speech": speech})
 
 
-def codex_carrier(repo, *, model=None):
+def codex_carrier(repo, *, model=None, resume_session=None):
     """The real split carrier: run a read-only codex carrier that emits the child-DAG JSON to an output
     file, and return it (fail-soft '[]' on any error, so split() yields no children rather than crash).
-    The carrier_harness import is lazy so tests that inject their own split never touch it."""
+    The carrier_harness import is lazy so tests that inject their own split never touch it.
+
+    `resume_session` RESUMES the splitter's prior codex session — used when a goal is RESUMED, so the
+    re-split is a CONTINUATION of the planning conversation that decomposed the goal the first time: the
+    splitter keeps the MEMORY of its prior decomposition (and the file names it chose), so the fresh
+    re-split (frontier is intentionally not restored) adapts without amnesiac duplication. The session id
+    the carrier observed is exposed on `carrier.captured["session_id"]` for the caller to record in state."""
+    captured: dict = {}
+
     def carrier(prompt):
         import carrier_harness
         out = Path(tempfile.mkdtemp(prefix="split-")) / "tasks.json"
         try:
             result = carrier_harness.run_carrier(repo, prompt, sandbox="read-only",
-                                                 output_file=str(out), model=model, retries=1)
+                                                 output_file=str(out), model=model, retries=1,
+                                                 resume_session=resume_session)
+            captured["session_id"] = result.get("session_id")   # the splitter's session (record for a later RESUME)
             if result.get("ok") and out.is_file():
                 return out.read_text(encoding="utf-8")
         except Exception:                                      # noqa: BLE001 - a split failure is just no children
@@ -99,6 +109,7 @@ def codex_carrier(repo, *, model=None):
             shutil.rmtree(out.parent, ignore_errors=True)
         return "[]"
 
+    carrier.captured = captured
     return carrier
 
 
@@ -388,9 +399,31 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         emit({"type": "goal_finished", "status": status, "wip": wip})
         return final_plan
 
+    # #48: the goal's DECLARED deliverable boundary ("inside X/ ONLY") steers the splitter to scope the plan
+    # under X/ from the start — the prose path had no such steer and drifted to docs/. Confinement is
+    # orthogonal to infra roles' lanes (Model A); a CI-writer's .github is handled by the cross-lane revert.
+    boundary = scaffold_primitive._declared_dir(goal)
+    if boundary:
+        context = {**(context or {}), "scope_boundary": {
+            "dir": boundary,
+            "instruction": f"Every task's scope MUST be a path under `{boundary}/`. Place no deliverable "
+                           f"file outside it and do not invent a sibling directory."}}
+
     if carrier is None and split is splitter.split:    # real run: decompose via codex (tests inject split)
-        carrier = codex_carrier(repo)
-    plan = split(goal, context or {}, carrier)
+        carrier = codex_carrier(repo)                  # fresh — used for the in-run re-splits / fan-out
+    # TOP split: on RESUME, continue the PRIOR goal's splitter session so the splitter keeps the memory of
+    # its original decomposition (the file names it chose) and the fresh re-split does not duplicate it. The
+    # frontier stays non-restored; only the planning conversation is continued. Re-splits stay fresh.
+    top_carrier = carrier
+    if split is splitter.split and resume_from and store is not None:
+        prior_sid = ((store.read(resume_from) or {}).get("sessions") or {}).get("_goal:splitter")
+        if prior_sid:
+            top_carrier = codex_carrier(repo, resume_session=prior_sid)
+    plan = split(goal, context or {}, top_carrier)
+    if store is not None and getattr(top_carrier, "captured", None):   # record the splitter session for a later RESUME
+        sid = top_carrier.captured.get("session_id")
+        if sid:
+            store.record_session(goal_id, "_goal", "splitter", sid)
     errs = frontier.validate_plan(plan)
     if errs:
         emit({"type": "split_invalid", "goal": goal, "errors": errs})
