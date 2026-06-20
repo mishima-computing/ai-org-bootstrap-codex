@@ -148,7 +148,7 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
     return findings
 
 
-_SCRIPT_EXTS = (".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".rb", ".pl")
+_SCRIPT_EXTS = (".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".rb", ".pl", ".ps1", ".psm1")
 
 
 def _missing_entrypoint_artifact(profile: dict, cwd: Optional[str]) -> Optional[str]:

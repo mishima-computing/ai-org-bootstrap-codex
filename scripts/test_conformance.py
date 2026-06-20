@@ -64,6 +64,21 @@ def test_missing_artifact_is_one_clear_finding_not_example_spam():
     print("ok  missing artifact -> one critical artifact_missing (not N example failures); present -> examples run")
 
 
+def test_powershell_script_entrypoint_missing_artifact():
+    # a PowerShell CLI is a `cli` deliverable (`pwsh tool.ps1 ...`); the .ps1 entrypoint must be recognised as
+    # a script file so a not-delivered script is one clear artifact_missing finding, not example spam.
+    import tempfile
+    d = tempfile.mkdtemp(prefix="conf-ps-")
+    profile = {"entrypoint": {"invocation": "pwsh tool.ps1"},
+               "examples": [{"invocation": "-Help", "expected_status": 0}]}
+    rep = conf.run_cli_conformance(_cli_contract(profile), lambda *a, **k: R(1, "", "not found"), cwd=d)
+    assert [f["check"] for f in rep["findings"]] == ["artifact_missing"], rep["findings"]
+    Path(d, "tool.ps1").write_text("param() exit 0")
+    rep2 = conf.run_cli_conformance(_cli_contract(profile), lambda *a, **k: R(0, "", ""), cwd=d)
+    assert all(f["check"] != "artifact_missing" for f in rep2["findings"]), rep2["findings"]
+    print("ok  cli: a PowerShell .ps1 entrypoint is recognised — missing script -> one artifact_missing")
+
+
 def test_non_cli_is_not_applicable():
     # a contract without a cli profile must be a vacuous pass — the gate never fabricates a finding it
     # cannot ground, and is a no-op for library/service deliverables.
