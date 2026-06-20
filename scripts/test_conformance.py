@@ -584,12 +584,12 @@ def test_schema_every_executable_kind_requires_its_profile():
     # every executable kind now REQUIRES its conformance profile — no optional slots remain.
     for kind in ("cli", "http_service", "library", "json", "batch_job", "rpc_service"):
         assert not v.is_valid({**base, "deliverable_kind": kind}), (kind, "executable kind must require its profile")
-    # 'none' (no interface), 'undetermined' (interface but no checker yet), and an absent deliverable_kind
-    # need no conformance profile.
+    # 'none' (no interface) and 'undetermined' (interface but no checker yet) need no conformance profile, but
+    # the kind must still be DECLARED — deliverable_kind is now schema-required, so omitting it is invalid.
     assert v.is_valid({**base, "deliverable_kind": "none"}), "none needs no profile"
     assert v.is_valid({**base, "deliverable_kind": "undetermined"}), "undetermined needs no profile"
-    assert v.is_valid(base), "a legacy contract without deliverable_kind still validates"
-    print("ok  schema: every executable kind requires its profile; none/undetermined/legacy need none")
+    assert not v.is_valid(base), "deliverable_kind is now required — a contract omitting it is invalid"
+    print("ok  schema: every executable kind requires its profile; none/undetermined need none; kind is required")
 
 
 def test_schema_cli_profile_required_iff_cli():
@@ -608,8 +608,9 @@ def test_schema_cli_profile_required_iff_cli():
         "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
         "fallback_plan": "f", "handoff_to_implementer": "h",
     }
-    # 1) existing-shape contract (no deliverable_kind) still validates — backward compatible / shadow-first
-    assert validator.is_valid(base), list(validator.iter_errors(base))
+    # 1) deliverable_kind is now SCHEMA-REQUIRED — a contract that omits it is invalid (the shadow-first
+    # pre-flight obligation, promoted to a hard requirement now that every kind is expressible)
+    assert not validator.is_valid(base), "deliverable_kind is now a required property"
     # 2) deliverable_kind=cli WITHOUT a conformance.cli profile must FAIL
     cli_missing = {**base, "deliverable_kind": "cli"}
     assert not validator.is_valid(cli_missing), "cli deliverable must require a conformance.cli profile"

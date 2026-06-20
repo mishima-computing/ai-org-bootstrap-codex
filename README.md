@@ -305,7 +305,7 @@ Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 
 | Gate | What it does | Env |
 |---|---|---|
-| **CLI conformance** (`scripts/conformance.py`) | runs the built artifact against the contract's declared examples — exit status + stdout/stderr — instead of trusting the implementer's self-report. `library`/`http_service`/`rpc_service`/`batch_job` are recognised empty slots (a real checker drops in per kind) | `CONFORMANCE_GATE` |
+| **Conformance** (`scripts/conformance.py`) | runs the built artifact against the contract's declared interface, per `deliverable_kind` — **cli** (run examples, check exit status + stdout/stderr), **http_service** (boot + request/response), **library** (import-probe the declared public surface), **batch_job** (run the job, check exit status + produced artifacts), **json** (parse + JSON-Schema + key paths, no execution), **rpc_service** (boot + real call/response; gRPC loaded lazily). `deliverable_kind` is **required**; `none` = no interface, `undetermined` = an interface of a kind no checker supports yet (streamed as unchecked, never a silent pass) | `CONFORMANCE_GATE` |
 | **Contract pre-flight** (`scripts/contract_preflight.py`) | the moment aufheben emits the contract and *before* the implementer runs, checks completeness + exit-code consistency, so an under-specified contract is caught at design time | `CONTRACT_PREFLIGHT` |
 | **Immutable acceptance bundle** (`controller_pipeline._withhold_acceptance_bundle`) | withholds the golden examples from the implementer — it builds to the spec, the gate checks goldens it never saw, so the implementation and its oracle cannot share one misunderstanding | `WITHHOLD_ACCEPTANCE_BUNDLE` |
 | **Secret scan** (`scripts/secret_scan.py`) | scans source **and the built artifact's archives** via gitleaks (with a pure-Python fallback); known provider tokens / private keys block, generic entropy is advisory, and the secret value is never emitted into a finding | `SECRET_SCAN` |
@@ -343,9 +343,10 @@ self-report. (The gates are also exercised by ~50 unit tests across the suites l
   `GateResult{status, contract_sha, artifact_sha}` with **fail-closed on a gate ERROR** (a scanner crash is
   currently treated as clean — a silent fail-open); **execution isolation** of the artifact runner
   (argv-not-shell, network default-deny, cgroups — the inner-sandbox boundary); **leaf-scoped** (not
-  repo-wide) secret scanning with a baseline; the **library / batch / http_service** profiles; **targeted**
-  (not full-wave) repair routing by finding source; selecting a **Draft 2020-12** validator (not Draft 7) and
-  declaring `jsonschema` as a dependency. Tracked, in that rough priority.
+  repo-wide) secret scanning with a baseline. Tracked, in that rough priority. (Landed since: every
+  `deliverable_kind` now has a real checker — library / http_service / rpc_service / batch_job / json — and
+  the kind is schema-required; targeted repair routing by finding source; the Draft 2020-12 validator with
+  `jsonschema` declared as a dependency.)
 
 Honest status: with the closed loop and the pre-flight gate, the gates are **enforcement-capable** in
 `block`, but most ship in `shadow` by default and the isolation/ERROR-handling items above are real. This is

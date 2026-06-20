@@ -18,7 +18,8 @@
     "non_goals",
     "risks",
     "fallback_plan",
-    "handoff_to_implementer"
+    "handoff_to_implementer",
+    "deliverable_kind"
   ],
   "properties": {
     "role_id": {
@@ -164,7 +165,7 @@
       }
     },
     "deliverable_kind": {
-      "description": "ADR-0009: the kind of artifact this contract delivers. Selects which conformance profile is required and black-box checked against the built artifact. Declare it explicitly on every contract. Two non-checked values are deliberately distinct: 'none' asserts there is NO checkable interface (pure prose, data, a no-surface refactor) — correctly unverified; 'undetermined' asserts the deliverable HAS a checkable interface but of a kind no checker supports yet — it is recognized and streamed as unchecked (a checker is owed), NOT silently passed, and must not be downgraded to 'none' to dodge verification. Schema-optional today (shadow-first via the pre-flight gate); becomes schema-required once profiles cover all kinds.",
+      "description": "ADR-0009: the kind of artifact this contract delivers. Selects which conformance profile is required and black-box checked against the built artifact. Declare it explicitly on every contract. Two non-checked values are deliberately distinct: 'none' asserts there is NO checkable interface (pure prose, data, a no-surface refactor) — correctly unverified; 'undetermined' asserts the deliverable HAS a checkable interface but of a kind no checker supports yet — it is recognized and streamed as unchecked (a checker is owed), NOT silently passed, and must not be downgraded to 'none' to dodge verification. Now SCHEMA-REQUIRED: every contract must declare its kind (the shadow-first pre-flight obligation, promoted to a hard requirement once the profiles cover all kinds — 'undetermined' covers any new kind, 'none' covers no-interface, so the field is always expressible).",
       "type": "string",
       "enum": [
         "cli",

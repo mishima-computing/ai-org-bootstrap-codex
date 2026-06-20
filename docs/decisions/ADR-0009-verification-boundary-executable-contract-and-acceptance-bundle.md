@@ -58,7 +58,7 @@ contract fit the goal?                     implementation obeys the contract.
 
 ### The contract becomes a discriminated schema, not prose
 
-For each `deliverable_kind` (`cli | library | http_service | rpc_service | batch_job`), the contract carries
+For each `deliverable_kind` (`cli | library | http_service | rpc_service | batch_job | json`), the contract carries
 a `oneOf`-profiled schema (CLI fields required only for CLI deliverables, so it never degrades to a
 universal checklist): `build_and_install`, `entrypoint`, `public_surface` (packages/modules/exported
 symbols/signatures), `io_contract` (stdin/stdout/stderr/files/network), `status_and_errors`
@@ -164,10 +164,13 @@ and the gate ran the artifact and passed 6 examples). The pieces:
 - **Executable CLI contract + black-box conformance gate** — `cli_profile` in the schema; `conformance.py`
   installs + runs the declared examples and checks exit status + stdout/stderr against the contract; wired
   **shadow-first** into the per-leaf pipeline (`CONFORMANCE_GATE`). Done; live-proven.
-- **Empty slots for the other deliverable kinds** (`library`, `http_service`, `rpc_service`, `batch_job`) —
-  the kind-agnostic plumbing (schema profile → aufheben emits → shadow gate → routing) is replicated; the
-  per-kind checker is a one-line `_SLOT_CHECKERS` drop-in, deferred until a deliverable of that kind appears.
-  A recognised-but-unchecked kind streams `slot_unchecked` (no silent pass).
+- **Real checkers for every deliverable kind** — `http_service` (boot + request/response), `library`
+  (import-probe the declared public surface), `batch_job` (run + exit status + produced artifacts), `json`
+  (parse + JSON-Schema + key paths, no execution), and `rpc_service` (boot + real call/response over
+  json_rpc_http stdlib or lazily-loaded gRPC) are all built. `deliverable_kind` is now **schema-required**:
+  `none` declares no checkable interface, and `undetermined` declares an interface of a kind no checker
+  supports yet — recognised, streamed as `slot_unchecked` (no silent pass), the live entry to the empty-slot
+  mechanism for the next new kind.
 - **Deterministic pre-implementation contract review** (`contract_preflight.py`) — fires the moment aufheben
   produces the contract, *before* the implementer's wave: completeness (acceptance_criteria; CLI help/success/
   error coverage; entrypoint) + self-consistency (example exit codes ⊆ declared policy). Shadow-first
