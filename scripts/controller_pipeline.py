@@ -28,6 +28,7 @@ from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # no
 import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
 import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
 import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
+import fuzz_cli  # noqa: E402  — ADR-0009 #3: black-box CLI property fuzzing (robustness oracle)
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -704,6 +705,35 @@ def _secret_scan(repo, run_id: str) -> dict | None:
     return report
 
 
+FUZZ_CLI_MODE = os.environ.get("FUZZ_CLI", "shadow").lower()   # shadow (default) | off | block
+
+
+def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
+    """Fuzz the built CLI for robustness (no crash / exit-in-policy / no hang) and stream the result. Reuses
+    the bounded subprocess runner (so the fuzzed artifact is itself resource-capped — ADR-0009 #2). Only runs
+    when the contract is a CLI carrying a profile; fail-soft."""
+    if FUZZ_CLI_MODE == "off":
+        return None
+    contract = results.get(AUFHEBEN_ROLE)
+    profile = (contract or {}).get("conformance", {}).get("cli") if isinstance(contract, dict) else None
+    if not isinstance(profile, dict):
+        return None
+    try:
+        report = fuzz_cli.fuzz(profile, runner or conformance.subprocess_runner(timeout=15), cwd=str(repo))
+    except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
+        _stream_append(repo, {"source": "cli-fuzz", "type": "gate_error", "run_id": run_id, "detail": repr(exc)})
+        return None
+    if not report.get("applicable"):
+        return report
+    _stream_append(repo, {
+        "source": "cli-fuzz",
+        "type": "shadow_findings" if FUZZ_CLI_MODE != "block" else "findings",
+        "run_id": run_id, "passed": report["passed"], "checks_run": report["checks_run"],
+        "findings": report["findings"], "ts": _iso8601_utc(),
+    })
+    return report
+
+
 def _apply_secret_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
     """Fold ONLY critical secret findings into the convergence loop, and only when promoted to `block`. A
     known provider token / private key hard-blocks; generic-entropy matches never block (they stay advisory
@@ -995,9 +1025,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     # SHADOW (streamed, non-blocking) until effective-FP is shown ~0. Runs once over the initially-built leaf.
     conformance_report = None
     secret_report = None
+    fuzz_report = None
     if not pipeline_failed:
         conformance_report = _shadow_conformance(repo, results, run_id)
         secret_report = _secret_scan(repo, run_id)
+        fuzz_report = _fuzz_cli(repo, results, run_id)
 
     initial_finished_at = _utc_now()
     findings = _linon_findings(results.get("linon"))
@@ -1006,6 +1038,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     findings = _apply_conformance_gate(findings, conformance_report, CONFORMANCE_SHADOW)
     findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
     findings = _apply_secret_gate(findings, secret_report, SECRET_SCAN_MODE)
+    findings = _apply_conformance_gate(findings, fuzz_report, FUZZ_CLI_MODE)
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))

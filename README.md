@@ -243,7 +243,8 @@ Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 | **Contract pre-flight** (`scripts/contract_preflight.py`) | the moment aufheben emits the contract and *before* the implementer runs, checks completeness + exit-code consistency, so an under-specified contract is caught at design time | `CONTRACT_PREFLIGHT` |
 | **Immutable acceptance bundle** (`controller_pipeline._withhold_acceptance_bundle`) | withholds the golden examples from the implementer — it builds to the spec, the gate checks goldens it never saw, so the implementation and its oracle cannot share one misunderstanding | `WITHHOLD_ACCEPTANCE_BUNDLE` |
 | **Secret scan** (`scripts/secret_scan.py`) | scans source **and the built artifact's archives** via gitleaks (with a pure-Python fallback); known provider tokens / private keys block, generic entropy is advisory, and the secret value is never emitted into a finding | `SECRET_SCAN` |
-| **Resource limits** | the conformance gate's subprocess runner is rlimit/timeout/output-bounded; the per-org Kata box pod (`shagiri runtime/box_runner.py`) caps cpu/memory/ephemeral-storage and drops capabilities | — |
+| **CLI fuzz** (`scripts/fuzz_cli.py`) | black-box property fuzzing of the built CLI: generates adversarial inputs (empty / malformed / oversized / binary / unicode) and searches for an input that **crashes** it, exits **outside the declared code policy**, or **hangs** — reporting a *minimized* counterexample | `FUZZ_CLI` |
+| **Resource limits** | the conformance/fuzz subprocess runner is rlimit/timeout/output-bounded; the per-org Kata box pod (`shagiri runtime/box_runner.py`) caps cpu/memory/ephemeral-storage and drops capabilities | — |
 
 The full defect-class allocation, repair routing, and the five-step investment sequence are in **ADR-0009**;
 its one-line boundary: *the model/human decides what must be true and whether the contract fits the goal;
@@ -257,7 +258,8 @@ are traceable:
 - **oasdiff** — separates *definite* from *potential* breaking changes: the model for tiered-confidence gates
   (never hard-block on a guess).
 - **OSS-Fuzz** (May 2025) — >**13,000** vulnerabilities / **50,000** bugs across ~1,000 projects: the case for
-  fuzzing parsers/codecs (motivates investment #3, not yet built).
+  fuzzing parsers/codecs — the basis for the CLI-fuzz gate (a black-box generator; in-process Hypothesis and
+  coverage-guided Atheris are deeper backends for a future box image).
 - **Amazon ShardStore** — an executable reference model + property testing prevented **16** production issues
   at ~13% of codebase size and ~9 person-months: evidence for *selective*, not universal, formal modelling.
 - **TypeScript/Flow repository-mining study** — caught ~**15%** of sampled public JS bugs: types-as-contracts
@@ -287,7 +289,8 @@ python3 scripts/validate-bootstrap-pack.py
 python3 -m unittest discover -s packages/codex-org-bootstrap/tests   # the dialectic harness suite
 python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 scripts/test_controller_goal.py
 # ADR-0009 verification gates:
-python3 scripts/test_conformance.py && python3 scripts/test_contract_preflight.py && python3 scripts/test_secret_scan.py
+python3 scripts/test_conformance.py && python3 scripts/test_contract_preflight.py
+python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py
 ```
 
 ## Documentation

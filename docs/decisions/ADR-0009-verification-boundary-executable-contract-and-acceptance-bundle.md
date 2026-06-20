@@ -193,3 +193,22 @@ and the gate ran the artifact and passed 6 examples). The pieces:
 So #1 is at a clean stopping point: the deterministic, structural spine is in place and exercised; what
 remains is either telemetry-gated (promotion), demand-gated (other-kind checkers), or layer-deferred (the
 LLM judgment review).
+
+**Investments #2 and #3 (built):**
+
+- **#2 high-confidence security controls** — `secret_scan.py` (validity-tiered: provider tokens / private
+  keys block, generic entropy advises; scans source **and built-artifact archives**; the value is never
+  emitted; gitleaks backend + pure-Python fallback) and resource limits (the gate's subprocess runner is
+  rlimit/timeout/output-bounded; the Kata box pod caps cpu/memory/ephemeral-storage and drops capabilities —
+  live-verified). Deferred with reason: SAST tiering and sanitizers need an engine in the box image (and FP
+  benchmarking before any rule blocks — a build-breaking rule needs ~0 effective FP, which can't be measured
+  without the engine); network default-deny / read-only-root belong to the inner build sandbox, not the
+  carrier's outer box (it needs LLM egress and a writable fs).
+- **#3 robustness oracle (edge-case half)** — `fuzz_cli.py`: black-box property fuzzing of the built CLI.
+  Judgment defines the invariants (no crash, exit-in-policy, no hang); the generator searches adversarial
+  inputs for a counterexample and minimizes it. Deeper backends (in-process Hypothesis, coverage-guided
+  Atheris, fault injection, metamorphic/differential, mutation testing) are a future-box-image follow-up.
+
+All gates are shadow-first with the same one-line promotion to `block`, and findings route through the
+shared severity budget / repair loop. Test suites: conformance 14, contract-preflight 7, secret-scan 8,
+cli-fuzz 7, plus the box manifest tests in shagiri.
