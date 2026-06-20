@@ -1,0 +1,156 @@
+# ADR-0009: The verification boundary — design chooses an *executable* contract; deterministic machinery enforces it
+
+## Status
+
+Accepted. Supersedes the working hypothesis (recorded in the ADR-0008 addendum and in session notes)
+that the structural-vs-model split runs along a "binary defect vs contextual defect" line. That line is
+wrong. This ADR records the corrected boundary and the investment sequence that follows from it. It is the
+control-plane companion to Shagiri ADR-0022 (the *execution* substrate / inner-box dynamic verification):
+ADR-0022 says *where* code runs; this ADR says *what is proven about it and by whom*.
+
+## Context
+
+Observed defect distribution over the autonomous build pipeline (per work-unit denominator):
+
+- **55%** of work units do **not** pass first review.
+- Of those, **~42%** (23%/55%) subsequently **exhaust the repair cap**.
+- **40%** of all agent steps are **repair**, and each repair currently re-runs ~the full design+review wave.
+
+Repair-fix class frequency (what the review actually catches and sends back):
+`contract/interface precision (22) > edge/robustness (15) > operability/security (9) > prose (7) = correctness (7)`.
+The largest leak is **aufheben contract interface precision**.
+
+The review itself is, today, **almost entirely static**: Linon = `codex review` (reads the diff + cross-file
+dependents); the designers reason over prose; the implementer **self-reports** its own test results. The
+controller re-reads the diff and re-runs Linon, but does **not** independently re-execute the built
+artifact or its tests. There is **no independent dynamic execution** wired into the per-leaf review. (That
+gap is what ADR-0022's inner box is built to close; this ADR is what *runs* in it.)
+
+The tempting fix — "the misses are interface/edge-case judgement, so improve the design prompts" — is the
+**lowest-return** move. Prompt tuning may raise recall but creates no stable oracle and stays vulnerable to
+**correlated omissions** across design agents (all three designers share the same blind spot, so adding a
+fourth reminder does not help). The session's premature `aufheben-designer.md` "pin the interface" prose
+edit was exactly this mistake and was reverted.
+
+## Decision
+
+**The dividing line is not "binary vs contextual." It is: choosing the intended contract/policy requires
+judgement; checking and enforcing the chosen contract should be deterministic whenever practical.**
+
+The architecture is therefore not "structural **A** vs model **B**." It is **B produces an executable A**:
+the design agents emit a *typed, executable* implementation contract + acceptance bundle, and deterministic
+machinery proves the implementation obeys it.
+
+```
+judgement (model/human)                    deterministic (machine)
+─────────────────────────                  ──────────────────────────────
+WHAT must be true; does the      ───────►  PROVE / TEST / ENFORCE that the
+contract fit the goal?                     implementation obeys the contract.
+```
+
+### Defect-class allocation
+
+| Class | Primary investment | Design agents (judgement) | Deterministic machinery |
+|---|---|---|---|
+| **Interface / contract precision** | structural-first | choose the interface and **encode it completely** | enforce packaging, exports, invocation, I/O, **exit codes**, examples, compatibility — black-box against the built artifact |
+| **Edge cases / robustness** | **hybrid**: design the oracle, automate the search | define error semantics, invariants, input partitions | generate + execute **property tests, fuzzing, fault injection, schema validation** |
+| **Operability / security** | structural-first for hard invariants | choose threat model + resource budgets | drop capabilities, contain resources (cgroups), scan artifacts, block high-confidence violations |
+
+### The contract becomes a discriminated schema, not prose
+
+For each `deliverable_kind` (`cli | library | http_service | rpc_service | batch_job`), the contract carries
+a `oneOf`-profiled schema (CLI fields required only for CLI deliverables, so it never degrades to a
+universal checklist): `build_and_install`, `entrypoint`, `public_surface` (packages/modules/exported
+symbols/signatures), `io_contract` (stdin/stdout/stderr/files/network), `status_and_errors`
+(success/invalid-input/operational-failure codes, partial-success policy), `compatibility` (baseline +
+allowed breaking changes), and concrete `examples` (invocation → expected output/stderr/status). Robustness
+adds an explicit error model: empty/oversized/malformed/encoding-failure/timeout/cancellation/duplicate
+inputs each get a declared outcome **or `not_applicable` with rationale** — never "handles errors robustly."
+
+**Requiring this schema is itself a design-quality intervention** — it forces the designers to confront the
+omissions (exit codes, exports, failure semantics, resource policy) *before* implementation. The schema
+controls what the model must reason about; the gate checks the result. This is why interface work is not
+"structural vs model" — it is both.
+
+### Two structural mechanisms this adds to the pipeline
+
+1. **Pre-implementation contract review.** Review the *structured contract against the original goal*
+   **before code exists** — catching "wrong interface," omitted edge semantics, and unsuitable resource
+   policy at design time, where they are cheapest. (Today the reviewer only sees misses *after*
+   implementation.)
+2. **The acceptance bundle is immutable to the implementer** (or generated independently from the
+   contract). Otherwise the implementation and its oracle reproduce the *same* misunderstanding and the
+   gate proves nothing.
+
+### Gate policy (Tricorder discipline)
+
+A **build-blocking** check must have **effectively zero** false positives in our environment (a finding the
+org would not act on counts as a false positive even when technically correct). **Review-time** advisory
+checks stay **< 10%**. Therefore:
+
+- **Hard-block**: schema validity, exact black-box conformance (install/launch/import/signature/exit-code/
+  golden-example), *definite* compatibility breaks, reproducible property/sanitizer/crash counterexamples,
+  known provider-token / private-key / verified-credential secret hits, declared-resource-budget breaches.
+- **Advisory**: naming/style, inferred/possible compatibility, generic-entropy secret candidates, broad
+  taint/injection SAST.
+- **Shadow-first**: every new gate runs in shadow mode and is promoted to blocking only once its violations
+  are reproducible and almost always acted upon.
+
+### Repair routing (not automatic full-wave)
+
+Route by *failure type*, so a typo fix does not re-run the designers:
+
+- contract missing / semantically wrong → **redesign + resynthesise**;
+- implementation violates a *correct* contract → **rerun implementer only**;
+- deterministic property fails → hand the **minimised counterexample** to a focused repair agent;
+- security/operability policy violated → targeted implementation/config repair;
+- the *gate or oracle* is wrong → repair the **oracle**, not the product.
+
+### Finding-to-regression conversion
+
+Every accepted review finding **must** become a contract clause, golden example, property, generator
+partition, fault-injection scenario, or deterministic rule — else the pipeline re-pays LLM review+repair
+cost for knowledge it already acquired. (This is the structural answer to "40% of steps are repair.")
+
+## Evidence (grounding, not illustration)
+
+- **Tricorder** (Google): build-breaking analyses needed ~**0** effective false positives; review-time kept
+  **< 10%** — the basis for the block/advisory split above.
+- **oasdiff** distinguishes *definite* from *potential* breaking changes — the model for tiered-confidence
+  gates (don't pretend every compatibility judgement is equal-confidence).
+- **Static types as contracts**: a repository-mining study found the evaluated TypeScript/Flow caught
+  ~**15%** of sampled public JS bugs — types are *one* layer, not a behavioural spec.
+- **OSS-Fuzz** (May 2025): >**13,000** vulns / **50,000** bugs across ~1,000 projects — strong evidence for
+  fuzzing parsers/codecs/protocol handlers.
+- **Amazon ShardStore**: executable reference model + property testing prevented **16** production issues
+  (incl. crash-consistency/concurrency) at ~13% of codebase size, ~9 person-months of specialist setup —
+  evidence for **selective** use on high-risk stateful components, not universal formal modelling.
+- Secret leakage affected >100,000 public GitHub repos with thousands of new unique secrets/day — prevention
+  (push-protection + artifact scan *before exposure*) beats review-only detection. A real leaked credential
+  must be **rotated/revoked**, not merely deleted from the current file.
+
+## Investment sequence (highest return first)
+
+1. **Executable contract profiles + black-box conformance harness** (CLI, library, service). Targets the
+   largest defect class *and* raises design completeness. Highest return.
+2. **High-confidence security controls**: source+artifact secret scanning; a common, language-independent
+   sandbox with time/memory/process/file/network limits (the ADR-0022 inner box already provides the
+   containment seam).
+3. **Robustness oracle generation**: require input partitions + failure semantics + invariants; generate
+   schema cases, property tests, fuzz harnesses. Start with parsers, codecs, CLIs, stateful components.
+4. **Finding-to-regression conversion** wired into the repair path.
+5. **Targeted prompt tuning — last**, only after structural telemetry shows which omissions remain.
+
+## Consequences
+
+- The highest-return move for the observed distribution is an **executable contract + acceptance bundle**,
+  **not** broader prompt tuning and **not** a blanket expansion of rigid linters.
+- This ADR + ADR-0022 compose: the **inner box** (ADR-0022) is *where* conformance/property/fuzz/sandbox
+  gates execute; **this ADR** is *what* they prove and how findings route. "Run it, don't just read it"
+  becomes a first-class, deterministic verification tier alongside static Linon.
+- Validation plan: four randomised arms — baseline, prompt-only, structure-only, combined — stratified by
+  deliverable type and language; measure first-pass pass rate, repair-step share, cap-exhaustion, per-class
+  findings, escaped defects, gate actionability/override rate, latency, total agent cost. New gates run in
+  shadow before blocking.
+- Boundary, stated once: **the model/human decides what must be true and whether the contract fits the goal;
+  deterministic systems prove, test, or enforce that the implementation obeys it.**
