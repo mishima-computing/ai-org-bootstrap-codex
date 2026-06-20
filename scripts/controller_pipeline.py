@@ -878,7 +878,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             "manifest_path": str(manifest_path), "converged": converged,
             "repair_iterations": repair_iterations,
             "max_repair_iterations": max_repair_iterations,
-            "linon_findings_count": len(findings)}
+            "linon_findings_count": len(findings),
+            "sessions": sessions}   # role -> codex session id (for the org to record per leaf×role, audit)
 
 
 def main(argv=None) -> int:

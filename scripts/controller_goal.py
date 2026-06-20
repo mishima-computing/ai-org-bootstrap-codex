@@ -173,7 +173,7 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
         sha = git_ops.merge_and_commit_leaf(repo, wt, task.get("id"), task.get("objective"))
         if sha is None:                                       # None = handoff FAILED (paths rolled back)
             return fail(reason="mechanical")                  # "" = nothing to commit (still converged)
-        return {"outcome": "converged", "commit": sha or None}
+        return {"outcome": "converged", "commit": sha or None, "sessions": result.get("sessions") or {}}
     except Exception:                                          # noqa: BLE001 - a leaf crash is mechanical
         return fail(reason="mechanical")
     finally:
@@ -361,7 +361,17 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     if store is not None:
         store.create(goal_id, goal, org="", resumed_from=resume_from)   # received goal is now the ORG's
         if resume_from and store.load(resume_from, repo):   # Load(prior id): the worktree BECOMES that state
-            pass                                            # store.load already logs the op
+            # resume re-SPLITS fresh (frontier is intentionally NOT restored — a fresh split adapts to a
+            # changed goal/codebase/steer and drops a bad plan). Its one cost is the LLM recreating already-
+            # built work under new names; tell the splitter what the Load brought back so the re-split is
+            # IDEMPOTENT against it (build on / patch these, do not recreate). The frontier stays non-restored.
+            restored = store.restored_files(resume_from, repo)
+            if restored:
+                context = {**(context or {}), "resumed_prior_work": {
+                    "files": restored[:200],
+                    "instruction": "These files ALREADY EXIST, cherry-picked from resumed prior work. Build "
+                                   "the goal ON them: extend or patch the existing files; do NOT recreate "
+                                   "equivalent content under new names. Plan only the remaining work."}}
     leaf_commits: dict = {}                             # leaf_id -> its own commit sha (git scatters per leaf)
 
     def _finalize(final_plan):
@@ -444,11 +454,9 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     break        # same preserved work twice -> blind retry won't help; let floor/re-split run
                 prev_sig = sig
             if res.get("outcome") == "converged":
-                # TODO(session-reuse audit): when run_leaf/controller_pipeline surfaces the per-role codex
-                # session ids it used (the in-memory `sessions` map of the repair loop), record them here via
-                # `store.record_session(goal_id, leaf["id"], role, session_id)` for observability. Not wired
-                # yet because the pipeline does not currently return that map up through run_leaf's outcome
-                # dict, and threading it would be an invasive change to the leaf-runner contract.
+                if store is not None:                          # AUDIT: record which codex session each role
+                    for role, sid in (res.get("sessions") or {}).items():   # used on this leaf (repair reuse)
+                        store.record_session(goal_id, leaf["id"], role, sid)
                 plan = frontier.advance(plan, leaf["id"], "done")
                 leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)
                 # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"

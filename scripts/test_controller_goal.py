@@ -292,6 +292,47 @@ def test_splitter_speech_streams_as_agent_message():
     print("ok  splitter streams its decomposition as an agent_message (log-is-the-state-source)")
 
 
+def test_leaf_sessions_recorded_per_leaf_role():
+    # the per-role codex session ids a leaf used are recorded in state, keyed leaf×role (repair-reuse audit).
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        split = lambda goal, ctx, carrier: [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}]
+        run_leaf = lambda r, t: {"outcome": "converged", "commit": None,
+                                 "sessions": {"genius": "sid-g", "implementer": "sid-i"}}
+        cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, goal_id="goal-sess")
+        s = (goal_store.GoalStore(repo).read("goal-sess") or {}).get("sessions") or {}
+        assert s.get("a:genius") == "sid-g" and s.get("a:implementer") == "sid-i", s
+    print("ok  per-leaf×role codex sessions recorded in state (repair-reuse audit)")
+
+
+def test_resume_feeds_restored_inventory_to_the_resplit():
+    # resume re-splits FRESH (frontier not restored); it tells the splitter what the Load restored so the
+    # re-split is idempotent against it (build on / patch, don't recreate).
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo); st.create("goal-prior", "g", org="")
+        os.makedirs(os.path.join(repo, "mocks")); open(os.path.join(repo, "mocks", "a.py"), "w").write("y\n")
+        git(repo, "add", "-A"); git(repo, "commit", "-m", "leaf"); st.save_wip("goal-prior", repo)
+        git(repo, "reset", "--hard", "HEAD~1")
+        seen = {}
+        def split(goal, ctx, carrier):
+            seen["ctx"] = ctx
+            return [{"id": "a", "objective": "do a", "scope": ["mocks/a.py"], "depends_on": []}]
+        cg.run_goal(repo, "g", run_leaf=lambda r, t: "converged", split=split,
+                    goal_id="goal-new", resume_from="goal-prior")
+        rpw = (seen.get("ctx") or {}).get("resumed_prior_work")
+        assert rpw and "mocks/a.py" in rpw["files"], rpw
+    print("ok  resume feeds the re-split its restored-file inventory (idempotent re-split)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

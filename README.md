@@ -138,6 +138,42 @@ flowchart TB
 
 Design records (in the host, Shagiri): ADR-0006 the Frontier, ADR-0008 the Splitter, ADR-0009 the stream.
 
+## State (the org owns it)
+
+A goal handed to the org becomes the org's the moment it is received — the org owns its run state; a host
+(Shagiri) only READS it (ADR-0007). State is not scattered per-host: it is one shared capability with a
+single contract, so every edition inherits it rather than re-implementing it. `scripts/goal_store.py` is the
+store — durable, current-state authority, **git-backed**.
+
+- **The work lives in git, not a loose patch.** Each goal's accumulated build is pinned under
+  `refs/goals/<id>/{wip,done}` — a commit off the goal's base whose tip is the chain of per-leaf commits
+  (`wip` updated as leaves converge, `done` on delivery). Because they are real refs in the object store,
+  the work **survives the ephemeral run-worktree's cleanup AND a process/host restart**. The JSON record
+  carries the lightweight fields (status, the `queue`/split tree, `leaf_commits`, the per-leaf×role codex
+  `sessions`); git carries the heavy content (content-addressed, diffable, free dedup).
+- **CLRUD + Find, and Load ≠ Read.** Create / **Load** / **Read** / Update / Delete / find(1→N). *Load* is an
+  OPERATION — `load(id)` makes a worktree BECOME that goal's committed state (it cherry-picks the `base..wip`
+  range in). *Read* is the safe observation that mutates nothing. They are deliberately distinct: state is
+  separated out **because it is operated on**, not merely for completeness.
+- **Resume is a first-class operation.** `--resume-from <id>` Loads a prior goal's `wip` into a fresh
+  worktree and continues — even a *failed*/floored goal is resumable, because its converged work was already
+  saved to `wip`. Resume restores the FILES but **intentionally does NOT restore the frontier**: it re-splits
+  the goal fresh, which adapts to a changed goal / codebase / steering and drops a bad earlier plan. Its one
+  cost — the LLM recreating already-built work under new names — is removed by feeding the re-split the
+  inventory of restored files (build on / patch these, do not recreate). The fix is idempotent re-split, not
+  a restored frontier.
+- **Repair keeps its memory.** On a Linon-rejection repair iteration the producer designers and the
+  implementer RESUME their prior codex session (recorded per leaf×role in state) instead of re-deliberating
+  amnesiac — so a repair turn is a small delta on a server-cached session, not a full regeneration. The
+  structure (full wave, independent Linon) is unchanged; only the wasted re-writing is gone.
+- **Steering is additive and node-targeted.** Guidance injected mid-run (`steer`, via an append-only
+  sidecar) folds into the not-yet-dispatched leaves of the `queue` — targeted at the goal or a specific
+  Queue node — so you redirect a running build without killing and re-injecting it.
+- **The log is the other half.** Every state operation (create/load/save/update/delete) also flows to the
+  shared stream as a `{"type":"state", ...}` event: the store is the current-state authority, the log is the
+  history/audit. State data belongs on the log (event-sourced); a poor minimal log that drops it is a time
+  bomb — the store is never the only copy.
+
 ## Mechanical harness
 
 ```sh

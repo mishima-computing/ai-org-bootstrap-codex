@@ -208,6 +208,21 @@ class GoalStore:
         self._emit({"type": "state", "op": "load", "goal_id": goal_id, "wip": sha})
         return True
 
+    def restored_files(self, goal_id: str, work: str | None = None) -> list:
+        """The repo-relative files a Load(goal_id) brings back — the wip range `base..wip`. A resuming run
+        feeds this to its splitter so the (intentionally fresh, frontier-non-restored) re-split is IDEMPOTENT
+        against the restored work: build on / patch these, do not recreate them under new names. [] when there
+        is no wip or no fork point."""
+        work = work or self.repo
+        sha = self._resolve(goal_id, "wip")
+        if not sha:
+            return []
+        base = _git(work, "merge-base", sha, "HEAD").stdout.strip()
+        if not base or base == sha:
+            return []
+        out = _git(work, "diff", "--name-only", f"{base}..{sha}").stdout
+        return [f for f in out.splitlines() if f.strip() and not f.startswith(".agent-runs/")]   # not scratch
+
     # --- internals --------------------------------------------------------------------------------
     def _commit_work(self, goal_id: str, work: str, kind: str) -> str | None:
         """Commit the worktree's accumulated work to a dangling commit and pin it under refs/goals/<id>/
