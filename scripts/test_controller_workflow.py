@@ -98,6 +98,23 @@ def test_repair_session_reuse_gating():
     print("ok  repair session-reuse gating (4 roles resume, aufheben/linon fresh, chained)")
 
 
+def test_repair_resume_uses_a_delta_prompt():
+    # a resumed repair turn must send the DELTA prompt (so the model emits only the correction, not a full
+    # regeneration — the token win of session-reuse); the initial/fresh turn keeps the full prompt.
+    import json
+    delta = cp._delta_prompt("implementer", "do x", {"linon": {"findings": ["fix Y"]}})
+    full = cp._prompt("implementer", "do x", {"linon": {"findings": ["fix Y"]}})
+    d = json.loads(delta)
+    assert d.get("mode") == "repair-continuation", d
+    assert "CONTINUING your own previous turn" in d.get("instruction", ""), d
+    assert "repair-continuation" not in full, "the fresh/initial prompt must NOT be the delta prompt"
+    # the contract picks the delta only when a session is being resumed
+    entry = cp._entries(REPO)["implementer"]
+    assert "repair-continuation" in cp._contract(entry, "do x", {}, resume_session="sid-1")["prompt"]
+    assert "repair-continuation" not in cp._contract(entry, "do x", {})["prompt"]
+    print("ok  repair resume sends a delta prompt; fresh/initial sends the full prompt")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

@@ -109,6 +109,22 @@ def _prompt(role: str, objective: str, inputs: dict[str, dict]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _delta_prompt(role: str, objective: str, inputs: dict[str, dict]) -> str:
+    """The repair-iteration prompt for a role whose prior codex session is being RESUMED. The session already
+    holds the role's previous output, so ask for the DELTA: revise exactly what the new inputs (Linon's
+    findings, or a refined contract) require and leave everything else standing — do not re-derive or re-emit
+    the unaffected parts. This is what converts session-reuse into fewer OUTPUT tokens (the input prefix was
+    already cached either way); without it the model keeps its memory but still regenerates a full answer."""
+    payload = {"role": role, "objective": objective, "mode": "repair-continuation",
+               "instruction": ("You are CONTINUING your own previous turn in this session — your prior output "
+                               "already stands. Apply ONLY the change the inputs below require; do NOT "
+                               "re-derive, re-explain, or re-emit the parts they leave unaffected. Return your "
+                               "updated result in the same schema, changed exactly where required and otherwise "
+                               "identical to what you already produced."),
+               "inputs": inputs}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 def _allowed_files(entry: RegistryEntry, inputs: dict[str, dict]) -> list[str]:
     upstream_allowed: list[str] = []
     for upstream in inputs.values():
@@ -129,11 +145,15 @@ def _forbidden_files(inputs: dict[str, dict]) -> list[str]:
     return sorted(dict.fromkeys(forbidden))
 
 
-def _contract(entry: RegistryEntry, objective: str, inputs: dict[str, dict]) -> dict:
+def _contract(entry: RegistryEntry, objective: str, inputs: dict[str, dict], resume_session=None) -> dict:
     write_scope = _allowed_files(entry, inputs)
+    # when the prior session is RESUMED (repair re-run of a producer/implementer), send the DELTA prompt so
+    # the model emits only the correction, not a full regeneration — the token/speed win of session-reuse.
+    prompt = _delta_prompt(entry.agent_id, objective, inputs) if resume_session \
+        else _prompt(entry.agent_id, objective, inputs)
     contract = {
         "role": entry.agent_id,
-        "prompt": _prompt(entry.agent_id, objective, inputs),
+        "prompt": prompt,
         "sandbox": "workspace-write" if write_scope else "read-only",
     }
     if write_scope:
@@ -415,7 +435,7 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
                    stage_run_id: str, cache: bool, resume_session=None) -> tuple[bool, dict | None, dict, dict]:
     if role == "linon" and _linon_via_codex_review_enabled():
         return _execute_linon_via_codex_review(repo, stage_run_id)
-    contract = _contract(entry, objective, inputs)
+    contract = _contract(entry, objective, inputs, resume_session)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
         repo, entry, contract, stage_run_id, cache, resume_session
