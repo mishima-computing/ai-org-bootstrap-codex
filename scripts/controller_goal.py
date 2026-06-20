@@ -49,6 +49,7 @@ def stream_emit(repo):
     STREAM_LOG (env) points it at the SHARED log even when the build runs in an isolated worktree, so the
     town sees events live regardless of where the leaf executes. Fail-soft — observability never breaks a
     build."""
+    import datetime
     import json
     import os
     log = Path(os.environ.get("STREAM_LOG") or (Path(repo) / ".agent-runs" / "stream.jsonl"))
@@ -56,8 +57,13 @@ def stream_emit(repo):
     def emit(event):
         try:
             log.parent.mkdir(parents=True, exist_ok=True)
+            # stamp EVERY event with a ts (the pipeline already does for stage events) so a consumer can
+            # judge liveness/recency from the stream ALONE — the freshest event's ts, not an off-band
+            # process poll. A poor, ts-less goal log was a time bomb: leaf_start/leaf_done could not be
+            # told fresh from stale, so "is this goal still moving?" leaked to fragile `pgrep`.
+            ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             with log.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(dict(event), ensure_ascii=False) + "\n")
+                f.write(json.dumps({"ts": ts, **dict(event)}, ensure_ascii=False) + "\n")   # event ts wins if present
         except OSError:
             pass
 
