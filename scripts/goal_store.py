@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Durable, method-encapsulated state OWNED BY THE AI ORG — its goals' state is the org's, not
-the host's. A host (Shagiri) only READS this via the same record/refs; it never writes them.
+another's. A consumer only READS this via the same record/refs; it never writes them.
 
 The AI Org holds state once goals can be resumed. This is that state, behind a CLRUD method surface
 (Create / Load / Read / Update / Delete — Load OPERATES on state, Read only observes) so callers never touch the backing store directly — the backend can
@@ -12,7 +12,7 @@ Layout (all under <repo>/.agent-runs/goals/):
   - refs/goals/<id>/wip,done  the actual work, held IN GIT (a commit off the goal's base), not a loose
                               patch. Resume "calls it with git": Load cherry-picks the wip commit range
                               into a fresh worktree. Refs live in the repo's object store, so they survive
-                              worktree cleanup AND cockpit restarts.
+                              worktree cleanup AND consumer restarts.
 
 Heavy content is git's job (content-addressed, integrity-checked, diffable, free dedup/history); the JSON
 record is just the small pointer + status. The Stream (ADR-0009) remains the append-only event log.
@@ -35,7 +35,7 @@ class GoalStore:
         self.root = Path(repo).expanduser().resolve() / ".agent-runs" / "goals"
         self._lock = threading.Lock()
         # every OPERATION on state is also flowed to the log (the store is the current-state authority; the
-        # log is the audit/observability of what was DONE to it — incl. Load). `emit` is the host's Stream.
+        # log is the audit/observability of what was DONE to it — incl. Load). `emit` is the consumer's Stream.
         self._emit = emit if callable(emit) else (lambda e: None)
 
     # --- paths / refs -----------------------------------------------------------------------------
@@ -129,9 +129,9 @@ class GoalStore:
         self._emit({"type": "state", "op": "delete", "goal_id": goal_id})
 
     # --- steering: additive mid-run guidance (steer a running goal WITHOUT kill + re-fire) ---------
-    # Steering lives in an APPEND-ONLY sidecar (<id>.steering.jsonl), NOT the record. A host appends notes
+    # Steering lives in an APPEND-ONLY sidecar (<id>.steering.jsonl), NOT the record. A consumer appends notes
     # here while the org keeps writing the record; append-only + a separate file means the two PROCESSES
-    # never clobber each other (the record stays the org's, steering is host-ingress / org-read-only). The
+    # never clobber each other (the record stays the org's, steering is consumer-ingress / org-read-only). The
     # org folds the notes into its not-yet-dispatched leaves at the next boundary — no work is discarded.
     def steer(self, goal_id: str, text: str, target: str = "goal") -> dict | None:
         """U-like OPERATION — append one steering note to a running goal; flowed to the log. `target` says

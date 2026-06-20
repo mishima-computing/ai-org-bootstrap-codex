@@ -103,7 +103,7 @@ needs semantic flexibility").
   max-rounds / loop-without-next-contract / invalid-decision). The advancing is Python's; the
   decision is the LLM's. Suite 55 → 61.
 
-This is also the deterministic control plane Shagiri productizes; building it serves both.
+This is also the deterministic control plane downstream products build on; building it serves both.
 
 ## Phase-0 integration test results (2026-06-14)
 

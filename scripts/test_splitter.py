@@ -16,13 +16,13 @@ def test_valid_dag_from_stub_carrier_is_returned():
         {
             "id": "design",
             "objective": "Design the API",
-            "scope": ["cockpit/splitter.py"],
+            "scope": ["src/splitter.py"],
             "depends_on": [],
         },
         {
             "id": "test",
             "objective": "Test the API",
-            "scope": ["cockpit/test_splitter.py"],
+            "scope": ["src/test_splitter.py"],
             "depends_on": ["design"],
         },
     ]
@@ -44,14 +44,14 @@ def test_invalid_task_shapes_and_frontier_errors_return_empty_list():
     valid_task = {
         "id": "valid",
         "objective": "Valid task",
-        "scope": ["cockpit/splitter.py"],
+        "scope": ["src/splitter.py"],
         "depends_on": [],
     }
     invalid_outputs = [
         {},
         ["not a task"],
         [{**valid_task, "id": 1}],
-        [{**valid_task, "scope": "cockpit/splitter.py"}],
+        [{**valid_task, "scope": "src/splitter.py"}],
         [{**valid_task, "scope": [1]}],
         [{"id": "missing", "objective": "Missing fields", "scope": []}],
         [{**valid_task, "status": "pending"}],

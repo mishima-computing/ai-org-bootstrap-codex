@@ -9,7 +9,7 @@ engine decision for the AI Org.
 
 ## Context
 
-A live dogfood (2026-06-19/20, the Shagiri marketplace lanes) failed two goals in the same shape:
+A live dogfood (2026-06-19/20, the marketplace lanes) failed two goals in the same shape:
 
 - **packaging** — the splitter produced ONE atomic leaf (`scope = marketplace/packaging/`); at the floor
   it cannot split, so when its dialectic did not converge the whole goal was lost with no recourse.

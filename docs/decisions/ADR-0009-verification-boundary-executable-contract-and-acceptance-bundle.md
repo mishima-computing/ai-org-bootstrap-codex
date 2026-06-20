@@ -5,7 +5,7 @@
 Accepted. Supersedes the working hypothesis (recorded in the ADR-0008 addendum and in session notes)
 that the structural-vs-model split runs along a "binary defect vs contextual defect" line. That line is
 wrong. This ADR records the corrected boundary and the investment sequence that follows from it. It is the
-control-plane companion to Shagiri ADR-0022 (the *execution* substrate / inner-box dynamic verification):
+control-plane companion to the execution-substrate work (the *execution* substrate / inner-box dynamic verification):
 ADR-0022 says *where* code runs; this ADR says *what is proven about it and by whom*.
 
 ## Context
@@ -218,7 +218,7 @@ LLM judgment review).
 
 All gates are shadow-first with the same one-line promotion to `block`, and findings route through the
 shared severity budget / repair loop. Test suites: conformance 14, contract-preflight 7, secret-scan 8,
-cli-fuzz 7, regression-corpus 4, plus the box manifest tests in shagiri.
+cli-fuzz 7, regression-corpus 4, plus the box-manifest tests in the execution runtime.
 
 With #1–#4 built (and #2's engine-gated items and #1's judgment review consciously deferred), ADR-0009 is at
 a clean stopping point: the deterministic verification spine — choose → encode → check → contain → fuzz →

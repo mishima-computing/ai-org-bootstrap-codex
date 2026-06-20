@@ -31,6 +31,36 @@ flowchart LR
   LEAVES -. "cannot converge" .-> SPLIT
 ```
 
+## What this is: an autonomous SDLC engine (not a coding agent)
+
+A normal coding agent imitates a *good developer*. This imitates a *software **organization*** — developer,
+designer, QA, security, change-management, and an audit trail — built into the machine, so the model's good
+intentions are **never** the safety mechanism. Authority-per-role, schema-gated hand-offs, worktree
+isolation, scope enforcement, a single merge path, independent review, and a hard repair cap all live on the
+**deterministic** side. The difference is not a smarter author, but the organisational controls that would
+normally surround one.
+
+It is a **headless engine** by design — CLI, JSON-lines, and Git are the only boundary; Codex-only; no human
+is pulled into decomposition or repair. These are deliberate, not limitations: a stable machine boundary is
+what makes the engine drivable by automation and its runs reproducible and auditable.
+
+**Status (external review):** an **enforcement-capable autonomous SDLC engine — enterprise-*qualifiable*, not
+yet enterprise-*ready*.** The verification gates (below) *close the loop* — they re-run every repair, gate the
+contract *before* implementation, and fail closed on a gate error — so configured to `block` the engine
+actually **enforces**, it does not merely observe. What remains for unsupervised enterprise production is
+**not more agents or prompts**, but: a typed **goal dossier** as the engine's input contract (business intent
+→ structured input, with irreversible / high-risk items resolved before any code is written); a **signed,
+non-bypassable policy bundle** (which gates are `block`, which carriers and sandbox are allowed — its digest
+bound into the run so it cannot be weakened mid-run or by a generating agent); an **isolated execution runtime
+as a mandatory boundary** (no silent fallback to a local subprocess in enterprise mode); **per-deliverable /
+per-app-kind profiles** (HTTP / database / authorization / operability, not only CLI); **gate evidence
+cryptographically bound to the artifact + policy hashes** (in-toto / SLSA-style provenance: *this gate passed
+for this contract, this artifact, this policy, this isolated environment*); and **continuous evaluation on
+real, ambiguous requirements** — not just precise developer-written goals.
+
+The claim this earns is not "AI builds apps" but: **evidence-bearing, enterprise-grade software production for
+people who do not have a controlled software organisation.**
+
 ## The dialectic (one objective → one verified diff)
 
 Codex main is the controller. Specialized Codex agents produce bounded artifacts:
@@ -107,7 +137,7 @@ human to break it down). A one-line fix and a sweeping "build me X" enter exactl
 its own `controller_goal` process, and they all append to the same `STREAM_LOG`, so you observe the
 concurrent runs together. (This in-process concurrency is on top of the *in-goal* parallelism below, where
 a single goal's disjoint leaves and write roles already run in parallel.) `--budget` bounds a run;
-`--goal-id` lets a host track and `--resume-from` resume a goal's state.
+`--goal-id` tracks a goal's state across runs and `--resume-from` resumes it.
 
 `controller_goal.run_goal` is the org's recursive **Splitter-Queue** — the Splitter and the Queue are
 one node (`run()` a leaf via the dialectic; `split()` it when it cannot converge):
@@ -123,8 +153,8 @@ one node (`run()` a leaf via the dialectic; `split()` it when it cannot converge
   the FLOOR (atomic scope / max depth), where it fails rather than splitting forever.
 - termination is the floor + a token budget, **never a human**: when stuck the org varies strategy or
   grows a new tool, and when the budget is spent it records partial progress and moves on.
-- every step appends to a shared event log (`STREAM_LOG`, default `.agent-runs/stream.jsonl`) that a host
-  tails for live observability, independent of which worktree a leaf runs in.
+- every step appends to a shared event log (`STREAM_LOG`, default `.agent-runs/stream.jsonl`) that can be
+  tailed for live observability, independent of which worktree a leaf runs in.
 
 ```mermaid
 flowchart TB
@@ -136,19 +166,17 @@ flowchart TB
   B2 -- "repair-cap fail at the FLOOR" --> F["fail (never an infinite split)"]
 ```
 
-Design records (in the host, Shagiri): ADR-0006 the Frontier, ADR-0008 the Splitter, ADR-0009 the stream.
-
 ## State (the org owns it)
 
-A goal handed to the org becomes the org's the moment it is received — the org owns its run state; a host
-(Shagiri) only READS it (ADR-0007). State is not scattered per-host: it is one shared capability with a
-single contract, so every edition inherits it rather than re-implementing it. `scripts/goal_store.py` is the
-store — durable, current-state authority, **git-backed**.
+A goal handed to the org becomes the org's the moment it is received — the org owns its run state and is its
+sole authority; everything else only READS it (ADR-0007). State is not scattered per-run: it is one shared
+capability with a single contract, so every edition inherits it rather than re-implementing it.
+`scripts/goal_store.py` is the store — durable, current-state authority, **git-backed**.
 
 - **The work lives in git, not a loose patch.** Each goal's accumulated build is pinned under
   `refs/goals/<id>/{wip,done}` — a commit off the goal's base whose tip is the chain of per-leaf commits
   (`wip` updated as leaves converge, `done` on delivery). Because they are real refs in the object store,
-  the work **survives the ephemeral run-worktree's cleanup AND a process/host restart**. The JSON record
+  the work **survives the ephemeral run-worktree's cleanup AND a process restart**. The JSON record
   carries the lightweight fields (status, the `queue`/split tree, `leaf_commits`, the per-leaf×role codex
   `sessions`); git carries the heavy content (content-addressed, diffable, free dedup).
 - **CLRUD + Find, and Load ≠ Read.** Create / **Load** / **Read** / Update / Delete / find(1→N). *Load* is an
@@ -254,7 +282,7 @@ Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 | **Immutable acceptance bundle** (`controller_pipeline._withhold_acceptance_bundle`) | withholds the golden examples from the implementer — it builds to the spec, the gate checks goldens it never saw, so the implementation and its oracle cannot share one misunderstanding | `WITHHOLD_ACCEPTANCE_BUNDLE` |
 | **Secret scan** (`scripts/secret_scan.py`) | scans source **and the built artifact's archives** via gitleaks (with a pure-Python fallback); known provider tokens / private keys block, generic entropy is advisory, and the secret value is never emitted into a finding | `SECRET_SCAN` |
 | **CLI fuzz** (`scripts/fuzz_cli.py`) | black-box property fuzzing of the built CLI: generates adversarial inputs (empty / malformed / oversized / binary / unicode) and searches for an input that **crashes** it, exits **outside the declared code policy**, or **hangs** — reporting a *minimized* counterexample | `FUZZ_CLI` |
-| **Resource limits** | the conformance/fuzz subprocess runner is rlimit/timeout/output-bounded; the per-org Kata box pod (`shagiri runtime/box_runner.py`) caps cpu/memory/ephemeral-storage and drops capabilities | — |
+| **Resource limits** | the conformance/fuzz subprocess runner is rlimit/timeout/output-bounded (the executes-untrusted-artifact boundary; an isolated execution backend is the mandatory one in enterprise mode) | — |
 
 **Finding → regression (`scripts/regression_corpus.py`).** Every accepted finding must become a
 deterministic re-check, or the org re-pays LLM cost to re-discover it. The deterministic gates above

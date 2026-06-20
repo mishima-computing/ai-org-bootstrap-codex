@@ -23,15 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os  # noqa: E402
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
-import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the host)
+import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the consumer)
 import scaffold_primitive  # noqa: E402 — ADR-0008 deterministic, LLM-free scaffold skeleton
 import splitter  # noqa: E402
 
 
 def _shared_state_repo(repo) -> str:
-    """The org's state STORE must be durable + shared so a host can read current state — NOT the ephemeral
+    """The org's state STORE must be durable + shared so a consumer can read current state — NOT the ephemeral
     goal worktree. STREAM_LOG points at the shared `<repo>/.agent-runs/stream.jsonl`, so its grandparent is
-    the shared repo. Falls back to `repo` (tests / no host)."""
+    the shared repo. Falls back to `repo` (tests / no consumer)."""
     sl = os.environ.get("STREAM_LOG")
     if sl:
         p = Path(sl)
@@ -76,7 +76,7 @@ _SPEECH_CAP = 16000   # max serialized chars of the splitter's decomposition tha
 def _emit_splitter_speech(emit, run_id, plan) -> None:
     """Stream the splitter's actual output — the task DAG it produced — as an `agent_message` event, the same
     shape the pipeline uses for designer/implementer/linon speech. goal_split/scaffold_fanout carry only a
-    COUNT; the decomposition itself is what a host (Shagiri) needs to show "what the splitter said", and the
+    COUNT; the decomposition itself is what a consumer needs to show "what the splitter said", and the
     stream is its only durable home (the carrier log lives in an ephemeral leaf worktree). Bound, legibly."""
     import json as _json
     try:
@@ -382,10 +382,10 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     caps the number of leaf runs (None = unbounded, bounded only by the floor). emit(event) streams
     progress (ADR-0009). When `goal_id` is given, the ORG OWNS this goal's state — the received goal
     becomes the org's at receipt: it records the goal, commits its build (wip) and its outcome, in its own
-    GoalStore. A host (Shagiri) only READS that state. Returns the final task tree."""
+    GoalStore. A consumer only READS that state. Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
     emit = emit or stream_emit(repo)
-    # the org's state STORE is durable + SHARED (so a host can READ current state, DB-style): write it where
+    # the org's state STORE is durable + SHARED (so a consumer can READ current state, DB-style): write it where
     # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already
     # shared. `emit` is threaded in so every state OPERATION (create/load/save/update) also lands in the log.
     store = goal_store.GoalStore(_shared_state_repo(repo), emit=emit) if goal_id else None
@@ -566,7 +566,7 @@ def main(argv=None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--goal", required=True)
     p.add_argument("--goal-id", default=None, help="the org records THIS goal's state under this id (it "
-                   "owns its state); a host passes the id it dispatched with so it can read the org's state")
+                   "owns its state); a consumer passes the id it dispatched with so it can read the org's state")
     p.add_argument("--resume-from", default=None, help="a prior goal_id (or sha/ref): the org LOADS that "
                    "state into the worktree before building, so it resumes its own prior work (org behavior)")
     p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")

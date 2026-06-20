@@ -24,7 +24,7 @@ def task(task_id, scope, *, depends_on=(), status="pending", run_id=None, pr_url
 
 def test_independent_disjoint_pending_tasks_are_all_ready():
     tasks = [
-        task("backend", ["cockpit/frontier.py"]),
+        task("backend", ["src/frontier.py"]),
         task("docs", ["docs/adr/*.md"]),
     ]
 
@@ -33,12 +33,12 @@ def test_independent_disjoint_pending_tasks_are_all_ready():
 
 def test_dependent_task_waits_until_dependency_is_done():
     blocked = [
-        task("api", ["cockpit/server.py"], status="running"),
-        task("ui", ["cockpit/clay/*.js"], depends_on=["api"]),
+        task("api", ["src/server.py"], status="running"),
+        task("ui", ["src/clay/*.js"], depends_on=["api"]),
     ]
     unblocked = [
-        task("api", ["cockpit/server.py"], status="done"),
-        task("ui", ["cockpit/clay/*.js"], depends_on=["api"]),
+        task("api", ["src/server.py"], status="done"),
+        task("ui", ["src/clay/*.js"], depends_on=["api"]),
     ]
 
     assert [t["id"] for t in ready_tasks(blocked)] == []
@@ -66,8 +66,8 @@ def test_diamond_dependencies_advance_in_readiness_waves():
 
 
 def test_scope_conflict_handles_disjoint_and_overlapping_globs():
-    api = task("api", ["cockpit/*.py"])
-    frontier = task("frontier", ["cockpit/frontier.py"])
+    api = task("api", ["src/*.py"])
+    frontier = task("frontier", ["src/frontier.py"])
     docs = task("docs", ["docs/adr/*.md"])
     ambiguous_py = task("py", ["src/*.py"])
     ambiguous_md = task("md", ["src/*.md"])
@@ -78,16 +78,16 @@ def test_scope_conflict_handles_disjoint_and_overlapping_globs():
 
 
 def test_scope_conflict_handles_cockpit_recursive_glob_overlap():
-    recursive = task("recursive", ["cockpit/**"])
-    server = task("server", ["cockpit/server.py"])
+    recursive = task("recursive", ["src/**"])
+    server = task("server", ["src/server.py"])
 
     assert scope_conflict(recursive, server) is True
 
 
 def test_overlapping_scope_is_blocked_while_another_task_runs():
     tasks = [
-        task("server", ["cockpit/*.py"], status="running"),
-        task("frontier", ["cockpit/frontier.py"]),
+        task("server", ["src/*.py"], status="running"),
+        task("frontier", ["src/frontier.py"]),
         task("docs", ["docs/adr/*.md"]),
     ]
 
@@ -96,8 +96,8 @@ def test_overlapping_scope_is_blocked_while_another_task_runs():
 
 def test_overlapping_pending_candidates_are_serialized_by_plan_order():
     tasks = [
-        task("server", ["cockpit/*.py"]),
-        task("frontier", ["cockpit/frontier.py"]),
+        task("server", ["src/*.py"]),
+        task("frontier", ["src/frontier.py"]),
         task("docs", ["docs/adr/*.md"]),
     ]
 
@@ -138,7 +138,7 @@ def test_validate_plan_reports_self_dependency_cycle_with_task_id():
 
 
 def test_advance_returns_new_plan_and_only_model_run_fields_are_applied():
-    tasks = [task("build", ["cockpit/frontier.py"])]
+    tasks = [task("build", ["src/frontier.py"])]
 
     advanced = advance(
         tasks,
@@ -158,7 +158,7 @@ def test_advance_returns_new_plan_and_only_model_run_fields_are_applied():
     assert tasks[0]["status"] == "pending"
     assert tasks[0]["run_id"] is None
     advanced[0]["scope"].append("later.py")
-    assert tasks[0]["scope"] == ["cockpit/frontier.py"]
+    assert tasks[0]["scope"] == ["src/frontier.py"]
 
     try:
         advance(tasks, "build", "waiting")

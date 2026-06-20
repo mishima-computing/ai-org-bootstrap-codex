@@ -4,22 +4,22 @@ Status: accepted (implemented 2026-06-19)
 
 ## Owner / placement
 
-The state of a goal is the **AI Org's**, not the host's. Information the org receives becomes the
+The state of a goal is the **AI Org's**, not the consumer's. Information the org receives becomes the
 org's at the moment of receipt: a goal handed to the builder (`POST /api/goal` → `controller_goal`) is
-thereafter the org's state — its record, status, build (git commits), and resume. A host (Shagiri) only
+thereafter the org's state — its record, status, build (git commits), and resume. A consumer only
 **reads** that state; it never owns or writes it. The implementation lives in this repo
-(`scripts/goal_store.py`, `scripts/git_ops.py`, `scripts/controller_goal.py`); the host side is a thin
+(`scripts/goal_store.py`, `scripts/git_ops.py`, `scripts/controller_goal.py`); the consumer side is a thin
 reader (ADR-0009's stream + `_ai_org_state`).
 
 ## Context
 
 Once goals can be **resumed**, the builder holds durable state. The first cut put that state in the
-host (a `GoalStore` inside Shagiri's cockpit) and tried to grasp it ad hoc: a per-run dict, loose patches,
+consumer (a `GoalStore` outside the org) and tried to grasp it ad hoc: a per-run dict, loose patches,
 and state inferred from `git status` of an ephemeral worktree. This was wrong on several axes, surfaced
 over a long design pass:
 
 - **Ownership was inverted.** Resume is the org's behavior; the goal's state is the org's. Putting the
-  store in the host meant the host owned what the org should.
+  store in the consumer meant the consumer owned what the org should.
 - **State was scattered and unmanageable.** A run's state lived across many ephemeral worktrees (the goal
   worktree + N leaf worktrees + M stage worktrees), so reconstructing it meant crossing them. The problem
   was not the *count* of states but that they were not *managed* behind one surface.
@@ -38,7 +38,7 @@ the build's structure (git scatters per Queue).
 `scripts/goal_store.py`. One record per goal under a **shared, durable** `.agent-runs/goals/<id>.json`
 (located where `STREAM_LOG` points — the shared `.agent-runs`, never the ephemeral goal worktree), plus
 the heavy work held **in git**: `refs/goals/<id>/{wip,done}` are commits (the per-leaf commit chain), in
-the shared object store so they survive worktree cleanup. The record IS the current state — a host reads
+the shared object store so they survive worktree cleanup. The record IS the current state — a consumer reads
 it directly (it does not replay the log to know the current status).
 
 Method surface — **CLRUD + Find** (the backend can become sqlite later without changing a caller):
@@ -75,9 +75,9 @@ worktree and lands its own commit. The state expresses this, not just the collap
 ### Wiring
 
 `controller_goal --goal-id` makes the org create/save its state; `--resume-from` makes it `Load` a prior
-goal's state (resume is the org's behavior). The host dispatches with those flags and reads the org's
-state via the shared store + log; the host no longer writes the store (its `GOALS` is transient
-run-tracking holding host-only facts like delivery).
+goal's state (resume is the org's behavior). The consumer dispatches with those flags and reads the org's
+state via the shared store + log; the consumer no longer writes the store (its `GOALS` is transient
+run-tracking holding consumer-only facts like delivery).
 
 ## Change history
 
@@ -87,25 +87,25 @@ codex (`ai-org-bootstrap-codex`):
 |---|---|
 | `c566cb5` | per-leaf commits — PR = the request, commits = the sub-tasks |
 | `ed86f74` | extract the per-leaf-commit git-state into one procedure (`git_ops`) — guards once, not inline |
-| `f65447f` | the org owns its goal state (`GoalStore` in the org, not the host) |
+| `f65447f` | the org owns its goal state (`GoalStore` in the org, not the consumer) |
 | `badd066` | CLRUD (Load ≠ Read) + the org flows its state to a rich log |
-| `f0ad652` | durable shared store (host reads current state) + state ops flow to the log |
+| `f0ad652` | durable shared store (consumer reads current state) + state ops flow to the log |
 | `2421927` | the state expresses the per-Queue git scattering (`queue` + `leaf_commits`) |
 
-host (`shagiri`):
+consumer:
 
 | commit | what |
 |---|---|
 | `1f81ac7` | dispatch with `--goal-id` so the org owns/writes the state |
-| `6d6d4d4` | host reads `AI_Org.state` (now: the store record; the log is the op history) |
-| `4b3d14b` | host stops owning state — reads the org's, doesn't write it (cockpit thinned) |
+| `6d6d4d4` | consumer reads `AI_Org.state` (now: the store record; the log is the op history) |
+| `4b3d14b` | consumer stops owning state — reads the org's, doesn't write it (reader thinned to a dispatcher) |
 
 ## Consequences
 
-- The host is a thin reader/dispatcher; the double-write that collided on the shared store is removed.
+- The consumer is a thin reader/dispatcher; the double-write that collided on the shared store is removed.
 - Current state is a clean read (`Read`/`Find`), history and Load-effects are in the log, resume `Load`s
   the prior state — no ad-hoc `git status` inference.
 - **Open (a follow-up ADR):** the state capability is implemented in THIS edition only. It must become a
   shared capability every org edition inherits behind one `AI_Org.state` contract — re-implementing it per
-  edition is not an option. And the org/host ownership of *delivery* (the org's "goal → PRs") is still
-  host-side and wants the same treatment.
+  edition is not an option. And the org/consumer ownership of *delivery* (the org's "goal → PRs") is still
+  consumer-side and wants the same treatment.

@@ -154,7 +154,7 @@ def test_run_goal_streams_to_log():
 
 def test_goal_id_makes_the_org_own_its_state():
     # the received goal becomes the ORG's state at receipt: with a goal_id, run_goal records the goal,
-    # commits its build (wip), and its outcome in its own GoalStore — independent of any host.
+    # commits its build (wip), and its outcome in its own GoalStore — independent of any consumer.
     import tempfile, os, subprocess, goal_store
     def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
     with tempfile.TemporaryDirectory() as d:
@@ -275,7 +275,7 @@ def test_no_progress_breaks_the_blind_retry_loop():
 
 def test_splitter_speech_streams_as_agent_message():
     # log-is-the-state-source: goal_split carries only a COUNT; the decomposition itself (the splitter's
-    # speech) must ride the stream so a host can show "what the splitter said" without scraping an ephemeral
+    # speech) must ride the stream so a consumer can show "what the splitter said" without scraping an ephemeral
     # leaf worktree. The decomposition is emitted as an `agent_message` with source="splitter".
     import tempfile
     plan_out = [_leaf("a", ["x.py"]), _leaf("b", ["y.py"])]

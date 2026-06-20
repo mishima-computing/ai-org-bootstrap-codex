@@ -390,7 +390,7 @@ def _bounded_speech(result):
     """A role's actual output (its validated packet — proposal, findings, contract) shaped to ride the
     shared stream. The stream is the only DURABLE record of what each agent said: the per-stage result.json
     is preserved inside the stage's worktree, which for a wave role is an ephemeral sub-worktree removed
-    after the wave — so a host (Shagiri) that wants to show "what this agent said" cannot read it back, only
+    after the wave — so a consumer that wants to show "what this agent said" cannot read it back, only
     the stream survives (log-is-the-state-source). Emitting just ok/usage on stage_done was the poor-minimal
     -log time bomb: the speech was computed, then dropped. Oversized packets are previewed (not silently cut)
     so the truncation is legible rather than a hidden data loss."""
@@ -408,7 +408,7 @@ def _bounded_speech(result):
 def _stream_speech(repo, role: str, stage_run_id: str, result) -> None:
     """Tee a role's speech onto the shared stream as its own `agent_message` event (distinct from stage_done
     so existing consumers are untouched), making the dialectic's CONTENT — not just its timing — durable and
-    host-readable."""
+    consumer-readable."""
     _stream_append(repo, {"source": role, "type": "agent_message", "run_id": stage_run_id,
                           "speech": _bounded_speech(result)})
 
@@ -492,7 +492,7 @@ def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, 
     stage = _stage_record(repo, role, entry, contract, result, result_path, result_sha256,
                           report_dict, stage_run_id, stage_ok, started_at, finished_at)
     # the stage's TOKEN + CONTEXT spend (from codex's --json stream, captured per attempt by the harness)
-    # rides the stage_done event onto the shared stream, so a host (Shagiri) can show what /status shows.
+    # rides the stage_done event onto the shared stream, so a consumer can show what /status shows.
     # None on a cache hit — a replayed stage spends ~0 tokens, which is the honest number.
     usage = next((a.get("usage") for a in reversed(report_dict.get("attempts") or []) if a.get("usage")), None)
     _stream_speech(repo, role, stage_run_id, result)          # the CONTENT the role produced (durable on the stream)

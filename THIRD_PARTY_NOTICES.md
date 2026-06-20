@@ -7,7 +7,7 @@ pack. Their copyright and MIT permission notices are reproduced by reference bel
 
 Owner ruling (2026-06-14): use MIT-licensed libraries directly, with attribution. No AVA-trained
 weights (research-encumbered), no LGPL (OCTA toolbox), no unlicensed code (computational-aesthetics)
-are used — keeping the commercial posture clean for downstream (Shagiri).
+are used — keeping the commercial posture clean for downstream products.
 
 ## AIM — Aalto Interface Metrics
 - License: MIT. Copyright (c) User Interfaces group, Aalto University, Finland.
