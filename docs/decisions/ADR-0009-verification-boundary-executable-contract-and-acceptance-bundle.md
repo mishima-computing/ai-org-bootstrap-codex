@@ -209,6 +209,17 @@ LLM judgment review).
   inputs for a counterexample and minimizes it. Deeper backends (in-process Hypothesis, coverage-guided
   Atheris, fault injection, metamorphic/differential, mutation testing) are a future-box-image follow-up.
 
+- **#4 finding → regression conversion** — `regression_corpus.py`: an append-only, deduped, bounded corpus
+  of gate counterexamples. The deterministic gates self-regress by construction (they re-check the same
+  contract/scan each leaf); the exception is fuzzing, so its counterexamples are persisted and **replayed
+  first** on every later run (a reappearing crash regresses deterministically instead of being re-discovered
+  by random chance or an LLM — the structural answer to "40% of steps are repair"). The corpus lives beside
+  the shared stream so it persists across leaves and runs.
+
 All gates are shadow-first with the same one-line promotion to `block`, and findings route through the
 shared severity budget / repair loop. Test suites: conformance 14, contract-preflight 7, secret-scan 8,
-cli-fuzz 7, plus the box manifest tests in shagiri.
+cli-fuzz 7, regression-corpus 4, plus the box manifest tests in shagiri.
+
+With #1–#4 built (and #2's engine-gated items and #1's judgment review consciously deferred), ADR-0009 is at
+a clean stopping point: the deterministic verification spine — choose → encode → check → contain → fuzz →
+regress — is in place, exercised, and shadow-first, awaiting per-gate FP telemetry to promote to blocking.

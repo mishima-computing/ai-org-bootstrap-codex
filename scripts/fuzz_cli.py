@@ -22,6 +22,8 @@ from __future__ import annotations
 import random
 from typing import Optional
 
+import regression_corpus
+
 # adversarial argument tokens — empty, help, over-deep paths, separators, control chars, oversized, unicode.
 _ARG_SEEDS = [
     "", "--help", "-h", "a", "a.b", "a.b.c.d.e.f.g", "." * 256, "-", "--", "----", "- -",
@@ -89,21 +91,35 @@ def _minimize_stdin(entry, arg, stdin, runner, declared, cwd, kind):
     return best
 
 
-def fuzz(profile: dict, runner, *, cwd: Optional[str] = None, iterations: int = 40, seed: int = 1729) -> dict:
+# the deterministic gates self-regress (they re-check the same contract/scan each leaf); fuzz does NOT (its
+# inputs are stochastic), so its counterexamples are the ones worth persisting and replaying (ADR-0009 #4).
+_RECORDABLE = {"crash", "exit_out_of_policy"}      # deterministic, low-FP; a hang can be flaky, so not stored
+_CORPUS_STDIN_CAP = 8192
+
+
+def fuzz(profile: dict, runner, *, cwd: Optional[str] = None, iterations: int = 40, seed: int = 1729,
+         corpus_path: Optional[str] = None) -> dict:
     """Fuzz the CLI described by `profile` via the injectable `runner`. Returns
-    {applicable, passed, findings, checks_run}. A finding carries the minimized (arg, stdin) counterexample,
-    bounded. Deduped by (kind, arg) so one robustness bug is one finding, not forty."""
+    {applicable, passed, findings, checks_run, replayed, regressed}. A finding carries the minimized
+    (arg, stdin) counterexample, bounded. Deduped by (kind, arg) so one robustness bug is one finding.
+
+    ADR-0009 #4: when `corpus_path` is given, the stored counterexamples are REPLAYED FIRST (a previously
+    found crash is re-checked deterministically — instant regression catch, no LLM), and any NEW counterexample
+    is RECORDED, so a one-time discovery becomes a permanent regression test."""
     entry = (profile.get("entrypoint") or {}).get("invocation")
     if not entry:
         return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
     declared = _declared_codes(profile)
     rng = random.Random(seed)
 
-    cases = [(a, s) for a in _ARG_SEEDS for s in (("", "{bad", "A" * 200000))][:24]
-    cases += [(rng.choice(_ARG_SEEDS), rng.choice(_STDIN_SEEDS)) for _ in range(iterations)]
+    replay = regression_corpus.load(corpus_path, "cli-fuzz") if corpus_path else []
+    replay_cases = [(e.get("arg", ""), e.get("stdin", "")) for e in replay]
+    gen_cases = [(a, s) for a in _ARG_SEEDS for s in ("", "{bad", "A" * 200000)][:24]
+    gen_cases += [(rng.choice(_ARG_SEEDS), rng.choice(_STDIN_SEEDS)) for _ in range(iterations)]
+    cases = [(a, s, True) for a, s in replay_cases] + [(a, s, False) for a, s in gen_cases]
 
-    findings, seen = [], set()
-    for arg, stdin in cases:
+    findings, seen, to_record, regressed = [], set(), [], 0
+    for arg, stdin, is_replay in cases:
         res = runner(_full_command(entry, arg), cwd=cwd, stdin=stdin)
         v = _violation(res, declared)
         if not v:
@@ -114,9 +130,18 @@ def fuzz(profile: dict, runner, *, cwd: Optional[str] = None, iterations: int = 
             continue
         seen.add(key)
         min_stdin = _minimize_stdin(entry, arg, stdin, runner, declared, cwd, kind)
+        if is_replay:
+            regressed += 1
         findings.append({
-            "source": "cli-fuzz", "check": kind, "severity": severity, "passed": False, "detail": detail,
+            "source": "cli-fuzz", "check": kind, "severity": severity, "passed": False,
+            "detail": ("REGRESSION (a recorded counterexample reproduced) — " if is_replay else "") + detail,
             "arg": _bounded(arg, 80), "stdin": _bounded(min_stdin), "stdin_len": len(stdin),
-            "returncode": res.returncode,
+            "returncode": res.returncode, "regressed": is_replay,
         })
-    return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": len(cases)}
+        if kind in _RECORDABLE and not is_replay:
+            to_record.append({"gate": "cli-fuzz", "kind": kind, "arg": arg,
+                              "stdin": (min_stdin or "")[:_CORPUS_STDIN_CAP]})
+
+    recorded = regression_corpus.record(corpus_path, to_record) if corpus_path else 0
+    return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": len(cases),
+            "replayed": len(replay_cases), "regressed": regressed, "recorded": recorded}

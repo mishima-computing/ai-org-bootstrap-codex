@@ -29,6 +29,7 @@ import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (th
 import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
 import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
 import fuzz_cli  # noqa: E402  — ADR-0009 #3: black-box CLI property fuzzing (robustness oracle)
+import regression_corpus  # noqa: E402  — ADR-0009 #4: finding -> regression (replayed fuzz counterexamples)
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -718,8 +719,15 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
     profile = (contract or {}).get("conformance", {}).get("cli") if isinstance(contract, dict) else None
     if not isinstance(profile, dict):
         return None
+    # ADR-0009 #4: the corpus persists with the SHARED .agent-runs (beside the stream), not the ephemeral leaf
+    # worktree — so a counterexample found in one leaf/run is replayed in every later one.
+    stream_log = os.environ.get("STREAM_LOG")
+    corpus_path = (os.environ.get("REGRESSION_CORPUS")
+                   or (os.path.join(os.path.dirname(stream_log), "regressions.jsonl") if stream_log else None)
+                   or regression_corpus.default_path(repo))
     try:
-        report = fuzz_cli.fuzz(profile, runner or conformance.subprocess_runner(timeout=15), cwd=str(repo))
+        report = fuzz_cli.fuzz(profile, runner or conformance.subprocess_runner(timeout=15),
+                               cwd=str(repo), corpus_path=corpus_path)
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "cli-fuzz", "type": "gate_error", "run_id": run_id, "detail": repr(exc)})
         return None
@@ -729,7 +737,8 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
         "source": "cli-fuzz",
         "type": "shadow_findings" if FUZZ_CLI_MODE != "block" else "findings",
         "run_id": run_id, "passed": report["passed"], "checks_run": report["checks_run"],
-        "findings": report["findings"], "ts": _iso8601_utc(),
+        "replayed": report.get("replayed"), "regressed": report.get("regressed"),
+        "recorded": report.get("recorded"), "findings": report["findings"], "ts": _iso8601_utc(),
     })
     return report
 

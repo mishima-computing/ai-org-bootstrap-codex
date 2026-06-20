@@ -246,6 +246,13 @@ Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 | **CLI fuzz** (`scripts/fuzz_cli.py`) | black-box property fuzzing of the built CLI: generates adversarial inputs (empty / malformed / oversized / binary / unicode) and searches for an input that **crashes** it, exits **outside the declared code policy**, or **hangs** — reporting a *minimized* counterexample | `FUZZ_CLI` |
 | **Resource limits** | the conformance/fuzz subprocess runner is rlimit/timeout/output-bounded; the per-org Kata box pod (`shagiri runtime/box_runner.py`) caps cpu/memory/ephemeral-storage and drops capabilities | — |
 
+**Finding → regression (`scripts/regression_corpus.py`).** Every accepted finding must become a
+deterministic re-check, or the org re-pays LLM cost to re-discover it. The deterministic gates above
+*self-regress* by construction — conformance re-checks the contract's examples, secret-scan re-scans,
+pre-flight re-validates — every leaf. The one gate that does **not** is fuzzing (its inputs are stochastic),
+so its counterexamples are persisted to a corpus and **replayed first** on every later run: a fixed crash
+that reappears is caught instantly and deterministically, not rediscovered by random luck or an LLM.
+
 The full defect-class allocation, repair routing, and the five-step investment sequence are in **ADR-0009**;
 its one-line boundary: *the model/human decides what must be true and whether the contract fits the goal;
 deterministic systems prove, test, or enforce that the implementation obeys it.*
@@ -290,7 +297,7 @@ python3 -m unittest discover -s packages/codex-org-bootstrap/tests   # the diale
 python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 scripts/test_controller_goal.py
 # ADR-0009 verification gates:
 python3 scripts/test_conformance.py && python3 scripts/test_contract_preflight.py
-python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py
+python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py && python3 scripts/test_regression_corpus.py
 ```
 
 ## Documentation
