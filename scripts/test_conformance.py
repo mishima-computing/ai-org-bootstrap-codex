@@ -253,6 +253,103 @@ def test_schema_library_profile_requires_module_and_symbols():
     print("ok  schema: library profile requires module + non-empty exported_symbols")
 
 
+def _json_contract(files):
+    return {"role_id": "aufheben-designer", "deliverable_kind": "json", "conformance": {"json": {"files": files}}}
+
+
+def _ws(files: dict):
+    """A temp workspace with {relpath: content} written; returns a TemporaryDirectory (use as a context)."""
+    import tempfile
+    d = tempfile.TemporaryDirectory()
+    for rel, content in files.items():
+        with open(os.path.join(d.name, rel), "w", encoding="utf-8") as fh:
+            fh.write(content)
+    return d
+
+
+def test_json_valid_document_passes():
+    with _ws({"config.json": '{"name": "x", "version": "1.0", "info": {"title": "t"}}'}) as d:
+        rep = conf.run_json_conformance(_json_contract([{
+            "path": "config.json",
+            "schema": {"type": "object", "required": ["name", "version"]},
+            "required_paths": ["info.title"]}]), cwd=d)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert rep["checks_run"] == 1, rep
+    print("ok  json: parses + validates against schema + required_paths resolve -> passes")
+
+
+def test_json_missing_file_is_critical():
+    with _ws({}) as d:
+        rep = conf.run_json_conformance(_json_contract([{"path": "absent.json"}]), cwd=d)
+    crit = [f for f in rep["findings"] if f["check"] == "json_missing"]
+    assert not rep["passed"] and crit and crit[0]["severity"] == "critical", rep
+    print("ok  json: a declared file not present -> json_missing critical")
+
+
+def test_json_parse_error_is_critical():
+    with _ws({"bad.json": '{"name": "x",'}) as d:
+        rep = conf.run_json_conformance(_json_contract([{"path": "bad.json"}]), cwd=d)
+    crit = [f for f in rep["findings"] if f["check"] == "json_parse"]
+    assert not rep["passed"] and crit and crit[0]["severity"] == "critical", rep
+    print("ok  json: malformed content -> json_parse critical")
+
+
+def test_json_schema_violation_is_major():
+    with _ws({"c.json": '{"name": 7}'}) as d:  # name should be a string
+        rep = conf.run_json_conformance(_json_contract([{
+            "path": "c.json",
+            "schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}]), cwd=d)
+    viol = [f for f in rep["findings"] if f["check"] == "json_schema"]
+    assert not rep["passed"] and viol and viol[0]["severity"] == "major", rep
+    print("ok  json: a schema violation -> json_schema major")
+
+
+def test_json_required_path_missing_is_major():
+    with _ws({"c.json": '{"info": {"title": "t"}}'}) as d:
+        rep = conf.run_json_conformance(_json_contract([{
+            "path": "c.json", "required_paths": ["info.version"]}]), cwd=d)
+    miss = [f for f in rep["findings"] if f["check"] == "json_required_path"]
+    assert not rep["passed"] and miss and miss[0]["key_path"] == "info.version", rep
+    print("ok  json: a missing required key path -> json_required_path major")
+
+
+def test_json_invalid_declared_schema_is_major():
+    with _ws({"c.json": '{"a": 1}'}) as d:
+        rep = conf.run_json_conformance(_json_contract([{
+            "path": "c.json", "schema": {"type": "not-a-real-type"}}]), cwd=d)
+    assert not rep["passed"] and any(f["check"] == "json_schema" for f in rep["findings"]), rep
+    print("ok  json: an invalid declared schema is surfaced (not a silent skip)")
+
+
+def test_json_dispatch_routes_to_real_checker():
+    with _ws({"d.json": '{"a": 1}'}) as d:
+        rep = conf.run_conformance(_json_contract([{"path": "d.json"}]), fake_runner({}), cwd=d)
+    assert rep["applicable"] and rep["passed"], rep
+    print("ok  dispatch: json -> real json checker (runner ignored, no process run)")
+
+
+def test_schema_json_profile_requires_files():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    ok = {**base, "deliverable_kind": "json", "conformance": {"json": {"files": [{"path": "x.json"}]}}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert not v.is_valid({**base, "deliverable_kind": "json"}), "json deliverable must require a json profile"
+    assert not v.is_valid({**base, "deliverable_kind": "json", "conformance": {"json": {"files": []}}}), \
+        "files must be non-empty"
+    assert not v.is_valid({**base, "deliverable_kind": "json", "conformance": {"json": {"files": [{}]}}}), \
+        "each file requires a path"
+    print("ok  schema: json profile requires non-empty files, each with a path")
+
+
 def test_dispatch_routes_cli_and_empty_slots():
     # the single entry point: cli routes to the real checker; the other four kinds route to their empty slot
     # (recognized, unchecked, never a silent pass); an unknown/absent kind is simply not applicable.

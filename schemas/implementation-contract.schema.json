@@ -172,6 +172,7 @@
         "http_service",
         "rpc_service",
         "batch_job",
+        "json",
         "none"
       ]
     },
@@ -193,6 +194,9 @@
         },
         "batch_job": {
           "$ref": "#/$defs/batch_job_profile"
+        },
+        "json": {
+          "$ref": "#/$defs/json_profile"
         }
       },
       "additionalProperties": false
@@ -270,6 +274,31 @@
           "conformance": {
             "required": [
               "library"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A json deliverable MUST carry a checkable json conformance profile (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "json"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "json"
             ]
           }
         }
@@ -533,6 +562,50 @@
     "batch_job_profile": {
       "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. The closest sibling to cli_profile: run the job and assert exit status plus produced_artifacts (files/rows/objects) against declared expectations. Likely reuses most of the cli checker; kept a distinct slot so its run-then-inspect-outputs semantics are explicit. Filled when a batch_job deliverable first needs it.",
       "type": "object"
+    },
+    "json_profile": {
+      "description": "Black-box contract for a produced JSON document. The checker reads each declared file, parses it, validates it against a declared JSON Schema (inline or referenced), and asserts declared key paths resolve. It is the only profile that runs NO process \u2014 pure structural validation of the produced data \u2014 so it executes nothing untrusted and needs no isolation. Use it when the deliverable IS a JSON artifact (config, API spec, schema, manifest, data fixture); a CLI/service that merely emits JSON stays a cli/http_service deliverable and is checked through its own profile's output assertions.",
+      "type": "object",
+      "required": [
+        "files"
+      ],
+      "properties": {
+        "files": {
+          "description": "The produced JSON files to validate. Each names a path and, optionally, the shape it must satisfy.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "description": "Workspace-relative path to the produced JSON file. A missing file is a critical finding (nothing was delivered); an unparseable one is critical (not valid JSON).",
+                "type": "string",
+                "minLength": 1
+              },
+              "schema": {
+                "description": "An inline JSON Schema the file's content must validate against. Each validation error is a major finding. Mutually exclusive with schema_path.",
+                "type": "object"
+              },
+              "schema_path": {
+                "description": "Workspace-relative path to a JSON Schema file the content must validate against. Mutually exclusive with schema.",
+                "type": "string"
+              },
+              "required_paths": {
+                "description": "Dotted key paths that MUST resolve in the parsed document (e.g. `info.version`, `paths`). Each missing one is a major finding. Cheaper than a full schema when only presence matters.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

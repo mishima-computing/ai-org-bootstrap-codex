@@ -298,6 +298,96 @@ def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str
     }
 
 
+def _resolve_json_path(data, dotted: str) -> bool:
+    """True if a dotted key path resolves through nested objects. List indexing is out of scope for v1 —
+    'this nested field exists' is the common presence contract."""
+    cur = data
+    for key in dotted.split("."):
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return False
+    return True
+
+
+def _json_schema_findings(data, schema: dict, path: str) -> list[dict]:
+    """Validate parsed data against a declared JSON Schema; each error is a major finding. A missing
+    jsonschema or an invalid declared schema is itself a finding — never a silent skip."""
+    try:
+        from jsonschema import validators
+    except ImportError:
+        return [_finding("json_schema", "major", False,
+                         f"could not validate '{path}': jsonschema is not available", path=path)]
+    try:
+        validator_cls = validators.validator_for(schema)
+        validator_cls.check_schema(schema)
+        validator = validator_cls(schema)
+    except Exception as exc:  # noqa: BLE001 — an invalid declared schema is a contract defect; surface it
+        return [_finding("json_schema", "major", False,
+                         f"the declared JSON Schema for '{path}' is itself invalid: {exc}", path=path)]
+    findings = []
+    for err in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):
+        loc = "/".join(str(p) for p in err.path) or "(root)"
+        findings.append(_finding("json_schema", "major", False,
+                                 f"'{path}' violates its schema at {loc}: {err.message}", path=path, location=loc))
+    return findings
+
+
+def run_json_conformance(contract: dict, runner: Runner = None, *, cwd: Optional[str] = None) -> dict:
+    """Structural checker for a produced JSON document (ADR-0009 #1). Reads each declared file, parses it,
+    validates it against a declared JSON Schema (inline or referenced), and asserts declared key paths
+    resolve. Runs NO process (the runner is accepted for dispatch uniformity and ignored) — it only reads
+    data, so it executes nothing untrusted and needs no isolation. A missing or unparseable file is critical;
+    schema and key-path violations are major."""
+    profile = (contract.get("conformance") or {}).get("json")
+    if contract.get("deliverable_kind") != "json" or not profile:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    findings: list[dict] = []
+    specs = profile.get("files", [])
+    for spec in specs:
+        path = spec.get("path") or ""
+        full = path if (cwd is None or os.path.isabs(path)) else os.path.join(cwd, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            findings.append(_finding("json_missing", "critical", False,
+                                     f"declared JSON file '{path}' is not present in the workspace", path=path))
+            continue
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            findings.append(_finding("json_parse", "critical", False,
+                                     f"'{path}' is not valid JSON: {exc}", path=path))
+            continue
+
+        schema = spec.get("schema")
+        if schema is None and spec.get("schema_path"):
+            sp = spec["schema_path"]
+            sfull = sp if (cwd is None or os.path.isabs(sp)) else os.path.join(cwd, sp)
+            try:
+                with open(sfull, encoding="utf-8") as fh:
+                    schema = json.load(fh)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                findings.append(_finding("json_schema", "major", False,
+                                         f"could not load schema_path '{sp}' for '{path}': {exc}", path=path))
+                schema = None
+        if schema is not None:
+            findings += _json_schema_findings(data, schema, path)
+
+        for rp in spec.get("required_paths", []):
+            if not _resolve_json_path(data, rp):
+                findings.append(_finding("json_required_path", "major", False,
+                                         f"'{path}' is missing the required key path '{rp}'",
+                                         path=path, key_path=rp))
+
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": len(specs),
+    }
+
+
 def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
     """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over the RPC/message transport, Buf-style
     backwards-compatibility checks against the baseline."""
@@ -510,6 +600,8 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
         return run_cli_conformance(contract, runner, cwd=cwd)
     if kind == "http_service":
         return run_http_service_conformance(contract, runner, cwd=cwd, http_request=http_request)
+    if kind == "json":
+        return run_json_conformance(contract, cwd=cwd)
     checker = _SLOT_CHECKERS.get(kind)
     if checker is not None:
         return checker(contract, runner, cwd=cwd)

@@ -18,7 +18,7 @@ import fnmatch
 
 # Deliverable kinds that declare an executable interface (so a conformance profile is owed). "none" is the
 # explicit no-interface declaration and is deliberately NOT in this set.
-_INTERFACE_KINDS = ("cli", "library", "http_service", "rpc_service", "batch_job")
+_INTERFACE_KINDS = ("cli", "library", "http_service", "rpc_service", "batch_job", "json")
 
 
 def _is_substantive_profile(profile) -> bool:
@@ -123,8 +123,8 @@ def preflight(contract: dict) -> dict:
         findings.append(_finding(
             "deliverable_kind", "major",
             "contract does not declare deliverable_kind — declare it explicitly "
-            "(cli/library/http_service/rpc_service/batch_job), or 'none' when there is no executable interface; "
-            "silence must not be a way to skip the interface contract"))
+            "(cli/library/http_service/rpc_service/batch_job/json), or 'none' when there is no checkable "
+            "interface; silence must not be a way to skip the interface contract"))
     elif kind in _INTERFACE_KINDS:
         # An interface deliverable must carry its conformance profile, or there is nothing to verify the built
         # artifact against — the interface-precision leak this gate exists to close.
