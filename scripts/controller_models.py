@@ -70,6 +70,7 @@ class ControllerRunReport:
     quality: dict | None = None        # implementer quality-gate result (lint/debug-tag), if run
     verifier_results: list[dict] = field(default_factory=list)
     unresolved_failures: list[str] = field(default_factory=list)
+    session_id: str | None = None      # codex thread id of this run, so a REPAIR re-run can RESUME it
 
     def to_dict(self) -> dict:
         return asdict(self)

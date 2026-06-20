@@ -86,6 +86,21 @@ def build_codex_argv(repo: Path, sandbox: str, model: str | None = None) -> list
     return argv
 
 
+def build_codex_resume_argv(repo: Path, sandbox: str, session_id: str, model: str | None = None) -> list[str]:
+    """RESUME a prior codex session by its thread id, so the agent keeps its FULL memory and only emits a
+    small delta — the fix for amnesiac REPAIR re-runs (a producer/implementer re-deriving its whole proposal
+    from the Linon findings alone). Flag ORDER matters: codex's global flags (--sandbox/-C/--model) come
+    BEFORE the `resume` subcommand, then `resume --json <id>`; the caller appends `-o output_file` and the
+    delta prompt last (resume sends the prompt as a CONTINUATION of the existing conversation)."""
+    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        raise ValueError(f"invalid sandbox mode: {sandbox}")
+    argv = ["codex", "exec", "--sandbox", sandbox, "-C", str(repo)]
+    if model:
+        argv += ["--model", model]
+    argv += ["resume", "--json", session_id]
+    return argv
+
+
 def compose_prompt(prompt: str, discipline: str, prepend_discipline: bool) -> str:
     if prepend_discipline and discipline:
         return discipline.rstrip() + "\n\n---\n\n" + prompt
@@ -320,8 +335,28 @@ def extract_token_usage(carrier_stdout: str) -> dict | None:
     return {k: v for k, v in best.items() if v is not None}
 
 
+def extract_session_id(carrier_stdout: str) -> str | None:
+    """Pull the codex SESSION (thread) id from the `--json` event stream — codex emits a single
+    `{"type":"thread.started","thread_id":"<uuid>"}` line at the start of a run. Returns that thread_id
+    (so a later REPAIR iteration can RESUME this session and keep its full memory), or None if absent."""
+    for line in carrier_stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "thread.started":
+            tid = ev.get("thread_id")
+            if isinstance(tid, str) and tid:
+                return tid
+    return None
+
+
 def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=600,
-                retries=1, prepend_discipline=True, out_dir=None, output_file=None) -> dict:
+                retries=1, prepend_discipline=True, out_dir=None, output_file=None,
+                resume_session=None) -> dict:
     """Launch a Codex carrier deterministically. stdin is ALWAYS closed (the fix for the hang).
     The run is bounded by timeout; TimeoutExpired kills the process and we retry up to `retries`.
     `output_file` captures the carrier's final message via `-o` (producing carriers emit JSON there;
@@ -332,7 +367,13 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
     out_dir = Path(out_dir) if out_dir else (repo / ".agent-runs" / "carrier")
     out_dir.mkdir(parents=True, exist_ok=True)
     full_prompt = compose_prompt(prompt, repo_carrier_discipline(repo), prepend_discipline)
-    argv = build_codex_argv(repo, sandbox, model)
+    # RESUME a prior session (REPAIR re-runs of the producers/implementer) keeps the agent's full memory so
+    # it only emits a small delta; otherwise start fresh. The prompt is still appended last (resume sends it
+    # as a continuation of the existing conversation), and `-o output_file` still captures the deliverable.
+    if resume_session:
+        argv = build_codex_resume_argv(repo, sandbox, resume_session, model)
+    else:
+        argv = build_codex_argv(repo, sandbox, model)
     if output_file:
         argv += ["-o", str(output_file)]
     argv += [full_prompt]
@@ -349,15 +390,19 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
                        ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
         hang = STDIN_HANG_MARKER in stdout and code != 0
         usage = extract_token_usage(stdout)   # token + context spend, from codex's --json stream
+        # capture this run's session id so a later REPAIR iteration can RESUME it; fall back to the id we
+        # resumed (resume reuses the same thread, which codex may or may not re-announce as thread.started).
+        session_id = extract_session_id(stdout) or resume_session
         attempts.append({"attempt": attempt, "timestamp": timestamp, "exit": code,
                          "timed_out": timed_out, "stdin_hang": hang, "frozen": frozen,
                          "killed": killed, "retryable": attempt < retries,
                          "no_output_timeout": no_output_timeout, "log": str(log), "usage": usage})
         if code == 0 and not timed_out and not frozen and not killed and not hang:
-            return {"ok": True, "attempts": attempts, "log": str(log), "usage": usage}
+            return {"ok": True, "attempts": attempts, "log": str(log), "usage": usage,
+                    "session_id": session_id}
         # else retry (timeout/hang/nonzero)
     return {"ok": False, "attempts": attempts, "log": attempts[-1]["log"],
-            "usage": attempts[-1].get("usage")}
+            "usage": attempts[-1].get("usage"), "session_id": session_id}
 
 
 def cmd_run(args) -> int:

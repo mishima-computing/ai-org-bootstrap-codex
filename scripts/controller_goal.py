@@ -444,6 +444,11 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     break        # same preserved work twice -> blind retry won't help; let floor/re-split run
                 prev_sig = sig
             if res.get("outcome") == "converged":
+                # TODO(session-reuse audit): when run_leaf/controller_pipeline surfaces the per-role codex
+                # session ids it used (the in-memory `sessions` map of the repair loop), record them here via
+                # `store.record_session(goal_id, leaf["id"], role, session_id)` for observability. Not wired
+                # yet because the pipeline does not currently return that map up through run_leaf's outcome
+                # dict, and threading it would be an invasive change to the leaf-runner contract.
                 plan = frontier.advance(plan, leaf["id"], "done")
                 leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)
                 # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"

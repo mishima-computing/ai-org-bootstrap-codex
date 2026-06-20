@@ -181,7 +181,7 @@ def _self_test() -> None:
             stdin=subprocess.DEVNULL,
         )
 
-        def fake_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+        def fake_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir, resume_session=None):
             rel = prompt.strip()
             Path(repo, rel).write_bytes(f"written by {rel}\n".encode("utf-8"))
             return {"ok": True, "attempts": [{"exit_code": 0}]}

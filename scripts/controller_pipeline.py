@@ -37,6 +37,11 @@ PROVENANCE_FILE = "provenance-manifest.json"
 WRITE_ROLE_RETRIES = 2
 AUFHEBEN_ROLE = "aufheben-designer"
 
+# On a REPAIR iteration these four roles RESUME their prior codex session (keeping full memory, emitting
+# only a small delta) instead of re-deriving from scratch. aufheben-designer/linon/stefan stay FRESH:
+# aufheben must re-synthesize the changed designer outputs, and linon must stay an independent adversary.
+SESSION_REUSE_ROLES = ("aggressive-designer", "conservative-designer", "genius", "implementer")
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -407,13 +412,13 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
 
 
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
-                   stage_run_id: str, cache: bool) -> tuple[bool, dict | None, dict, dict]:
+                   stage_run_id: str, cache: bool, resume_session=None) -> tuple[bool, dict | None, dict, dict]:
     if role == "linon" and _linon_via_codex_review_enabled():
         return _execute_linon_via_codex_review(repo, stage_run_id)
     contract = _contract(entry, objective, inputs)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
-        repo, entry, contract, stage_run_id, cache
+        repo, entry, contract, stage_run_id, cache, resume_session
     )
     finished_at = _utc_now()
     report_dict = report.to_dict()
@@ -569,11 +574,11 @@ def _preserve_result(repo: Path, stage_run_id: str,
 
 
 def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
-               cache: bool) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
+               cache: bool, resume_session=None) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
     result_path = repo / RESULT_FILE
     if result_path.exists():
         result_path.unlink()
-    report = controller_run.run(repo, contract, run_id, cache=cache)
+    report = controller_run.run(repo, contract, run_id, cache=cache, resume_session=resume_session)
     if entry.write_scope:
         stage_ok = bool(report.ok)
         return stage_ok, None, None, None, report, []
@@ -717,6 +722,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
 
     results: dict[str, dict] = {}
     reports: dict[str, dict] = {}
+    sessions: dict[str, str] = {}   # role -> its last codex session id, so a REPAIR re-run can RESUME it
     summary: dict[str, bool] = {}
     required_ok: dict[str, bool] = {}
     fatal_ok: dict[str, bool] = {}
@@ -761,6 +767,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             if role not in producer_roles:
                 fatal_ok[role] = stage_ok
             reports[role] = report_dict
+            if report_dict.get("session_id"):           # capture the role's session so a REPAIR can RESUME it
+                sessions[role] = report_dict["session_id"]
             stages.append(stage)
             _store_stage_output(role, entry, stage_ok, result, report_dict, results)
             if entry.output_to is None and entry.write_scope:
@@ -781,6 +789,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             required_ok[role] = stage_ok
             fatal_ok[role] = stage_ok
             reports[role] = report_dict
+            if report_dict.get("session_id"):
+                sessions[role] = report_dict["session_id"]
             stages.append(stage)
             _store_stage_output(role, entry, stage_ok, result, report_dict, results)
             if not stage_ok:
@@ -818,8 +828,14 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 inputs = {upstream: results[upstream]
                           for upstream in predecessors[role] if upstream in results}
             stage_run_id = f"{run_id}-repair{repair_iterations}-{role}"
+            # RESUME the prior session for the producers/implementer ONLY (full memory, small delta);
+            # aufheben/other roles stay fresh. Chained: iteration N+1 resumes iteration N's session.
+            resume = sessions.get(role) if role in SESSION_REUSE_ROLES else None
             stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
-                                                                  inputs, stage_run_id, cache)
+                                                                  inputs, stage_run_id, cache,
+                                                                  resume_session=resume)
+            if report_dict.get("session_id"):           # chain the next repair onto this iteration's session
+                sessions[role] = report_dict["session_id"]
             summary[role] = bool(report_dict.get("ok"))
             required_ok[role] = stage_ok
             reports[role] = report_dict

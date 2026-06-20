@@ -21,10 +21,12 @@ import controller_verifiers as verifiers    # noqa: E402
 from controller_evidence import RunJournal, sha256_text  # noqa: E402
 
 
-def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir, output_file=None):
+def _default_carrier_runner(repo, prompt, sandbox, *, timeout, retries, out_dir, output_file=None,
+                            resume_session=None):
     import carrier_harness
     return carrier_harness.run_carrier(repo, prompt, sandbox, timeout=timeout, retries=retries,
-                                       out_dir=out_dir, prepend_discipline=True, output_file=output_file)
+                                       out_dir=out_dir, prepend_discipline=True, output_file=output_file,
+                                       resume_session=resume_session)
 
 
 PRODUCER_OUTPUT_RETRIES = 2   # extra carrier re-runs when a producer left no deliverable
@@ -79,7 +81,8 @@ def _ensure_producer_output(repo, contract, output_schema, output_path, carrier,
 def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin_gates=True,
                  declared=None, carrier_runner=None, clock=None,
                  quality_gate_enabled=False, cache_enabled=False,
-                 output_schema=None, output_path=None) -> models.ControllerRunReport:
+                 output_schema=None, output_path=None,
+                 resume_session=None) -> models.ControllerRunReport:
     """Execute one contract deterministically and return the report (await_semantic_judgment)."""
     repo = Path(repo)
     contract = contract if isinstance(contract, models.CarrierContract) else \
@@ -115,12 +118,13 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
         if carrier_runner is not None:
             carrier = carrier_runner(repo, contract.prompt, contract.sandbox,
                                      timeout=contract.timeout, retries=contract.retries,
-                                     out_dir=journal.dir)
+                                     out_dir=journal.dir, resume_session=resume_session)
         else:
             ofile = (repo / output_path) if output_path else None
             carrier = _default_carrier_runner(repo, contract.prompt, contract.sandbox,
                                               timeout=contract.timeout, retries=contract.retries,
-                                              out_dir=journal.dir, output_file=ofile)
+                                              out_dir=journal.dir, output_file=ofile,
+                                              resume_session=resume_session)
     carrier_ok = bool(carrier.get("ok"))
     attempts = carrier.get("attempts", [])
     journal.append("run_carrier", {"ok": carrier_ok, "cache_hit": cache_hit, "attempts": attempts})
@@ -255,6 +259,7 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
         changed_files=scope_report.changed, scope=scope_report.to_dict(), diff_artifact=diff_art,
         quality=quality, verifier_results=[v.to_dict() for v in verifier_runs],
         unresolved_failures=unresolved,
+        session_id=carrier.get("session_id") if isinstance(carrier, dict) else None,
     )
     journal.append("package_evidence", {"ok": ok, "report": report.to_dict()})
     # await_semantic_judgment: the report is returned; the LLM/owner decides. The workflow does not.

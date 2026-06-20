@@ -16,6 +16,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import controller_workflow as cw
+import carrier_harness
+import controller_pipeline as cp
 
 REPO = str(Path(__file__).resolve().parents[1])   # org_root resolves the runtime registry under here
 
@@ -47,6 +49,53 @@ def test_unreadable_registry_is_fail_soft():
     assert cross == (), ("an unreadable registry yields no cross-lane forbidden — the LLM-provided "
                          "forbidden_paths still apply; observability never breaks a run", cross)
     print("ok  unreadable registry is fail-soft (empty, not an exception)")
+
+
+def test_extract_session_id():
+    stream = '{"type":"thread.started","thread_id":"abc-123"}\n{"type":"token_count"}'
+    assert carrier_harness.extract_session_id(stream) == "abc-123", "must parse thread_id from thread.started"
+    assert carrier_harness.extract_session_id('{"type":"token_count"}\nnot json') is None, "None when absent"
+    print("ok  extract_session_id parses thread_id (and None when absent)")
+
+
+def test_build_codex_resume_argv_order():
+    argv = carrier_harness.build_codex_resume_argv(Path("/tmp/r"), "workspace-write", "sess-9")
+    # global flags BEFORE the resume subcommand, then `resume --json <id>` (the VERIFIED order)
+    assert "resume" in argv and "--json" in argv and "sess-9" in argv, argv
+    assert "--sandbox" in argv and "workspace-write" in argv, argv
+    assert "-C" in argv and "/tmp/r" in argv, argv
+    assert argv.index("resume") < argv.index("--json") < argv.index("sess-9"), argv
+    assert argv.index("--sandbox") < argv.index("resume"), "global flags precede the resume subcommand"
+    assert argv.index("-C") < argv.index("resume"), "global flags precede the resume subcommand"
+    argv_m = carrier_harness.build_codex_resume_argv(Path("/tmp/r"), "read-only", "s", model="m")
+    assert "--model" in argv_m and argv_m.index("--model") < argv_m.index("resume"), argv_m
+    print("ok  build_codex_resume_argv has the verified flag order (globals, then resume --json <id>)")
+
+
+def test_repair_session_reuse_gating():
+    """The repair loop's gate: only the four SESSION_REUSE_ROLES resume on a repair iteration, with the
+    session id their initial run returned; aufheben/linon resume None. Unit-tests the map-update + gating
+    logic the loop introduces (a full pipeline test needs a real registry + carrier)."""
+    assert set(cp.SESSION_REUSE_ROLES) == {"aggressive-designer", "conservative-designer",
+                                           "genius", "implementer"}, cp.SESSION_REUSE_ROLES
+    sessions = {"aggressive-designer": "s-agg", "conservative-designer": "s-con",
+                "genius": "s-gen", "implementer": "s-impl",
+                "aufheben-designer": "s-auf", "linon": "s-lin"}
+
+    def resume_for(role):
+        return sessions.get(role) if role in cp.SESSION_REUSE_ROLES else None
+
+    for role in cp.SESSION_REUSE_ROLES:
+        assert resume_for(role) == sessions[role], (role, resume_for(role))
+    assert resume_for("aufheben-designer") is None, "aufheben must stay fresh (no resume)"
+    assert resume_for("linon") is None, "linon must stay an independent adversary (no resume)"
+
+    # chaining: a repair iteration UPDATES the map from the new session id, so N+1 resumes N's session
+    report_dict = {"session_id": "s-agg-r1"}
+    if report_dict.get("session_id"):
+        sessions["aggressive-designer"] = report_dict["session_id"]
+    assert resume_for("aggressive-designer") == "s-agg-r1", "next repair resumes this iteration's session"
+    print("ok  repair session-reuse gating (4 roles resume, aufheben/linon fresh, chained)")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,25 @@ class GoalStore:
         self._emit({"type": "state", "op": "update", "goal_id": goal_id, **fields})
         return rec
 
+    def record_session(self, goal_id: str, leaf_id: str, role: str, session_id: str) -> dict | None:
+        """U-like OPERATION (audit) — record a role's codex SESSION id under the goal's `sessions` map,
+        keyed by `f"{leaf_id}:{role}"`, and flow it to the log. This is observability for the REPAIR
+        session-reuse (which producer/implementer session a repair iteration resumed); the functional reuse
+        is the in-memory `sessions` map in controller_pipeline's repair loop, not this record. Returns the
+        merged record, or None for an empty session_id / unknown goal."""
+        if not session_id or self.read(goal_id) is None:
+            return None
+        key = f"{leaf_id}:{role}"
+        with self._lock:
+            rec = self.read(goal_id) or {"goal_id": goal_id}
+            sessions = dict(rec.get("sessions") or {})
+            sessions[key] = session_id
+            rec["sessions"] = sessions
+            self._write(goal_id, rec)
+        self._emit({"type": "state", "op": "record_session", "goal_id": goal_id,
+                    "leaf_id": leaf_id, "role": role, "session_id": session_id})
+        return rec
+
     def delete(self, goal_id: str) -> None:
         """D — drop the record, its steering sidecar, and both git refs."""
         with self._lock:
@@ -257,6 +276,15 @@ def self_test() -> int:
             ("prefer official tools", "goal"), ("rework the parser", "leaf-7")]
         assert st.read_steering("goal-x", since=1) == [
             {"seq": 2, "text": "rework the parser", "target": "leaf-7"}], "since= filters"
+        # record_session: a role's codex session id lands under the goal's `sessions` map (audit-only) and
+        # is flowed to the log; empty/unknown -> None.
+        events = []
+        st2 = GoalStore(str(repo), emit=events.append)
+        assert st2.record_session("goal-x", "leaf-3", "implementer", "sess-42") is not None
+        assert st2.read("goal-x")["sessions"] == {"leaf-3:implementer": "sess-42"}, "session recorded by key"
+        assert st2.record_session("goal-x", "leaf-3", "genius", "") is None, "empty session_id -> None"
+        assert st2.record_session("nope", "leaf-3", "genius", "s") is None, "unknown goal -> None"
+        assert any(e.get("op") == "record_session" for e in events), "record_session is logged"
         # load_all + delete
         assert "goal-x" in st.read_all()
         st.delete("goal-x")

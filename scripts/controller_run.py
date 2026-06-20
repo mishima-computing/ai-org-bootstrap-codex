@@ -82,7 +82,8 @@ def _inject_output_schema(repo: Path, contract: dict, schema_file: str) -> dict:
     return contract
 
 
-def run(repo, contract: dict, run_id: str, *, cache=True) -> workflow.models.ControllerRunReport:
+def run(repo, contract: dict, run_id: str, *, cache=True,
+        resume_session=None) -> workflow.models.ControllerRunReport:
     repo = Path(repo).resolve()
     role = contract.get("role")
     info = _registry_role(repo, role)
@@ -90,7 +91,8 @@ def run(repo, contract: dict, run_id: str, *, cache=True) -> workflow.models.Con
     is_producing = not info["write_scope"]  # read-only producers / verifiers emit JSON, write no files
 
     contract = _inject_role_instructions(repo, contract, info["role_file"])   # the carrier must SEE its role
-    kwargs = {"cache_enabled": cache, "quality_gate_enabled": is_implementer}
+    kwargs = {"cache_enabled": cache, "quality_gate_enabled": is_implementer,
+              "resume_session": resume_session}
     if is_producing:
         contract = _inject_output_schema(repo, contract, info["schema"])
         kwargs["output_schema"] = str(org_root(repo) / info["schema"])   # schema lives in the org install
