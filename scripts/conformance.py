@@ -24,8 +24,10 @@ Design:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 import time
 import urllib.error
 import urllib.parse
@@ -209,8 +211,9 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
 # replicated for free. The per-kind CHECKER is the real, differentiated work and is NOT done: a library has
 # no process to run (it needs API introspection + API-diff), a service needs boot + protocol-driven testing.
 # Each slot below exists so a future checker drops in here; until then it returns an HONEST no-op that is
-# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass.
-_SLOT_KINDS = ("library", "http_service", "rpc_service", "batch_job")
+# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass. `cli`, `http_service`, and
+# `library` are now real checkers; `rpc_service` and `batch_job` remain slots.
+_SLOT_KINDS = ("rpc_service", "batch_job")
 
 
 def _empty_slot(kind: str) -> dict:
@@ -221,10 +224,78 @@ def _empty_slot(kind: str) -> dict:
             "slot": kind, "status": "no-checker-yet"}
 
 
+_LIBRARY_PROBE_MARKER = "__LIBPROBE__ "
+
+
+def _library_probe_source(module: str, import_paths: list, symbols: list) -> str:
+    """A self-contained Python probe: import the module and report (via a single marker line of JSON) whether
+    it imported and which declared symbols are missing. It always exits 0 if it ran at all — the outcome is in
+    the marker, so 'the probe could not run' (no marker) is distinguishable from 'imported, symbols missing'."""
+    return (
+        "import importlib, sys, json\n"
+        f"sys.path[:0] = {list(import_paths)!r}\n"
+        "try:\n"
+        f"    m = importlib.import_module({module!r})\n"
+        "except Exception as e:\n"
+        f"    print({_LIBRARY_PROBE_MARKER!r} + json.dumps("
+        "{'import_error': type(e).__name__ + ': ' + str(e)}))\n"
+        "    sys.exit(0)\n"
+        f"missing = [s for s in {list(symbols)!r} if not hasattr(m, s)]\n"
+        f"print({_LIBRARY_PROBE_MARKER!r} + json.dumps({{'missing': missing}}))\n"
+    )
+
+
+def _library_probe_findings(res: RunResult, module: str, symbols: list) -> list[dict]:
+    """Parse the probe's marker line into findings. No marker -> the probe could not run (critical, the
+    introspection itself failed); import_error -> the module does not import (critical); each missing symbol
+    -> the declared public surface is absent (major)."""
+    line = next((ln for ln in res.stdout.splitlines() if ln.startswith(_LIBRARY_PROBE_MARKER)), None)
+    if line is None:
+        return [_finding(
+            "library_probe", "critical", False,
+            f"could not introspect the library: the import probe produced no result (exit {res.returncode})",
+            module=module, stderr_tail=_normalize(res.stderr)[-800:])]
+    try:
+        data = json.loads(line[len(_LIBRARY_PROBE_MARKER):])
+    except ValueError:
+        return [_finding("library_probe", "critical", False,
+                         "the import probe emitted an unparseable result", module=module)]
+    if data.get("import_error"):
+        return [_finding("library_import", "critical", False,
+                         f"module {module!r} failed to import: {data['import_error']}", module=module)]
+    return [_finding(
+        "exported_symbol", "major", False,
+        f"declared export {sym!r} does not resolve on module {module!r}", module=module, symbol=sym)
+        for sym in data.get("missing", [])]
+
+
 def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
-    """SLOT (ADR-0009 #1). Fill with: import the built package, assert declared modules/symbols resolve and
-    signatures match, run an API-diff against the baseline (cargo-semver-checks / japicmp / go apidiff)."""
-    return _empty_slot("library")
+    """Black-box library checker (ADR-0009 #1). Runs the declared build/install, then an import probe THROUGH
+    the runner (never importing the built artifact in-process): import the module and assert each declared
+    exported symbol resolves. A broken build skips the probe (its failure would be derived). Signatures and
+    baseline API-diff are a later addition; this pins importability + public-surface presence."""
+    profile = (contract.get("conformance") or {}).get("library")
+    if contract.get("deliverable_kind") != "library" or not profile:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    findings = install_findings(profile, runner, cwd=cwd)
+    checks_run = len(profile.get("build_and_install", {}).get("commands", []))
+    if not any(f["check"] == "build_and_install" for f in findings):
+        module = profile.get("module") or ""
+        symbols = profile.get("exported_symbols") or []
+        import_paths = list(profile.get("import_paths") or ["."])
+        python = profile.get("python") or "python3"
+        probe = _library_probe_source(module, import_paths, symbols)
+        res = runner(f"{python} -c {shlex.quote(probe)}", cwd=cwd)
+        checks_run += 1
+        findings += _library_probe_findings(res, module, symbols)
+
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": checks_run,
+    }
 
 
 def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:

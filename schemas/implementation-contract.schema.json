@@ -249,6 +249,31 @@
           }
         }
       }
+    },
+    {
+      "$comment": "A library deliverable MUST carry a checkable library conformance profile (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "library"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "library"
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -371,8 +396,52 @@
       "additionalProperties": false
     },
     "library_profile": {
-      "$comment": "ADR-0009 #1 remainder \u2014 EMPTY SLOT, not yet enforced. Intended fields: packages, modules, exported_symbols, signatures, compatibility{baseline_version, allowed_breaking_changes}. Checker is NOT subprocess execution (a library has no entrypoint to run) \u2014 it is language-specific API introspection (import the built package, assert declared symbols resolve and signatures match) plus an API-diff gate against the baseline (cargo-semver-checks / japicmp / go apidiff / TS API Extractor). Filled when a library deliverable first needs it.",
-      "type": "object"
+      "description": "Black-box library contract: import the built module and assert its declared public surface resolves. The checker runs an import probe (import the module, then check each exported symbol is present) THROUGH the same runner as the CLI checker \u2014 it never imports the built artifact in-process. Signatures and an API-diff against a baseline are a later addition; this first cut pins module-importability + exported-symbol presence, the load-bearing 'the public surface exists' contract.",
+      "type": "object",
+      "required": [
+        "module",
+        "exported_symbols"
+      ],
+      "properties": {
+        "build_and_install": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "description": "Shell commands that build/install the package in a clean environment, run in order before the import probe. A non-zero exit is a critical conformance finding.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "module": {
+          "description": "The importable module path the probe imports, e.g. `jsonpick` or `mypkg.core`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "import_paths": {
+          "description": "Directories prepended to sys.path before the import, relative to the workspace (default: the workspace root). Use when the package is importable from a source dir without being installed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exported_symbols": {
+          "description": "Attribute names that MUST resolve on the imported module (functions, classes, constants) \u2014 the declared public surface. Each missing one is a major finding.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "python": {
+          "description": "Interpreter used to run the import probe (default `python3`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "http_service_profile": {
       "description": "Black-box HTTP service contract: declared start command, readiness URL, and concrete request->response examples. The checker starts the service, waits until base_url returns any HTTP response, then compares status and capped body substrings for each example.",

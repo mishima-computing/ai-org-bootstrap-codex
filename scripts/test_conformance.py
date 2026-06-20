@@ -160,35 +160,128 @@ def test_normalization_tolerates_volatile_output():
     print("ok  normalization tolerates timestamps/temp-paths/hex on exact stdout")
 
 
+def _lib_contract(profile):
+    return {"role_id": "aufheben-designer", "deliverable_kind": "library", "conformance": {"library": profile}}
+
+
+def _probe_result(payload, returncode=0, stderr=""):
+    """A runner whose probe call returns a canned marker line (the JSON outcome). payload=None -> no marker
+    line at all (the probe could not run)."""
+    body = conf._LIBRARY_PROBE_MARKER + json.dumps(payload) if payload is not None else ""
+    return lambda cmd, *, cwd=None, stdin=None: R(returncode, body, stderr)
+
+
+def test_library_all_symbols_resolve_passes():
+    rep = conf.run_library_conformance(
+        _lib_contract({"module": "jsonpick", "exported_symbols": ["pick", "main"]}),
+        _probe_result({"missing": []}))
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert rep["checks_run"] == 1, rep  # one probe, no install commands
+    print("ok  library: module imports and all exported symbols resolve -> passes")
+
+
+def test_library_missing_symbol_is_major():
+    rep = conf.run_library_conformance(
+        _lib_contract({"module": "jsonpick", "exported_symbols": ["pick", "main"]}),
+        _probe_result({"missing": ["main"]}))
+    sym = [f for f in rep["findings"] if f["check"] == "exported_symbol"]
+    assert not rep["passed"] and sym and sym[0]["symbol"] == "main" and sym[0]["severity"] == "major", rep
+    print("ok  library: a declared export that does not resolve -> exported_symbol major")
+
+
+def test_library_import_error_is_critical():
+    rep = conf.run_library_conformance(
+        _lib_contract({"module": "nope", "exported_symbols": ["x"]}),
+        _probe_result({"import_error": "ModuleNotFoundError: No module named 'nope'"}))
+    crit = [f for f in rep["findings"] if f["check"] == "library_import"]
+    assert not rep["passed"] and crit and crit[0]["severity"] == "critical", rep
+    print("ok  library: a module that fails to import -> library_import critical")
+
+
+def test_library_no_probe_result_is_critical():
+    # no marker line (python missing / crashed before printing) -> the introspection itself failed; fail
+    # closed with a critical finding rather than a vacuous pass.
+    rep = conf.run_library_conformance(
+        _lib_contract({"module": "m", "exported_symbols": ["x"]}),
+        _probe_result(None, returncode=127, stderr="python3: not found"))
+    crit = [f for f in rep["findings"] if f["check"] == "library_probe"]
+    assert not rep["passed"] and crit and crit[0]["severity"] == "critical", rep
+    print("ok  library: a probe that yields no result -> library_probe critical (no vacuous pass)")
+
+
+def test_library_build_failure_skips_probe():
+    profile = {"module": "m", "exported_symbols": ["x"], "build_and_install": {"commands": ["pip install ."]}}
+    rep = conf.run_library_conformance(_lib_contract(profile), fake_runner({"pip install .": R(1, "", "boom")}))
+    assert not rep["passed"]
+    assert any(f["check"] == "build_and_install" and f["severity"] == "critical" for f in rep["findings"]), rep
+    assert not any(f["check"] in ("library_probe", "library_import", "exported_symbol") for f in rep["findings"]), rep
+    print("ok  library: a broken build is critical and skips the import probe")
+
+
+def test_library_probe_command_carries_module_and_import_paths():
+    seen = {}
+
+    def capture(cmd, *, cwd=None, stdin=None):
+        seen["cmd"] = cmd
+        return R(0, conf._LIBRARY_PROBE_MARKER + json.dumps({"missing": []}), "")
+
+    conf.run_library_conformance(
+        _lib_contract({"module": "mypkg.core", "exported_symbols": ["f"], "import_paths": ["src"]}), capture)
+    assert "mypkg.core" in seen["cmd"] and "src" in seen["cmd"] and "importlib" in seen["cmd"], seen
+    print("ok  library: the probe command carries the declared module + import_paths")
+
+
+def test_schema_library_profile_requires_module_and_symbols():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    ok = {**base, "deliverable_kind": "library", "conformance": {"library": {"module": "m", "exported_symbols": ["f"]}}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert not v.is_valid({**base, "deliverable_kind": "library", "conformance": {"library": {"module": "m"}}}), \
+        "library profile requires exported_symbols"
+    assert not v.is_valid({**base, "deliverable_kind": "library",
+                           "conformance": {"library": {"module": "m", "exported_symbols": []}}}), \
+        "exported_symbols must be non-empty (minItems 1)"
+    print("ok  schema: library profile requires module + non-empty exported_symbols")
+
+
 def test_dispatch_routes_cli_and_empty_slots():
     # the single entry point: cli routes to the real checker; the other four kinds route to their empty slot
     # (recognized, unchecked, never a silent pass); an unknown/absent kind is simply not applicable.
     profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
     cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
     assert cli["applicable"] and cli["passed"], cli
-    for kind in ("library", "rpc_service", "batch_job"):  # http_service now has a real checker
+    for kind in ("rpc_service", "batch_job"):  # cli, http_service, library now have real checkers
         rep = conf.run_conformance({"deliverable_kind": kind, "conformance": {kind: {}}}, fake_runner({}))
         assert rep["applicable"] is False and rep["passed"] is True, (kind, rep)
         assert rep["slot"] == kind and rep["status"] == "no-checker-yet", (kind, rep)
     assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
         "applicable": False, "passed": True, "findings": [], "checks_run": 0}
-    print("ok  dispatch: cli -> real checker, 4 kinds -> empty slot, none -> not applicable")
+    print("ok  dispatch: cli -> real checker, 2 remaining kinds -> empty slot, none -> not applicable")
 
 
 def test_slot_kind_is_streamed_not_silent():
     # a recognized-but-unchecked kind must emit a `slot_unchecked` stream event (no silent cap), while the
     # convergence findings stay untouched.
-    results = {"aufheben-designer": {"deliverable_kind": "library", "conformance": {"library": {}}}}
+    results = {"aufheben-designer": {"deliverable_kind": "rpc_service", "conformance": {"rpc_service": {}}}}
     events = []
     orig = cp._stream_append
     cp._stream_append = lambda repo, ev: events.append(ev)
     try:
-        rep = cp._shadow_conformance("/tmp/leaf", results, "run-lib", runner=fake_runner({}))
+        rep = cp._shadow_conformance("/tmp/leaf", results, "run-rpc", runner=fake_runner({}))
     finally:
         cp._stream_append = orig
-    assert rep and rep.get("slot") == "library", rep
+    assert rep and rep.get("slot") == "rpc_service", rep
     slot_events = [e for e in events if e.get("type") == "slot_unchecked"]
-    assert slot_events and slot_events[0]["slot"] == "library", events
+    assert slot_events and slot_events[0]["slot"] == "rpc_service", events
     assert cp._apply_conformance_gate([], rep, "block") == [], "an empty slot folds no findings even in block"
     print("ok  empty slot streams slot_unchecked (visible, not silent); folds nothing")
 
@@ -208,10 +301,10 @@ def test_schema_other_kinds_have_optional_slots():
             "fallback_plan": "f", "handoff_to_implementer": "h"}
     # the other kinds are valid deliverable_kinds and their conformance slot is OPTIONAL (empty slot — not
     # yet enforced), so declaring the kind without a profile still validates.
-    for kind in ("library", "rpc_service", "batch_job"):  # http_service now has a real checker
+    for kind in ("rpc_service", "batch_job"):  # cli, http_service, library now require their own profile
         assert v.is_valid({**base, "deliverable_kind": kind}), (kind, "kind alone must validate")
         assert v.is_valid({**base, "deliverable_kind": kind, "conformance": {kind: {}}}), (kind, "empty profile ok")
-    print("ok  schema: other-kind slots present and optional (empty slots, not enforced)")
+    print("ok  schema: remaining-kind slots present and optional (empty slots, not enforced)")
 
 
 def test_schema_cli_profile_required_iff_cli():
@@ -241,9 +334,13 @@ def test_schema_cli_profile_required_iff_cli():
         "examples": [{"invocation": "--help", "expected_status": 0}],
     }}}
     assert validator.is_valid(cli_ok), list(validator.iter_errors(cli_ok))
-    # 4) a library deliverable does NOT require a cli profile (the schema is not a universal checklist)
-    assert validator.is_valid({**base, "deliverable_kind": "library"})
-    print("ok  schema: cli profile required iff deliverable_kind==cli; non-cli & legacy still valid")
+    # 4) a library deliverable requires a LIBRARY profile, not a cli one (the schema is not a universal checklist)
+    lib_ok = {**base, "deliverable_kind": "library",
+              "conformance": {"library": {"module": "m", "exported_symbols": ["f"]}}}
+    assert validator.is_valid(lib_ok), list(validator.iter_errors(lib_ok))
+    assert not validator.is_valid({**base, "deliverable_kind": "library"}), \
+        "a library deliverable must require a conformance.library profile"
+    print("ok  schema: cli profile required iff deliverable_kind==cli; library needs its own profile; legacy valid")
 
 
 def test_shadow_gate_streams_but_does_not_block():
