@@ -268,6 +268,54 @@ def test_schema_library_profile_requires_module_and_symbols():
     print("ok  schema: library profile requires module + non-empty exported_symbols")
 
 
+def test_library_powershell_probe_command_uses_pwsh():
+    captured = {}
+
+    def capture(cmd, *, cwd=None, stdin=None):
+        captured["cmd"] = cmd
+        return R(0, conf._LIBRARY_PROBE_MARKER + json.dumps({"missing": []}), "")
+
+    conf.run_library_conformance(
+        _lib_contract({"module": "MyMod", "exported_symbols": ["Get-Thing"], "language": "powershell"}), capture)
+    cmd = captured["cmd"]
+    assert cmd.startswith("pwsh ") and "Import-Module" in cmd and "MyMod" in cmd and "Get-Thing" in cmd, cmd
+    assert "python3 -c" not in cmd, cmd
+    print("ok  library(powershell): the probe runs through pwsh + Import-Module, carrying module + symbols")
+
+
+def test_library_powershell_passes_and_missing_via_shared_parser():
+    # the powershell probe emits the same __LIBPROBE__ marker, so the shared parser yields the same findings.
+    ps = {"module": "MyMod", "exported_symbols": ["Get-Thing"], "language": "powershell"}
+    ok = conf.run_library_conformance(_lib_contract(ps), _probe_result({"missing": []}))
+    assert ok["applicable"] and ok["passed"], ok
+    bad = conf.run_library_conformance(_lib_contract(ps), _probe_result({"missing": ["Get-Thing"]}))
+    sym = [f for f in bad["findings"] if f["check"] == "exported_symbol"]
+    assert not bad["passed"] and sym and sym[0]["symbol"] == "Get-Thing", bad
+    print("ok  library(powershell): shared parser — all-resolve passes; a missing cmdlet -> exported_symbol major")
+
+
+def test_schema_library_language_is_constrained():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+
+    def lib(profile):
+        return {**base, "deliverable_kind": "library", "conformance": {"library": profile}}
+
+    assert v.is_valid(lib({"module": "m", "exported_symbols": ["f"], "language": "powershell"})), "powershell ok"
+    assert v.is_valid(lib({"module": "m", "exported_symbols": ["f"]})), "language optional (default python)"
+    assert not v.is_valid(lib({"module": "m", "exported_symbols": ["f"], "language": "bash"})), "language is an enum"
+    print("ok  schema: library language is python|powershell, optional (default python)")
+
+
 def _json_contract(files):
     return {"role_id": "aufheben-designer", "deliverable_kind": "json", "conformance": {"json": {"files": files}}}
 

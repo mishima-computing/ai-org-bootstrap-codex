@@ -518,8 +518,16 @@
           }
         },
         "python": {
-          "description": "Interpreter used to run the import probe (default `python3`).",
+          "description": "Interpreter used to run the import probe when language is `python` (default `python3`).",
           "type": "string"
+        },
+        "language": {
+          "description": "The module's language, selecting how the public surface is introspected: `python` (default) imports the module and checks attributes via the python interpreter; `powershell` imports it with `Import-Module` and checks the exported commands via `pwsh`. Either way `module` names the module (or path) and `exported_symbols` are the names that must resolve.",
+          "type": "string",
+          "enum": [
+            "python",
+            "powershell"
+          ]
         }
       },
       "additionalProperties": false

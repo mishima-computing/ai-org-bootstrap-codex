@@ -278,6 +278,46 @@ def _library_probe_findings(res: RunResult, module: str, symbols: list) -> list[
         for sym in data.get("missing", [])]
 
 
+def _ps_single_quote(value: str) -> str:
+    """Quote a value as a PowerShell single-quoted string literal (doubling embedded quotes)."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _powershell_library_probe_source(module: str, import_paths: list, symbols: list) -> str:
+    """The pwsh counterpart of the python probe: Import-Module the module and report — on the SAME
+    `__LIBPROBE__` marker line, as JSON — the import error or the declared exported commands that do not
+    resolve, so `_library_probe_findings` parses it unchanged. Built by placeholder substitution (PowerShell's
+    `{}`/`@{}` collide with f-string braces)."""
+    paths = "@(" + ",".join(_ps_single_quote(p) for p in import_paths) + ")"
+    syms = "@(" + ",".join(_ps_single_quote(s) for s in symbols) + ")"
+    marker = repr(_LIBRARY_PROBE_MARKER)  # '__LIBPROBE__ ' — a valid PowerShell single-quoted literal too
+    tmpl = (
+        "$ErrorActionPreference='Stop';"
+        "$paths=__PATHS__;"
+        "if($paths.Count -gt 0){$env:PSModulePath=($paths -join [IO.Path]::PathSeparator)+"
+        "[IO.Path]::PathSeparator+$env:PSModulePath};"
+        "$mod=__MOD__;"
+        "try{$m=Import-Module $mod -Force -PassThru -ErrorAction Stop}"
+        "catch{Write-Output (__MARKER__+(@{import_error=($_.Exception.GetType().Name+': '+"
+        "$_.Exception.Message)}|ConvertTo-Json -Compress));exit 0};"
+        "$exported=@($m.ExportedCommands.Keys);"
+        "$missing=@();foreach($s in __SYMS__){if($exported -notcontains $s){$missing+=$s}};"
+        "Write-Output (__MARKER__+(@{missing=@($missing)}|ConvertTo-Json -Compress))"
+    )
+    return (tmpl.replace("__PATHS__", paths).replace("__SYMS__", syms)
+            .replace("__MOD__", _ps_single_quote(module)).replace("__MARKER__", marker))
+
+
+def _library_probe_command(profile: dict, module: str, import_paths: list, symbols: list) -> str:
+    """The shell command that runs the import probe for the profile's language. `python` -> the interpreter
+    with `-c`; `powershell` -> `pwsh -NoProfile -Command`. Both emit the shared `__LIBPROBE__` marker line, so
+    only the command differs."""
+    if (profile.get("language") or "python").lower() == "powershell":
+        return f"pwsh -NoProfile -Command {shlex.quote(_powershell_library_probe_source(module, import_paths, symbols))}"
+    interpreter = profile.get("python") or "python3"
+    return f"{interpreter} -c {shlex.quote(_library_probe_source(module, import_paths, symbols))}"
+
+
 def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
     """Black-box library checker (ADR-0009 #1). Runs the declared build/install, then an import probe THROUGH
     the runner (never importing the built artifact in-process): import the module and assert each declared
@@ -293,9 +333,7 @@ def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str
         module = profile.get("module") or ""
         symbols = profile.get("exported_symbols") or []
         import_paths = list(profile.get("import_paths") or ["."])
-        python = profile.get("python") or "python3"
-        probe = _library_probe_source(module, import_paths, symbols)
-        res = runner(f"{python} -c {shlex.quote(probe)}", cwd=cwd)
+        res = runner(_library_probe_command(profile, module, import_paths, symbols), cwd=cwd)
         checks_run += 1
         findings += _library_probe_findings(res, module, symbols)
 
