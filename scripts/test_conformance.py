@@ -39,6 +39,31 @@ def _cli_contract(profile):
     return {"role_id": "aufheben-designer", "deliverable_kind": "cli", "conformance": {"cli": profile}}
 
 
+def test_missing_artifact_is_one_clear_finding_not_example_spam():
+    # surfaced by a live run: the implementer wrote no file, so `python3 jsonpick.py` returned file-not-found
+    # for every example. The gate must say "artifact_missing" ONCE, not emit N derived example failures.
+    import tempfile
+    d = tempfile.mkdtemp(prefix="conf-missing-")        # empty workspace, no jsonpick.py
+    profile = {
+        "entrypoint": {"invocation": "python3 jsonpick.py"},
+        "examples": [{"invocation": "--help", "expected_status": 0},
+                     {"invocation": "", "expected_status": 2},
+                     {"invocation": "a.b", "expected_status": 0}],
+    }
+    def runner(cmd, *, cwd=None, stdin=None):                # would return 2 (file-not-found) for everything
+        return R(2, "", "can't open file 'jsonpick.py'")
+    rep = conf.run_cli_conformance(_cli_contract(profile), runner, cwd=d)
+    assert rep["passed"] is False, rep
+    checks = [f["check"] for f in rep["findings"]]
+    assert checks == ["artifact_missing"], ("one clear finding, not example spam", checks)
+    assert rep["findings"][0]["severity"] == "critical", rep["findings"]
+    # when the artifact IS present, examples run normally (no false artifact_missing)
+    Path(d, "jsonpick.py").write_text("x")
+    rep2 = conf.run_cli_conformance(_cli_contract(profile), runner, cwd=d)
+    assert all(f["check"] != "artifact_missing" for f in rep2["findings"]), rep2["findings"]
+    print("ok  missing artifact -> one critical artifact_missing (not N example failures); present -> examples run")
+
+
 def test_non_cli_is_not_applicable():
     # a contract without a cli profile must be a vacuous pass — the gate never fabricates a finding it
     # cannot ground, and is a no-op for library/service deliverables.

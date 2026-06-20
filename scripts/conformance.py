@@ -136,6 +136,32 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
     return findings
 
 
+_SCRIPT_EXTS = (".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".rb", ".pl")
+
+
+def _missing_entrypoint_artifact(profile: dict, cwd: Optional[str]) -> Optional[str]:
+    """If the entrypoint names a concrete file (a script path) that is NOT present in the workspace, return
+    that token. Distinguishes "nothing was built/delivered" (one clear finding) from "built but wrong" (the
+    example failures) — without it, a missing artifact makes every example fail with the same file-not-found
+    exit and reads as a buggy build. Heuristic and conservative: only a token that clearly names a file is
+    checked; a bare command (`mytool`) or a module launch (`python -m pkg`) is left to the examples."""
+    if not cwd:
+        return None
+    inv = (profile.get("entrypoint") or {}).get("invocation", "")
+    tokens = inv.split()
+    if "-m" in tokens:                                         # `python -m pkg` has no file token to check
+        return None
+    for tok in tokens:
+        if tok.startswith("-"):
+            continue
+        names_file = tok.endswith(_SCRIPT_EXTS) or ("/" in tok and not tok.endswith("/"))
+        if names_file:
+            cand = tok if os.path.isabs(tok) else os.path.join(cwd, tok)
+            if not os.path.exists(cand):
+                return tok
+    return None
+
+
 def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
     """Top-level gate entry. Returns a report:
         {applicable, passed, findings, checks_run}
@@ -148,7 +174,15 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
 
     findings = install_findings(profile, runner, cwd=cwd)
     build_broke = any(f["check"] == "build_and_install" for f in findings)
-    if not build_broke:
+    missing = None if build_broke else _missing_entrypoint_artifact(profile, cwd)
+    if missing:
+        # one clear finding instead of N derived file-not-found example failures: nothing was delivered to run.
+        findings.append(_finding(
+            "artifact_missing", "critical", False,
+            f"the entrypoint artifact '{missing}' is not present in the workspace — nothing was "
+            f"built/delivered to verify (the implementer wrote no file, or it did not merge back)",
+            artifact=missing))
+    elif not build_broke:
         findings += example_findings(profile, runner, cwd=cwd)
 
     checks_run = len(profile.get("build_and_install", {}).get("commands", [])) + len(profile.get("examples", []))
