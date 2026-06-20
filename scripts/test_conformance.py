@@ -348,6 +348,16 @@ def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
     print("ok  closed loop: a block gate that fails keeps the loop open (linon-clean no longer converges)")
 
 
+def test_gate_error_fails_closed_in_block_only():
+    # P0 fail-closed: a gate that ERRORED is NOT clean (no silent fail-open). The error report folds in block
+    # (blocks) and is telemetry-only in shadow.
+    err = cp._gate_error_report("conformance", "boom")
+    assert err["passed"] is False and err["error"] and err["findings"][0]["severity"] == "critical", err
+    assert cp._apply_conformance_gate([], err, "block"), "a gate ERROR must block in block mode"
+    assert cp._apply_conformance_gate([], err, "shadow") == [], "a gate ERROR is telemetry-only in shadow"
+    print("ok  gate ERROR fails closed in block, telemetry-only in shadow (no silent fail-open)")
+
+
 def test_subprocess_runner_is_resource_bounded():
     # ADR-0009 #2 codex-side bound: a normal run works; output is capped; a too-long run times out to 124.
     run = conf.subprocess_runner(timeout=1.0, max_output=10)

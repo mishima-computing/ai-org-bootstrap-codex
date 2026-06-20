@@ -76,8 +76,8 @@ def scan_with_gitleaks(path: str, *, run=None) -> list[dict]:
     try:
         run(report_path)
         raw = json.loads(Path(report_path).read_text() or "[]")
-    except Exception:                                          # noqa: BLE001 — fail-soft, never break the run
-        return []
+        # ADR-0009 P0: a gitleaks/parse FAILURE must NOT silently read as "no secrets" (fail-open). Propagate
+        # it so scan_dir surfaces a scanner_error (fail-closed in block) instead of returning [].
     finally:
         try:
             os.unlink(report_path)
@@ -209,11 +209,16 @@ def scan_dir(path: str, *, prefer_gitleaks: bool = True, run=None, include_archi
     unpacked and scanned — a secret packaged into the shipped bundle is caught, not only loose source."""
     if not Path(path).is_dir():
         return {"applicable": False, "passed": True, "findings": [], "checks_run": 0, "backend": None}
-    if prefer_gitleaks and gitleaks_available():
-        findings, backend = scan_with_gitleaks(path, run=run), "gitleaks"
-    else:
-        findings, backend = fallback_scan(path), "fallback"
-    if include_archives:
-        findings = findings + scan_archives(path, prefer_gitleaks=prefer_gitleaks, run=run)
+    backend = "gitleaks" if (prefer_gitleaks and gitleaks_available()) else "fallback"
+    try:
+        findings = scan_with_gitleaks(path, run=run) if backend == "gitleaks" else fallback_scan(path)
+        if include_archives:
+            findings = findings + scan_archives(path, prefer_gitleaks=prefer_gitleaks, run=run)
+    except Exception as exc:                                    # noqa: BLE001
+        # ADR-0009 P0 fail-closed: a scanner that CANNOT complete is NOT clean. Surface a critical
+        # scanner_error so the gate blocks (in block mode) instead of passing silently.
+        return {"applicable": True, "passed": False, "error": True, "backend": backend, "checks_run": 0,
+                "findings": [{"source": "secret-scan", "check": "scanner_error", "severity": "critical",
+                              "passed": False, "detail": f"secret scanner could not complete: {exc!r}"}]}
     return {"applicable": True, "passed": not findings, "findings": findings,
-            "checks_run": 1, "backend": backend}
+            "checks_run": 1, "backend": backend, "error": False}

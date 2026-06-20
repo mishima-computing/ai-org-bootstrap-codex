@@ -119,6 +119,21 @@ def test_wired_secret_gate_only_critical_blocks():
     print("ok  wired gate: shadow never blocks; block folds only critical (advisory stays advisory)")
 
 
+def test_scanner_error_surfaces_as_critical_not_clean():
+    # P0 fail-closed: a gitleaks/scan FAILURE must surface as a critical scanner_error, never silently read as
+    # clean (the external review's example). With gitleaks present, an exploding runner triggers it.
+    if not ss.gitleaks_available():
+        print("skip  gitleaks not installed (the gitleaks-backend error path is the one under test)")
+        return
+    d = _tmpdir_with({"app.py": "x = 1\n"})
+    def boom(report_path):
+        raise RuntimeError("gitleaks exploded")
+    rep = ss.scan_dir(d, prefer_gitleaks=True, run=boom)
+    assert rep["applicable"] and rep["passed"] is False and rep.get("error"), rep
+    assert rep["findings"][0]["check"] == "scanner_error" and rep["findings"][0]["severity"] == "critical", rep
+    print("ok  a scanner failure surfaces a critical scanner_error (not silent clean / fail-open)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

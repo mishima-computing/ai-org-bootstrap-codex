@@ -613,6 +613,17 @@ def _linon_findings(result: dict | str | None) -> list[dict]:
 CONFORMANCE_SHADOW = os.environ.get("CONFORMANCE_GATE", "shadow").lower()   # shadow (default) | off | block
 
 
+def _gate_error_report(source: str, detail: str) -> dict:
+    """ADR-0009 P0 — a gate that ERRORED (could not complete) is NOT clean. The external review flagged that a
+    scanner crash was treated as "no findings" (a silent fail-open). This returns a FAILING report whose
+    critical `gate_error` finding folds in `block` mode (fail-closed) and merely streams in `shadow` (telemetry).
+    A gate ERROR is a gate/runtime problem, not a product defect — repair routing (P0 #6) should send it to the
+    gate, not loop the implementer; until then it at least blocks instead of passing silently."""
+    return {"applicable": True, "passed": False, "error": True, "checks_run": 0,
+            "findings": [{"source": source, "check": "gate_error", "severity": "critical", "passed": False,
+                          "detail": f"gate could not complete (fail-closed in block): {detail}"}]}
+
+
 def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
     """Run the CLI conformance gate over the implemented artifact and stream the result. Returns the report
     (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
@@ -629,7 +640,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "conformance", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
-        return None
+        return _gate_error_report("conformance", repr(exc))
     if not report.get("applicable"):
         # a recognized-but-unchecked kind (ADR-0009 empty slot) is streamed so it is never a SILENT pass;
         # a contract with no kind/profile streams nothing.
@@ -666,7 +677,7 @@ def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "contract-preflight", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
-        return None
+        return _gate_error_report("contract-preflight", repr(exc))
     if not report.get("applicable"):
         return report
     _stream_append(repo, {
@@ -723,7 +734,7 @@ def _secret_scan(repo, run_id: str) -> dict | None:
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "secret-scan", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
-        return None
+        return _gate_error_report("secret-scan", repr(exc))
     if not report.get("applicable"):
         return report
     crit = sum(1 for f in report["findings"] if f.get("severity") == "critical")
@@ -761,7 +772,7 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
                                cwd=str(repo), corpus_path=corpus_path)
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "cli-fuzz", "type": "gate_error", "run_id": run_id, "detail": repr(exc)})
-        return None
+        return _gate_error_report("cli-fuzz", repr(exc))
     if not report.get("applicable"):
         return report
     _stream_append(repo, {
