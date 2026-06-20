@@ -324,6 +324,30 @@ def test_acceptance_bundle_withheld_from_implementer_only():
     print("ok  acceptance bundle withheld from implementer only (spec kept, goldens hidden, gate intact)")
 
 
+def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
+    # P0 (closed loop): linon is CLEAN, but a block-mode conformance gate still FAILS on the current artifact.
+    # _closed_loop_findings re-runs the gates and must keep findings non-empty (so the repair loop stays open
+    # and convergence requires the gate clean) — instead of being overwritten by linon-only.
+    results = {"linon": {"findings": []}}                       # linon says clean
+    failing = {"applicable": True, "passed": False,
+               "findings": [{"check": "exit_status", "severity": "major", "passed": False}]}
+    saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_SHADOW)
+    cp._shadow_conformance = lambda repo, results, run_id: failing
+    cp._secret_scan = lambda repo, run_id: None
+    cp._fuzz_cli = lambda repo, results, run_id: None
+    try:
+        cp.CONFORMANCE_SHADOW = "block"
+        findings, gate_ctx = cp._closed_loop_findings("/tmp/x", results, "r", None)
+        assert findings, "a failing BLOCK gate must keep findings non-empty even when linon is clean"
+        assert gate_ctx["conformance"], "the gate findings are carried to feed the repair agents"
+        cp.CONFORMANCE_SHADOW = "shadow"                        # same failing gate, but shadow folds nothing
+        sh_findings, _ = cp._closed_loop_findings("/tmp/x", results, "r", None)
+        assert sh_findings == [], "in shadow the failing gate is telemetry only (no fold)"
+    finally:
+        cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_SHADOW = saved
+    print("ok  closed loop: a block gate that fails keeps the loop open (linon-clean no longer converges)")
+
+
 def test_subprocess_runner_is_resource_bounded():
     # ADR-0009 #2 codex-side bound: a normal run works; output is capped; a too-long run times out to 124.
     run = conf.subprocess_runner(timeout=1.0, max_output=10)

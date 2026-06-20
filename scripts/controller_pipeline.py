@@ -743,6 +743,28 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
     return report
 
 
+def _closed_loop_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
+    """ADR-0009 P0 — the CLOSED-LOOP convergence findings. RE-RUN the deterministic artifact gates
+    (conformance / secret / fuzz) on the CURRENT artifact and combine with linon, so a `block`-mode gate that
+    STILL fails after a repair keeps the loop open instead of being overwritten by linon-only (the gate
+    becomes ENFORCEMENT, not just telemetry). Returns (findings, gate_ctx): `gate_ctx` carries each gate's
+    findings so the caller can FEED them to the repair agents — the implementer must see the conformance /
+    secret / fuzz failures, not only linon's. preflight is contract-bound, so the caller re-runs it on the
+    (possibly repaired) contract and passes its report in."""
+    conf = _shadow_conformance(repo, results, run_id)
+    secret = _secret_scan(repo, run_id)
+    fuzz = _fuzz_cli(repo, results, run_id)
+    findings = _linon_findings(results.get("linon"))
+    findings = _apply_conformance_gate(findings, conf, CONFORMANCE_SHADOW)
+    findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
+    findings = _apply_secret_gate(findings, secret, SECRET_SCAN_MODE)
+    findings = _apply_conformance_gate(findings, fuzz, FUZZ_CLI_MODE)
+    gate_ctx = {name: list((rep or {}).get("findings") or [])
+                for name, rep in (("conformance", conf), ("secret", secret),
+                                  ("fuzz", fuzz), ("preflight", preflight_report))}
+    return findings, gate_ctx
+
+
 def _apply_secret_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
     """Fold ONLY critical secret findings into the convergence loop, and only when promoted to `block`. A
     known provider token / private key hard-blocks; generic-entropy matches never block (they stay advisory
@@ -1032,22 +1054,15 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
 
     # ADR-0009 #1: dynamic conformance gate alongside static Linon. Dormant unless the contract declares a CLI;
     # SHADOW (streamed, non-blocking) until effective-FP is shown ~0. Runs once over the initially-built leaf.
-    conformance_report = None
-    secret_report = None
-    fuzz_report = None
-    if not pipeline_failed:
-        conformance_report = _shadow_conformance(repo, results, run_id)
-        secret_report = _secret_scan(repo, run_id)
-        fuzz_report = _fuzz_cli(repo, results, run_id)
-
     initial_finished_at = _utc_now()
-    findings = _linon_findings(results.get("linon"))
-    # SHADOW mode contributes nothing to the convergence gate; only an explicit `block` promotion folds the
-    # conformance / preflight findings into the repair loop (one-line, auditable flip — see _apply_*_gate).
-    findings = _apply_conformance_gate(findings, conformance_report, CONFORMANCE_SHADOW)
-    findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
-    findings = _apply_secret_gate(findings, secret_report, SECRET_SCAN_MODE)
-    findings = _apply_conformance_gate(findings, fuzz_report, FUZZ_CLI_MODE)
+    # CLOSED LOOP (ADR-0009 P0): findings = linon + the deterministic gates RE-RUN on the current artifact.
+    # In `shadow` (default) a gate contributes nothing (telemetry); in `block` it folds AND is re-checked every
+    # repair iteration below, so a still-failing gate keeps the loop open and convergence requires it clean.
+    gate_ctx: dict = {}
+    if not pipeline_failed:
+        findings, gate_ctx = _closed_loop_findings(repo, results, run_id, preflight_report)
+    else:
+        findings = _linon_findings(results.get("linon"))
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
@@ -1064,6 +1079,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         repair_stages: list[dict] = []
         linon_context = dict(results.get("linon") or {})
         linon_context["repair_iteration"] = repair_iterations
+        # CLOSED LOOP: the repair agents see the deterministic gate findings too, not only linon's — the
+        # implementer must know WHICH conformance/secret/fuzz check failed in order to fix it.
+        if any(gate_ctx.values()):
+            linon_context["gate_findings"] = gate_ctx
 
         for role in repair_forward_roles:
             entry = entries[role]
@@ -1114,7 +1133,16 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             if not stage_ok:
                 pipeline_failed = True
 
-        findings = _linon_findings(results.get("linon"))
+        # CLOSED LOOP: re-run preflight on the (possibly repaired) contract and the artifact gates on the
+        # repaired artifact, then recompute findings from linon + the gates. A block-mode gate that still
+        # fails keeps the loop open; convergence (findings == []) now requires linon clean AND every block
+        # gate clean ON THE CURRENT artifact — not a stale initial result that linon-only would overwrite.
+        if not pipeline_failed:
+            repair_run_id = f"{run_id}-repair{repair_iterations}"
+            repair_preflight = _contract_preflight(repo, results, repair_run_id)
+            findings, gate_ctx = _closed_loop_findings(repo, results, repair_run_id, repair_preflight)
+        else:
+            findings = _linon_findings(results.get("linon"))
         repair_finished_at = _utc_now()
         iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
                                             repair_stages, len(findings)))

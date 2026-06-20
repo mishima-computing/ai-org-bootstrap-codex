@@ -8,9 +8,21 @@ permissions:
   contents: read
 
 jobs:
-  codeql:
+  # NOTE: this job was misleadingly named "codeql" but ran no CodeQL analysis — only the residue/pack check.
+  # It is renamed to state what it actually does. Real CodeQL is a separate, deferred setup (ADR-0009 P0
+  # backlog); until then this job must not claim to be code-scanning. It now also runs the ADR-0009 security
+  # and verification gate test suites, so a green here means those gates' own tests pass (not a code scan).
+  residue-pack-and-gate-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Codex-only residue check
+      - name: Codex-only residue + bootstrap-pack validation
         run: python3 scripts/validate-bootstrap-pack.py
+      - name: ADR-0009 security + verification gate tests
+        run: |
+          set -e
+          python3 scripts/test_secret_scan.py
+          python3 scripts/test_conformance.py
+          python3 scripts/test_contract_preflight.py
+          python3 scripts/test_fuzz_cli.py
+          python3 scripts/test_regression_corpus.py
