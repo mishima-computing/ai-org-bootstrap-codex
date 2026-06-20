@@ -92,6 +92,44 @@ def test_self_overlapping_scope_is_flagged():
     print("ok  self-overlapping scope (allowed also matched by a blanket forbidden) -> flagged; clean set -> not")
 
 
+def test_missing_deliverable_kind_is_flagged():
+    # The escape hatch: a contract that simply omits deliverable_kind would skip every interface check. The
+    # declaration is now required (silence is not a way out) — even an otherwise-complete contract is flagged.
+    c = _complete_cli_contract()
+    del c["deliverable_kind"]
+    rep = pf.preflight(c)
+    assert not rep["passed"]
+    assert any(f["check"] == "deliverable_kind" and f["severity"] == "major" for f in rep["findings"]), rep
+    print("ok  omitting deliverable_kind -> major (the interface obligation cannot be skipped by silence)")
+
+
+def test_deliverable_kind_none_passes():
+    # The explicit no-interface declaration: 'none' discharges the obligation, so no interface findings.
+    c = _complete_cli_contract()
+    c["deliverable_kind"] = "none"
+    c.pop("conformance", None)
+    rep = pf.preflight(c)
+    checks = {f["check"] for f in rep["findings"]}
+    assert "deliverable_kind" not in checks and "conformance_profile" not in checks, rep
+    assert rep["passed"], rep
+    print("ok  deliverable_kind 'none' explicitly discharges the interface obligation -> passes")
+
+
+def test_interface_kind_without_profile_is_flagged():
+    # Declaring an interface kind but carrying no usable profile is as under-specified as declaring no kind:
+    # there is nothing for the gate to check the built artifact against.
+    c = _complete_cli_contract()
+    c["deliverable_kind"] = "library"
+    c.pop("conformance", None)
+    rep = pf.preflight(c)
+    prof = [f for f in rep["findings"] if f["check"] == "conformance_profile"]
+    assert prof and prof[0]["kind"] == "library" and prof[0]["severity"] == "major", rep
+    # an empty profile object is not substantive either
+    c["conformance"] = {"library": {}}
+    assert [f for f in pf.preflight(c)["findings"] if f["check"] == "conformance_profile"], "empty {} is not a profile"
+    print("ok  an interface kind without a usable conformance profile -> conformance_profile major")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []

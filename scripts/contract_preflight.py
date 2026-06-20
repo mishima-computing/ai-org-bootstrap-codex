@@ -16,6 +16,16 @@ from __future__ import annotations
 
 import fnmatch
 
+# Deliverable kinds that declare an executable interface (so a conformance profile is owed). "none" is the
+# explicit no-interface declaration and is deliberately NOT in this set.
+_INTERFACE_KINDS = ("cli", "library", "http_service", "rpc_service", "batch_job")
+
+
+def _is_substantive_profile(profile) -> bool:
+    """A conformance profile that actually pins something. An absent profile or an empty object ({}) pins
+    nothing, so a declared interface kind carrying one is as under-specified as declaring no kind at all."""
+    return isinstance(profile, dict) and bool(profile)
+
 
 def _finding(check: str, severity: str, detail: str, **extra) -> dict:
     return {"source": "contract-preflight", "check": check, "severity": severity,
@@ -102,12 +112,32 @@ def preflight(contract: dict) -> dict:
                     f"the deliverable is both allowed and forbidden; narrow the forbidden set",
                     allowed=a, forbidden=f))
 
+    # Deliverable-kind declaration: the conformance obligation is otherwise dodgeable by SILENCE — a contract
+    # that simply omits deliverable_kind escapes every interface check below. Require the kind to be DECLARED
+    # (including the explicit "none" for a no-interface deliverable), so a producer cannot opt out of the
+    # interface contract by saying nothing. This is the structural half of "make the designer satisfy the
+    # reviewer": the obligation cannot be skipped, only discharged or explicitly marked not-applicable.
+    checks += 1
     kind = contract.get("deliverable_kind")
-    profile = (contract.get("conformance") or {}).get("cli")
-    if kind == "cli" and isinstance(profile, dict):
-        before = len(findings)
-        findings += _cli_findings(profile)
-        checks += 4 + len(profile.get("examples") or [])
-        _ = before
+    if kind is None:
+        findings.append(_finding(
+            "deliverable_kind", "major",
+            "contract does not declare deliverable_kind — declare it explicitly "
+            "(cli/library/http_service/rpc_service/batch_job), or 'none' when there is no executable interface; "
+            "silence must not be a way to skip the interface contract"))
+    elif kind in _INTERFACE_KINDS:
+        # An interface deliverable must carry its conformance profile, or there is nothing to verify the built
+        # artifact against — the interface-precision leak this gate exists to close.
+        checks += 1
+        profile = (contract.get("conformance") or {}).get(kind)
+        if not _is_substantive_profile(profile):
+            findings.append(_finding(
+                "conformance_profile", "major",
+                f"deliverable_kind '{kind}' declares an executable interface but carries no usable "
+                f"conformance.{kind} profile — encode the interface so the gate can check the built artifact",
+                kind=kind))
+        elif kind == "cli":
+            findings += _cli_findings(profile)
+            checks += 4 + len(profile.get("examples") or [])
 
     return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": checks}

@@ -164,14 +164,15 @@
       }
     },
     "deliverable_kind": {
-      "description": "ADR-0009: the kind of artifact this contract delivers. Selects which conformance profile is required and black-box checked against the built artifact. Optional today (shadow-first); will become required once profiles cover all kinds.",
+      "description": "ADR-0009: the kind of artifact this contract delivers. Selects which conformance profile is required and black-box checked against the built artifact. Declare it explicitly on every contract — use 'none' when there is no executable interface to pin, so the interface obligation is never skipped by simply omitting the field. Schema-optional today (shadow-first via the pre-flight gate); becomes schema-required once profiles cover all kinds.",
       "type": "string",
       "enum": [
         "cli",
         "library",
         "http_service",
         "rpc_service",
-        "batch_job"
+        "batch_job",
+        "none"
       ]
     },
     "conformance": {
