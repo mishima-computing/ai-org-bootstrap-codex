@@ -186,8 +186,17 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
     if coord_forbidden:
         import fnmatch
         import subprocess
+        # A file the role is ALLOWED to produce is the role's OWN deliverable and must NEVER be stripped here,
+        # even when a coord_forbidden glob also matches it. The common case is a self-overlapping contract:
+        # aufheben emits files_allowed=["jsonpick.py"] AND files_not_allowed=["*", ...], so the blanket "*"
+        # matches the deliverable — and the strip reverted jsonpick.py before the scope check, leaving enforce
+        # with changed:[] and the artifact silently lost (observed live; intermittent, since it depends on
+        # whether aufheben emits a blanket "*"). allowed wins over forbidden for the same path.
+        own_allowed = tuple(contract.files_allowed_to_change or ())
         stripped = []
         for f in scope.porcelain_touched(repo):
+            if any(fnmatch.fnmatch(f, g) for g in own_allowed):
+                continue
             if any(fnmatch.fnmatch(f, g) for g in coord_forbidden) and \
                not any(fnmatch.fnmatch(f, g) for g in scope.DEFAULT_FORBIDDEN):
                 # unstage (a staged-new add survives a plain `checkout HEAD --`), then revert if the path

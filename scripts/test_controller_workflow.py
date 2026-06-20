@@ -125,6 +125,36 @@ def test_severity_weighted_repair_cap():
     print("ok  severity-weighted repair cap (critical->6, minor->1, unknown/none->base)")
 
 
+def test_own_deliverable_survives_a_blanket_forbidden_strip():
+    # REGRESSION: a self-overlapping contract (files_allowed=["jsonpick.py"] AND files_not_allowed=["*"]) made
+    # the coordination strip revert the deliverable — the blanket "*" matched jsonpick.py — leaving enforce
+    # with changed:[] and the artifact silently lost. The role's OWN allowed file must win over coord_forbidden.
+    import tempfile
+    import subprocess
+    d = Path(tempfile.mkdtemp(prefix="cw-strip-"))
+    def git(*a):
+        subprocess.run(["git", "-C", str(d), *a], capture_output=True)
+    git("init", "-q"); git("config", "user.email", "d@l"); git("config", "user.name", "d")
+    (d / "x.md").write_text("x"); git("add", "-A"); git("commit", "-qm", "init")
+
+    contract = {
+        "role": "implementer", "prompt": "build it", "sandbox": "workspace-write",
+        "files_allowed_to_change": ["jsonpick.py"],
+        "forbidden_paths": ["*", ".agent-runs/**"],   # the blanket "*" (aufheben's files_not_allowed) matches it
+        "timeout": 60, "retries": 0,
+    }
+
+    def stub_carrier(repo, prompt, sandbox, **kw):
+        (Path(repo) / "jsonpick.py").write_text("print('hi')\n")  # the legitimate deliverable
+        return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
+
+    rep = cw.run_contract(d, contract, "t-strip", carrier_runner=stub_carrier, include_builtin_gates=False)
+    assert "jsonpick.py" in (rep.changed_files or []), \
+        ("the deliverable must survive the self-overlapping coordination strip", rep.to_dict())
+    assert (d / "jsonpick.py").exists(), "jsonpick.py must not be reverted by the coord strip"
+    print("ok  own deliverable survives a self-overlapping (allowed + blanket-forbidden) contract")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
