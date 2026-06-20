@@ -630,58 +630,6 @@ def _repair_roles_for(findings: list[dict], repair_forward_roles: list[str]) -> 
     return list(repair_forward_roles)                          # linon / contract / empty -> full re-synthesis
 
 
-# Producer self-adversary (A) — shadow-measure first. A Linon finding triggers a FULL-WAVE repair (it is
-# semantic, so `_repair_roles_for` re-runs the designers, not the implementer alone). Many such findings are
-# nonetheless impl-level: a defect the implementer could fix itself, in a file it was allowed to change. If the
-# implementer ran the SAME adversary (`codex review`) on its own diff BEFORE hand-off and fixed those, that
-# full wave would never fire. This measures the opportunity WITHOUT acting on it (shadow): how many findings a
-# producer self-review would surface that are (a) high-priority and (b) inside the implementer's own scope —
-# each one a full-wave Linon rejection it could have pre-empted. Out-of-scope findings are left untouched on
-# purpose: they are genuine design problems and must still reach Linon and re-open the design wave.
-PRODUCER_SELF_REVIEW = os.environ.get("PRODUCER_SELF_REVIEW", "off").lower()   # off (default) | shadow | block
-
-
-def _allowed_change_scope(results: dict) -> tuple[str, ...]:
-    """The files the implementer was allowed to change, per the aufheben contract — the boundary of what a
-    producer self-fix may touch."""
-    contract = results.get(AUFHEBEN_ROLE)
-    if isinstance(contract, dict):
-        return tuple(contract.get("files_allowed_to_change") or ())
-    return ()
-
-
-def _path_in_scope(path: str, allowed: tuple[str, ...]) -> bool:
-    import fnmatch
-    return any(path == a or fnmatch.fnmatch(path, a) for a in allowed)
-
-
-def _producer_self_review(repo, results: dict, run_id: str) -> dict | None:
-    """Shadow-measure of the producer self-adversary. Runs `codex review` on the implementer's own uncommitted
-    diff, classifies the findings against the implementer's allowed scope, and streams the measurement. Does
-    NOT self-fix (that is the `block` promotion, gated on this measurement). Returns the measure dict, or None
-    when disabled / unavailable. A failed self-review is never a failed build."""
-    if PRODUCER_SELF_REVIEW not in ("shadow", "block"):
-        return None
-    try:
-        import codex_review
-        rv = codex_review.review(str(repo))
-    except Exception as exc:  # noqa: BLE001 — measurement only; a crash here must not sink the leaf
-        _stream_append(repo, {"source": "producer-self-review", "type": "self_review_error",
-                              "run_id": run_id, "detail": f"{type(exc).__name__}: {exc}"})
-        return None
-    allowed = _allowed_change_scope(results)
-    findings = rv.get("findings") or []
-    preemptable = [f for f in findings
-                   if f.get("priority") in (1, 2) and _path_in_scope(f.get("file") or "", allowed)]
-    out_of_scope = [f for f in findings if not _path_in_scope(f.get("file") or "", allowed)]
-    measure = {"source": "producer-self-review", "type": "self_review_measure", "run_id": run_id,
-               "mode": PRODUCER_SELF_REVIEW, "total_findings": len(findings),
-               "preemptable_in_scope": len(preemptable), "out_of_scope": len(out_of_scope),
-               "would_preempt_full_wave": bool(preemptable)}
-    _stream_append(repo, measure)
-    return measure
-
-
 def _gate_error_report(source: str, detail: str) -> dict:
     """ADR-0009 P0 — a gate that ERRORED (could not complete) is NOT clean. The external review flagged that a
     scanner crash was treated as "no findings" (a silent fail-open). This returns a FAILING report whose
@@ -1168,13 +1116,6 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
         if pipeline_failed:
             break
-
-    # Producer self-adversary (A), shadow-measure: AFTER the implementer's wave and BEFORE the reviewers,
-    # measure what an implementer self-review (`codex review` on its own diff) would catch inside its own
-    # scope — each such finding is a full-wave Linon rejection it could have pre-empted. Off by default; pure
-    # observation in shadow (no self-fix).
-    if not pipeline_failed and "implementer" in results:
-        _producer_self_review(repo, results, run_id)
 
     if not pipeline_failed:
         verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
