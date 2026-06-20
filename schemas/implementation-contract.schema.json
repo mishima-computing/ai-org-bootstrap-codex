@@ -162,7 +162,175 @@
         },
         "additionalProperties": false
       }
+    },
+    "deliverable_kind": {
+      "description": "ADR-0009: the kind of artifact this contract delivers. Selects which conformance profile is required and black-box checked against the built artifact. Optional today (shadow-first); will become required once profiles cover all kinds.",
+      "type": "string",
+      "enum": [
+        "cli",
+        "library",
+        "http_service",
+        "rpc_service",
+        "batch_job"
+      ]
+    },
+    "conformance": {
+      "description": "ADR-0009: the EXECUTABLE part of the contract — what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
+      "type": "object",
+      "properties": {
+        "cli": {
+          "$ref": "#/$defs/cli_profile"
+        }
+      },
+      "additionalProperties": false
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "$comment": "When this contract declares a CLI deliverable, it MUST carry a checkable cli conformance profile — the design agent chooses and encodes the interface; the gate verifies it (ADR-0009).",
+      "if": {
+        "required": [
+          "deliverable_kind"
+        ],
+        "properties": {
+          "deliverable_kind": {
+            "const": "cli"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "conformance"
+        ],
+        "properties": {
+          "conformance": {
+            "required": [
+              "cli"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "cli_profile": {
+      "description": "Black-box CLI contract: declared install, entrypoint, exit-code policy, and concrete invocation->outcome examples. The checker installs via the commands, runs each example, and compares exit status + stdout/stderr. Exit code is pinned because it is the largest observed interface leak.",
+      "type": "object",
+      "required": [
+        "entrypoint",
+        "examples"
+      ],
+      "properties": {
+        "build_and_install": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "description": "Shell commands that build/install the artifact in a clean environment, run in order before the examples. A non-zero exit is a critical conformance finding (the artifact cannot be built).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "produced_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "entrypoint": {
+          "type": "object",
+          "required": [
+            "invocation"
+          ],
+          "properties": {
+            "invocation": {
+              "description": "How the CLI is launched (e.g. `mytool` or `python -m mypkg`). Examples' invocations are interpreted relative to this entrypoint.",
+              "type": "string"
+            },
+            "working_directory": {
+              "type": "string"
+            },
+            "environment": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "status_and_errors": {
+          "description": "The exit-code policy the examples are expected to honour. Recorded so the checker (and a reviewer) can see the intended categories, not just per-example codes.",
+          "type": "object",
+          "properties": {
+            "success_codes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "invalid_input_codes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "operational_failure_codes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "examples": {
+          "description": "Concrete golden invocations. Each pins the exit status; stdout/stderr are checked by substring (preferred — robust to volatile output) or, when given, by normalized exact match. Avoid indiscriminate whole-output snapshots.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "invocation",
+              "expected_status"
+            ],
+            "properties": {
+              "invocation": {
+                "description": "Arguments appended to the entrypoint (e.g. `--help`, `build bad-input`). The empty string is the no-argument invocation.",
+                "type": "string"
+              },
+              "stdin": {
+                "type": "string"
+              },
+              "expected_status": {
+                "type": "integer"
+              },
+              "expected_stdout": {
+                "description": "Exact stdout after normalization (trailing whitespace, CRLF). Use sparingly; prefer expected_stdout_contains.",
+                "type": "string"
+              },
+              "expected_stdout_contains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expected_stderr_contains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }
