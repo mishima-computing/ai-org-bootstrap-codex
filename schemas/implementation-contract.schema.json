@@ -180,6 +180,18 @@
       "properties": {
         "cli": {
           "$ref": "#/$defs/cli_profile"
+        },
+        "library": {
+          "$ref": "#/$defs/library_profile"
+        },
+        "http_service": {
+          "$ref": "#/$defs/http_service_profile"
+        },
+        "rpc_service": {
+          "$ref": "#/$defs/rpc_service_profile"
+        },
+        "batch_job": {
+          "$ref": "#/$defs/batch_job_profile"
         }
       },
       "additionalProperties": false
@@ -331,6 +343,22 @@
         }
       },
       "additionalProperties": false
+    },
+    "library_profile": {
+      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended fields: packages, modules, exported_symbols, signatures, compatibility{baseline_version, allowed_breaking_changes}. Checker is NOT subprocess execution (a library has no entrypoint to run) — it is language-specific API introspection (import the built package, assert declared symbols resolve and signatures match) plus an API-diff gate against the baseline (cargo-semver-checks / japicmp / go apidiff / TS API Extractor). Filled when a library deliverable first needs it.",
+      "type": "object"
+    },
+    "http_service_profile": {
+      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended: an OpenAPI document (or ref) plus example request/response pairs with status codes. Checker BOOTS the service then drives it over HTTP (schema-validate responses, exercise status/error paths via Schemathesis/Dredd; consumer contracts via Pact; lint via Spectral; compatibility via oasdiff definite-vs-potential). Needs port/readiness/teardown lifecycle, unlike the CLI checker. Filled when an http_service deliverable first needs it.",
+      "type": "object"
+    },
+    "rpc_service_profile": {
+      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. Intended: the service definition (Protobuf/gRPC or AsyncAPI) plus example call/response pairs. Checker boots the service and drives it over the RPC/message transport, with Buf-style backwards-compatibility checks against the baseline. Filled when an rpc_service deliverable first needs it.",
+      "type": "object"
+    },
+    "batch_job_profile": {
+      "$comment": "ADR-0009 #1 remainder — EMPTY SLOT, not yet enforced. The closest sibling to cli_profile: run the job and assert exit status plus produced_artifacts (files/rows/objects) against declared expectations. Likely reuses most of the cli checker; kept a distinct slot so its run-then-inspect-outputs semantics are explicit. Filled when a batch_job deliverable first needs it.",
+      "type": "object"
     }
   }
 }

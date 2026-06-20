@@ -135,6 +135,60 @@ def test_normalization_tolerates_volatile_output():
     print("ok  normalization tolerates timestamps/temp-paths/hex on exact stdout")
 
 
+def test_dispatch_routes_cli_and_empty_slots():
+    # the single entry point: cli routes to the real checker; the other four kinds route to their empty slot
+    # (recognized, unchecked, never a silent pass); an unknown/absent kind is simply not applicable.
+    profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
+    cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
+    assert cli["applicable"] and cli["passed"], cli
+    for kind in ("library", "http_service", "rpc_service", "batch_job"):
+        rep = conf.run_conformance({"deliverable_kind": kind, "conformance": {kind: {}}}, fake_runner({}))
+        assert rep["applicable"] is False and rep["passed"] is True, (kind, rep)
+        assert rep["slot"] == kind and rep["status"] == "no-checker-yet", (kind, rep)
+    assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
+        "applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    print("ok  dispatch: cli -> real checker, 4 kinds -> empty slot, none -> not applicable")
+
+
+def test_slot_kind_is_streamed_not_silent():
+    # a recognized-but-unchecked kind must emit a `slot_unchecked` stream event (no silent cap), while the
+    # convergence findings stay untouched.
+    results = {"aufheben-designer": {"deliverable_kind": "library", "conformance": {"library": {}}}}
+    events = []
+    orig = cp._stream_append
+    cp._stream_append = lambda repo, ev: events.append(ev)
+    try:
+        rep = cp._shadow_conformance("/tmp/leaf", results, "run-lib", runner=fake_runner({}))
+    finally:
+        cp._stream_append = orig
+    assert rep and rep.get("slot") == "library", rep
+    slot_events = [e for e in events if e.get("type") == "slot_unchecked"]
+    assert slot_events and slot_events[0]["slot"] == "library", events
+    assert cp._apply_conformance_gate([], rep, "block") == [], "an empty slot folds no findings even in block"
+    print("ok  empty slot streams slot_unchecked (visible, not silent); folds nothing")
+
+
+def test_schema_other_kinds_have_optional_slots():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    schema = json.loads(SCHEMA.read_text())
+    v = jsonschema.Draft202012Validator(schema)
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    # the other kinds are valid deliverable_kinds and their conformance slot is OPTIONAL (empty slot — not
+    # yet enforced), so declaring the kind without a profile still validates.
+    for kind in ("library", "http_service", "rpc_service", "batch_job"):
+        assert v.is_valid({**base, "deliverable_kind": kind}), (kind, "kind alone must validate")
+        assert v.is_valid({**base, "deliverable_kind": kind, "conformance": {kind: {}}}), (kind, "empty profile ok")
+    print("ok  schema: other-kind slots present and optional (empty slots, not enforced)")
+
+
 def test_schema_cli_profile_required_iff_cli():
     try:
         import jsonschema

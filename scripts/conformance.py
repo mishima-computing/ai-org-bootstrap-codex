@@ -159,6 +159,69 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
     }
 
 
+# ADR-0009 #1 remainder — EMPTY SLOTS for the other deliverable kinds. The plumbing (schema profile ->
+# aufheben emits -> shadow gate -> finding routing) is proven by the CLI path and is kind-agnostic, so it is
+# replicated for free. The per-kind CHECKER is the real, differentiated work and is NOT done: a library has
+# no process to run (it needs API introspection + API-diff), a service needs boot + protocol-driven testing.
+# Each slot below exists so a future checker drops in here; until then it returns an HONEST no-op that is
+# still VISIBLE on the stream (recognized-but-unchecked), never a silent pass.
+_SLOT_KINDS = ("library", "http_service", "rpc_service", "batch_job")
+
+
+def _empty_slot(kind: str) -> dict:
+    """The report for a recognized deliverable kind whose checker is not built yet. applicable=False so it
+    blocks nothing and folds no findings; `slot` marks it so the gate can STREAM that the kind was recognized
+    but not checked (no silent cap)."""
+    return {"applicable": False, "passed": True, "findings": [], "checks_run": 0,
+            "slot": kind, "status": "no-checker-yet"}
+
+
+def run_library_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """SLOT (ADR-0009 #1). Fill with: import the built package, assert declared modules/symbols resolve and
+    signatures match, run an API-diff against the baseline (cargo-semver-checks / japicmp / go apidiff)."""
+    return _empty_slot("library")
+
+
+def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over HTTP (Schemathesis/Dredd schema +
+    status/error paths, Pact consumer contracts, oasdiff compatibility) with port/readiness/teardown."""
+    return _empty_slot("http_service")
+
+
+def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """SLOT (ADR-0009 #1). Fill with: boot the service, drive it over the RPC/message transport, Buf-style
+    backwards-compatibility checks against the baseline."""
+    return _empty_slot("rpc_service")
+
+
+def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """SLOT (ADR-0009 #1). Closest to the CLI checker: run the job, assert exit status + produced_artifacts
+    against declared expectations. Likely reuses most of run_cli_conformance when filled."""
+    return _empty_slot("batch_job")
+
+
+_SLOT_CHECKERS = {
+    "library": run_library_conformance,
+    "http_service": run_http_service_conformance,
+    "rpc_service": run_rpc_service_conformance,
+    "batch_job": run_batch_job_conformance,
+}
+
+
+def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """Dispatch the conformance gate on `deliverable_kind`. CLI is the one real checker today; the other kinds
+    route to their empty slot (recognized, unchecked). A contract with no kind / no profile is not applicable.
+    This is the single entry point the pipeline calls, so adding a real checker later is a one-line wiring in
+    `_SLOT_CHECKERS` (or the `cli` branch), not a change to the gate's call site."""
+    kind = contract.get("deliverable_kind")
+    if kind == "cli":
+        return run_cli_conformance(contract, runner, cwd=cwd)
+    checker = _SLOT_CHECKERS.get(kind)
+    if checker is not None:
+        return checker(contract, runner, cwd=cwd)
+    return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+
 def subprocess_runner(timeout: float = 60.0) -> Runner:
     """A real runner for in-box execution. NOT used in unit tests (those inject a fake). Runs the command
     through the shell because invocations are declared as shell strings; the box is the containment boundary

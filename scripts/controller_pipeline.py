@@ -592,13 +592,19 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
     if not isinstance(contract, dict):
         return None
     try:
-        report = conformance.run_cli_conformance(
+        report = conformance.run_conformance(
             contract, runner or conformance.subprocess_runner(), cwd=str(repo))
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
-        _stream_append(repo, {"source": "cli-conformance", "type": "gate_error",
+        _stream_append(repo, {"source": "conformance", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
         return None
     if not report.get("applicable"):
+        # a recognized-but-unchecked kind (ADR-0009 empty slot) is streamed so it is never a SILENT pass;
+        # a contract with no kind/profile streams nothing.
+        if report.get("slot"):
+            _stream_append(repo, {"source": "conformance", "type": "slot_unchecked",
+                                  "run_id": run_id, "slot": report["slot"],
+                                  "status": report.get("status"), "ts": _iso8601_utc()})
         return report
     _stream_append(repo, {
         "source": "cli-conformance",
