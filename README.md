@@ -192,6 +192,38 @@ python3 scripts/carrier_harness.py --self-test
 `bootstrap/carrier-discipline.md` and the invocation rules as code (an LLM controller forgets
 `< /dev/null`; the harness cannot).
 
+## Deterministic where decidable, model where irreducible
+
+The org is built on a sharp split: everything **decidable** — isolation, durability, capture, revert,
+who-touched-what — is done with **git (and codex's own features), LLM-free**; only the **irreducible**
+work — decomposing a goal, designing, writing, judging — is done by the **model**. Prompts that *steer*
+the model sit between, but they are **backed by deterministic enforcement**, never trusted alone.
+
+- **Deterministic backbone (git + codex, the trusted layer).** Isolation: `git worktree add --detach`
+  per leaf/goal. State & resume: work pinned under `refs/goals/<id>/{wip,done}`, restored by
+  `merge-base` + `cherry-pick base..wip`. Per-leaf commit: `git_ops.merge_and_commit_leaf`. Scope:
+  `git status --porcelain -uall` to see every change (incl. untracked), `git checkout`/`reset` to revert
+  out-of-scope or cross-lane strays, `git apply` to resume a patch. Capture: `git diff` plus
+  `git diff --no-index` so new files appear as real diffs without touching the index. Carrier memory:
+  codex `resume` of a captured `thread.started` session (repair and resume re-use it). And the LLM-free
+  scaffold primitive.
+- **Irreducible model (prompt = judgment / creation).** The splitter (decompose), the dialectic
+  (`aggressive` / `conservative` / `genius` / `aufheben`), the `implementer` (write the code/prose), and
+  the `linon` / `stefan` reviewers. There is no deterministic substitute here — and forcing one would be
+  *dumbing*, not settling.
+- **Prompt-steer + git-enforce (the hybrids).** `bootstrap/carrier-discipline.md` and the role specs;
+  the `scope_boundary` that steers the splitter to a declared directory; the `resumed_prior_work`
+  inventory that keeps a re-split idempotent. Soft guidance, made safe by the deterministic layer above.
+
+**The seam is where bugs live: a job that *could* be deterministic, left to a prompt.** Three were moved
+prompt → deterministic recently — scaffold base (a leading-verb guess → `_declared_dir` extraction), the
+cross-lane `.github` revert (relying on the design contract to list it → registry-derived), and the
+new-file diff (a "don't run git" rule → `git diff --no-index`). Known seams still leaning on a prompt,
+to harden over time: the declared **`scope_boundary` is steer-only** (prevention; there is no
+deterministic clamp of a deliverable role's effective allow-set to the goal boundary yet — drift relies
+on the steer); and the implementer's "never edit `.github`" line is now belt-and-suspenders behind the
+cross-lane revert (the prompt could eventually go).
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
