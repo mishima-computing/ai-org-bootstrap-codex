@@ -27,6 +27,7 @@ from controller_evidence import RunJournal, sha256_file  # noqa: E402
 from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # noqa: E402
 import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
 import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
+import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -674,6 +675,44 @@ def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
     return report
 
 
+SECRET_SCAN_MODE = os.environ.get("SECRET_SCAN", "shadow").lower()   # shadow (default) | off | block
+
+
+def _secret_scan(repo, run_id: str) -> dict | None:
+    """Scan the leaf's deliverable for committed secrets and stream the result. Validity-tiered: the report
+    streams all findings, but only CRITICAL ones (known provider tokens / private keys) are eligible to block
+    — generic matches stay advisory (ADR-0009 / Tricorder: a build-breaking secret rule needs ~0 effective
+    FP). Fail-soft and redacting (the stream never carries the secret value)."""
+    if SECRET_SCAN_MODE == "off":
+        return None
+    try:
+        report = secret_scan.scan_dir(str(repo))
+    except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
+        _stream_append(repo, {"source": "secret-scan", "type": "gate_error",
+                              "run_id": run_id, "detail": repr(exc)})
+        return None
+    if not report.get("applicable"):
+        return report
+    crit = sum(1 for f in report["findings"] if f.get("severity") == "critical")
+    _stream_append(repo, {
+        "source": "secret-scan",
+        "type": "shadow_findings" if SECRET_SCAN_MODE != "block" else "findings",
+        "run_id": run_id, "passed": report["passed"], "backend": report.get("backend"),
+        "critical": crit, "total": len(report["findings"]),
+        "findings": report["findings"], "ts": _iso8601_utc(),
+    })
+    return report
+
+
+def _apply_secret_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
+    """Fold ONLY critical secret findings into the convergence loop, and only when promoted to `block`. A
+    known provider token / private key hard-blocks; generic-entropy matches never block (they stay advisory
+    on the stream)."""
+    if mode != "block" or not report or report.get("passed"):
+        return findings
+    return findings + [f for f in report.get("findings", []) if f.get("severity") == "critical"]
+
+
 def _apply_conformance_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
     """Fold conformance findings into the convergence `findings` ONLY when the gate is promoted to `block`.
     In `shadow` (default) the gate observes but never blocks — the returned list is unchanged. This is the
@@ -955,8 +994,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     # ADR-0009 #1: dynamic conformance gate alongside static Linon. Dormant unless the contract declares a CLI;
     # SHADOW (streamed, non-blocking) until effective-FP is shown ~0. Runs once over the initially-built leaf.
     conformance_report = None
+    secret_report = None
     if not pipeline_failed:
         conformance_report = _shadow_conformance(repo, results, run_id)
+        secret_report = _secret_scan(repo, run_id)
 
     initial_finished_at = _utc_now()
     findings = _linon_findings(results.get("linon"))
@@ -964,6 +1005,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     # conformance / preflight findings into the repair loop (one-line, auditable flip — see _apply_*_gate).
     findings = _apply_conformance_gate(findings, conformance_report, CONFORMANCE_SHADOW)
     findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
+    findings = _apply_secret_gate(findings, secret_report, SECRET_SCAN_MODE)
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
