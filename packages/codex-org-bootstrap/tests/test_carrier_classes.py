@@ -141,7 +141,10 @@ class LinonFixTests(unittest.TestCase):
             res = output.gate_output('{"x": 1}', sp)
             if has_full:
                 self.assertTrue(res["output_ok"])      # jsonschema validates the conditional schema
-                self.assertEqual(res.get("validator"), "jsonschema")
+                # the validator field now names the SELECTED draft class (validator_for the schema's $schema),
+                # not the generic "jsonschema"; assert a real jsonschema validator was used (not "minimal").
+                self.assertIn("Validator", res.get("validator", ""))
+                self.assertNotEqual(res.get("validator"), "minimal")
             else:
                 self.assertFalse(res["output_ok"])     # minimal validator fails closed on allOf
 

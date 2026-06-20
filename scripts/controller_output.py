@@ -126,9 +126,13 @@ def gate_output(output_text: str, schema_path) -> dict:
     # Prefer the full validator; fall back to the minimal one, fail-closed on unsupported constructs.
     try:
         import jsonschema  # type: ignore
+        # Select the validator from the schema's own $schema (ADR-0009 P0): the implementation contract
+        # declares Draft 2020-12 (if/then, $defs), so a fixed Draft7Validator would mis-validate it.
+        validator_cls = jsonschema.validators.validator_for(schema)
+        validator_cls.check_schema(schema)
         errs = [f"{list(e.absolute_path) or '$'}: {e.message}"
-                for e in jsonschema.Draft7Validator(schema).iter_errors(instance)]
-        return {"output_ok": not errs, "errors": errs[:20], "validator": "jsonschema"}
+                for e in validator_cls(schema).iter_errors(instance)]
+        return {"output_ok": not errs, "errors": errs[:20], "validator": validator_cls.__name__}
     except ImportError:
         unsupported = _unsupported_keywords(schema)
         if unsupported:

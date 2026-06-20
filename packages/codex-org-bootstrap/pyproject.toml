@@ -7,6 +7,10 @@ name = "codex-org-bootstrap"
 version = "0.1.0"
 description = "Codex-native AI Org Bootstrap runtime and validation CLI."
 requires-python = ">=3.11"
+# jsonschema is REQUIRED for fail-closed output-gate validation of Draft 2020-12 contracts (if/then, $defs);
+# without it the minimal validator fail-closes on those constructs (ADR-0009 P0 — declare the dependency so a
+# clean install actually validates instead of rejecting).
+dependencies = ["jsonschema>=4.18"]
 
 [project.scripts]
 aob = "ai_org_bootstrap.cli:main"
