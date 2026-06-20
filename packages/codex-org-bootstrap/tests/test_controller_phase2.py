@@ -72,16 +72,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(rep.changed_files, ["allowed.txt"])
             self.assertEqual(rep.unresolved_failures, [])
 
-    def test_scope_violation_blocks(self):
+    def test_scope_violation_is_trimmed_to_contract(self):
+        # ADR-0008 mechanical scope PREVENTION: an out-of-scope NEW file is TRIMMED (reverted) to the
+        # contract, not failed — the stage passes and the stray is gone. (Forbidden/security touches still
+        # hard-fail in enforce; this is a plain overreach, which strip_to_scope reverts.)
         with tempfile.TemporaryDirectory() as d:
             repo = _new_repo(d)
             rep = workflow.run_contract(
                 repo, self._contract(["allowed.txt"]), "run-s",
                 verifier_specs=[PASS], include_builtin_gates=False,
                 carrier_runner=_stub_carrier("extra.txt"), clock=lambda: 1)
-            self.assertFalse(rep.ok)
-            self.assertIn("extra.txt", rep.scope["deviations"])
-            self.assertTrue(any("scope" in u for u in rep.unresolved_failures))
+            self.assertTrue(rep.ok)                                   # trimmed, not blocked
+            self.assertNotIn("extra.txt", rep.scope["deviations"])    # the stray was reverted, not a deviation
+            self.assertFalse((Path(repo) / "extra.txt").exists())     # ...and removed from the worktree
 
     def test_carrier_failure_blocks(self):
         with tempfile.TemporaryDirectory() as d:

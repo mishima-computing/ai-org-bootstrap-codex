@@ -331,7 +331,10 @@ class ControllerPipelineTests(unittest.TestCase):
                         "findings": [{
                             "file": "scripts/controller_pipeline.py",
                             "line_range": {"start": 1, "end": 1},
-                            "severity": "major",
+                            # an UNWEIGHTED severity keeps the cap at the base (max_repair_iterations=2), so
+                            # this test exercises the BASE repair cap; the severity-weighted scaling (ADR-0008
+                            # addendum) is covered by test_severity_weighted_repair_cap.
+                            "severity": "moderate",
                             "lens": "silent-failure",
                             "basis": "static-read",
                             "claim": f"finding {linon_runs}",

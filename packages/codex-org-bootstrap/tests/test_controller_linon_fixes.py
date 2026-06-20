@@ -30,13 +30,13 @@ def _repo(tmp):
     return r
 
 
-def _stub(write):
+def _stub(write, ok=True):
     def runner(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
         if write:
             target = Path(repo) / write
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("x")
-        return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
+        return {"ok": ok, "attempts": [{"attempt": 0, "exit": 0 if ok else 1, "timed_out": not ok}]}
     return runner
 
 
@@ -104,10 +104,12 @@ class LinonFixTests(unittest.TestCase):
             r = _repo(d)
             contract = {"role": "implementer", "prompt": "p", "sandbox": "workspace-write",
                         "timeout": 30, "retries": 0, "files_allowed_to_change": ["allowed.txt"]}
-            # carrier writes OUT of scope → report.ok False; decider tries to accept anyway
+            # carrier reports a MECHANICAL failure (ok=False) → report.ok False; decider tries to accept
+            # anyway. (An out-of-scope write is no longer a failure — ADR-0008 strip_to_scope TRIMS it — so a
+            # carrier failure is the mechanical failure that must override the decider's accept.)
             res = cloop.run_loop(r, contract, "ov",
                                  decider=lambda rep, i: {"decision": "accept"},
-                                 carrier_runner=_stub("extra.txt"),
+                                 carrier_runner=_stub("allowed.txt", ok=False),
                                  include_builtin_gates=False, clock=lambda: 1)
             self.assertEqual(res["final"], "block")  # mechanical failure overrode accept
 
