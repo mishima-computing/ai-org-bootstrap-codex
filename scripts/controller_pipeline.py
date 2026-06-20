@@ -26,6 +26,7 @@ import controller_run  # noqa: E402
 from controller_evidence import RunJournal, sha256_file  # noqa: E402
 from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # noqa: E402
 import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
+import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -615,6 +616,36 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
     return report
 
 
+PREFLIGHT_MODE = os.environ.get("CONTRACT_PREFLIGHT", "shadow").lower()   # shadow (default) | off | block
+
+
+def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
+    """Run the deterministic contract pre-flight over the aufheben contract and stream the result. Called
+    once, after aufheben produces the contract and BEFORE the implementer's wave — so an under-specified or
+    self-inconsistent contract is visible (shadow) or routed back to aufheben (block) at design time, not
+    after a wasted build. Fail-soft: a gate must never break the run it observes."""
+    if PREFLIGHT_MODE == "off":
+        return None
+    contract = results.get(AUFHEBEN_ROLE)
+    if not isinstance(contract, dict):
+        return None
+    try:
+        report = contract_preflight.preflight(contract)
+    except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
+        _stream_append(repo, {"source": "contract-preflight", "type": "gate_error",
+                              "run_id": run_id, "detail": repr(exc)})
+        return None
+    if not report.get("applicable"):
+        return report
+    _stream_append(repo, {
+        "source": "contract-preflight",
+        "type": "shadow_findings" if PREFLIGHT_MODE != "block" else "findings",
+        "run_id": run_id, "passed": report["passed"], "checks_run": report["checks_run"],
+        "findings": report["findings"], "ts": _iso8601_utc(),
+    })
+    return report
+
+
 def _apply_conformance_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
     """Fold conformance findings into the convergence `findings` ONLY when the gate is promoted to `block`.
     In `shadow` (default) the gate observes but never blocks — the returned list is unchanged. This is the
@@ -820,6 +851,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     run_started_at = _utc_now()
     pipeline_failed = False
     producer_roles = _advisory_producer_roles(entries)
+    preflight_report = None         # ADR-0009 #1: deterministic contract review, run once after aufheben
+    preflight_done = False
 
     repo_is_git = (repo / ".git").exists()
     for wave in _waves(ordered, predecessors):
@@ -863,6 +896,12 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 terminal_write_roles.append(role)
             if not stage_ok and role not in producer_roles:
                 pipeline_failed = True
+        # ADR-0009 #1: review the contract the moment aufheben produces it — this fires after aufheben's wave
+        # and BEFORE the implementer's wave, so an under-specified/inconsistent contract is caught at design
+        # time (shadow: streamed; block: folded into the repair findings post-wave, re-running aufheben).
+        if not preflight_done and AUFHEBEN_ROLE in results:
+            preflight_done = True
+            preflight_report = _contract_preflight(repo, results, run_id)
         if pipeline_failed:
             break
 
@@ -894,8 +933,9 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     initial_finished_at = _utc_now()
     findings = _linon_findings(results.get("linon"))
     # SHADOW mode contributes nothing to the convergence gate; only an explicit `block` promotion folds the
-    # conformance findings into the repair loop (one-line, auditable flip — see _apply_conformance_gate).
+    # conformance / preflight findings into the repair loop (one-line, auditable flip — see _apply_*_gate).
     findings = _apply_conformance_gate(findings, conformance_report, CONFORMANCE_SHADOW)
+    findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
