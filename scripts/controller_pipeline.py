@@ -613,6 +613,23 @@ def _linon_findings(result: dict | str | None) -> list[dict]:
 CONFORMANCE_SHADOW = os.environ.get("CONFORMANCE_GATE", "shadow").lower()   # shadow (default) | off | block
 
 
+_DETERMINISTIC_IMPL_SOURCES = {"cli-conformance", "conformance", "cli-fuzz", "secret-scan"}
+
+
+def _repair_roles_for(findings: list[dict], repair_forward_roles: list[str]) -> list[str]:
+    """ADR-0009 P0 #6 — TARGETED repair routing. Re-run only the roles a finding implicates instead of the
+    full wave. ONLY the deterministic artifact gates (conformance / fuzz / secret) pin the defect to the
+    IMPLEMENTATION with confidence — when every finding is one of those, re-run the implementer ONLY and skip
+    the expensive designer + aufheben re-synthesis. Linon is semantic (its finding may need a re-design) and
+    contract-pre-flight is contract-level, so a run containing either (or no findings) keeps the full set.
+    Conservative on purpose: it narrows repair only where the locus is unambiguous. Order is preserved."""
+    sources = {f.get("source") for f in findings if isinstance(f, dict)}
+    if sources and sources <= _DETERMINISTIC_IMPL_SOURCES:     # purely an artifact defect -> implementer only
+        impl_only = [r for r in repair_forward_roles if r == "implementer"]
+        return impl_only or list(repair_forward_roles)
+    return list(repair_forward_roles)                          # linon / contract / empty -> full re-synthesis
+
+
 def _gate_error_report(source: str, detail: str) -> dict:
     """ADR-0009 P0 — a gate that ERRORED (could not complete) is NOT clean. The external review flagged that a
     scanner crash was treated as "no findings" (a silent fail-open). This returns a FAILING report whose
@@ -1132,7 +1149,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         if any(gate_ctx.values()):
             linon_context["gate_findings"] = gate_ctx
 
-        for role in repair_forward_roles:
+        # TARGETED repair (P0 #6): route this iteration to the roles the findings actually implicate —
+        # implementer-only for an implementation defect, the full set only for a contract defect.
+        this_repair_roles = _repair_roles_for(findings, repair_forward_roles)
+        for role in this_repair_roles:
             entry = entries[role]
             if role in producer_roles:
                 inputs = {"linon": linon_context}

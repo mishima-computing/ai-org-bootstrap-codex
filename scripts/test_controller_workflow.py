@@ -155,6 +155,19 @@ def test_own_deliverable_survives_a_blanket_forbidden_strip():
     print("ok  own deliverable survives a self-overlapping (allowed + blanket-forbidden) contract")
 
 
+def test_targeted_repair_routing():
+    roles = ["aggressive-designer", "conservative-designer", "genius", "aufheben-designer", "implementer"]
+    # ONLY deterministic artifact-gate findings -> implementer only (skip the designer/aufheben re-synthesis)
+    assert cp._repair_roles_for([{"source": "cli-conformance"}, {"source": "cli-fuzz"}], roles) == ["implementer"]
+    assert cp._repair_roles_for([{"source": "secret-scan"}], roles) == ["implementer"]
+    # Linon present (semantic, may need re-design) -> full set
+    assert cp._repair_roles_for([{"source": "linon"}, {"source": "cli-conformance"}], roles) == roles
+    # contract-level finding -> full re-design
+    assert cp._repair_roles_for([{"source": "contract-preflight"}], roles) == roles
+    assert cp._repair_roles_for([], roles) == roles            # no findings -> full (conservative)
+    print("ok  targeted repair: artifact-gate-only -> implementer only; linon/contract/empty -> full set")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
