@@ -24,6 +24,7 @@ Design:
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Callable, NamedTuple, Optional
 
@@ -222,21 +223,63 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
     return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
 
 
-def subprocess_runner(timeout: float = 60.0) -> Runner:
+def _cap_output(text: str, limit: int) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n<conformance: output truncated at {limit} bytes>"
+
+
+def _rlimit_preexec(mem_bytes: int, cpu_seconds: int, fsize_bytes: int):
+    """ADR-0009 #2 (codex-side resource bound): best-effort soft rlimits on the child that runs the UNTRUSTED
+    built artifact — address space, CPU seconds, file size, no core dumps. Each is wrapped because a given
+    limit may be unsupported/clamped on a platform (notably RLIMIT_AS on macOS); the box's cgroups (ADR-0022)
+    are the authoritative enforcement, this is defence-in-depth so the gate's own run cannot exhaust the host."""
+    import resource
+
+    def _apply():
+        for res, soft, hard in (
+            (getattr(resource, "RLIMIT_AS", None), mem_bytes, mem_bytes),
+            (getattr(resource, "RLIMIT_CPU", None), cpu_seconds, cpu_seconds + 1),
+            (getattr(resource, "RLIMIT_FSIZE", None), fsize_bytes, fsize_bytes),
+            (getattr(resource, "RLIMIT_CORE", None), 0, 0),
+        ):
+            if res is None:
+                continue
+            try:
+                resource.setrlimit(res, (soft, hard))
+            except (ValueError, OSError):
+                pass
+
+    return _apply
+
+
+def subprocess_runner(timeout: float = 60.0, *, mem_bytes: int = 512 * 1024 * 1024,
+                      max_output: int = 1_000_000, fsize_bytes: int = 50 * 1024 * 1024) -> Runner:
     """A real runner for in-box execution. NOT used in unit tests (those inject a fake). Runs the command
     through the shell because invocations are declared as shell strings; the box is the containment boundary
-    (ADR-0022), so shell execution is acceptable *there* and only there."""
+    (ADR-0022), so shell execution is acceptable *there* and only there.
+
+    The run is RESOURCE-BOUNDED (ADR-0009 #2 defence-in-depth): a wall-clock timeout, soft rlimits on memory /
+    CPU / file size (POSIX, best-effort), and a cap on captured output — so an artifact that loops, leaks
+    memory, or floods stdout cannot exhaust the host running the gate. The authoritative isolation is still
+    the box's cgroups; this protects the gate even outside the box (e.g. the local single-host simulation)."""
     import subprocess
+
+    preexec = _rlimit_preexec(mem_bytes, int(timeout) + 1, fsize_bytes) if os.name == "posix" else None
 
     def _run(cmd: str, *, cwd: Optional[str] = None, stdin: Optional[str] = None) -> RunResult:
         try:
             proc = subprocess.run(
                 cmd, shell=True, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=timeout,
+                preexec_fn=preexec,
             )
-            return RunResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+            return RunResult(proc.returncode, _cap_output(proc.stdout, max_output),
+                             _cap_output(proc.stderr, max_output))
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            return RunResult(124, out, err + f"\n<conformance: timeout after {timeout}s>")
+            return RunResult(124, _cap_output(out, max_output),
+                             _cap_output(err, max_output) + f"\n<conformance: timeout after {timeout}s>")
 
     return _run

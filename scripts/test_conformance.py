@@ -299,6 +299,18 @@ def test_acceptance_bundle_withheld_from_implementer_only():
     print("ok  acceptance bundle withheld from implementer only (spec kept, goldens hidden, gate intact)")
 
 
+def test_subprocess_runner_is_resource_bounded():
+    # ADR-0009 #2 codex-side bound: a normal run works; output is capped; a too-long run times out to 124.
+    run = conf.subprocess_runner(timeout=1.0, max_output=10)
+    ok = run("printf hi")
+    assert ok.returncode == 0 and "hi" in ok.stdout, ok
+    capped = run("printf abcdefghijklmnopqrstuvwxyz")
+    assert "truncated at 10 bytes" in capped.stdout and len(capped.stdout) < 60, capped
+    slow = run("sleep 5")
+    assert slow.returncode == 124 and "timeout" in slow.stderr, slow
+    print("ok  subprocess_runner: normal run ok, output capped, slow run -> 124 timeout")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
