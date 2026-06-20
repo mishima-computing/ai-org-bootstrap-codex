@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import conformance as conf
+import controller_pipeline as cp
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
@@ -163,6 +165,52 @@ def test_schema_cli_profile_required_iff_cli():
     # 4) a library deliverable does NOT require a cli profile (the schema is not a universal checklist)
     assert validator.is_valid({**base, "deliverable_kind": "library"})
     print("ok  schema: cli profile required iff deliverable_kind==cli; non-cli & legacy still valid")
+
+
+def test_shadow_gate_streams_but_does_not_block():
+    # the wired gate: when the contract is a CLI and an example fails, the controller streams a
+    # `shadow_findings` event for observation, but in SHADOW mode the failure must NOT enter the convergence
+    # findings (so it cannot block the merge). Promotion to `block` is the only path that folds them in.
+    profile = {"entrypoint": {"invocation": "mytool"},
+               "examples": [{"invocation": "x", "expected_status": 0}]}
+    results = {"aufheben-designer": _cli_contract(profile)}
+    runner = fake_runner({"mytool x": R(3, "", "boom\n")})   # wrong exit -> a failing conformance finding
+
+    events = []
+    orig = cp._stream_append
+    cp._stream_append = lambda repo, ev: events.append(ev)        # capture stream, touch no disk
+    try:
+        report = cp._shadow_conformance("/tmp/leaf", results, "run-1", runner=runner)
+    finally:
+        cp._stream_append = orig
+
+    assert report and report["applicable"] and report["passed"] is False, report
+    streamed = [e for e in events if e.get("source") == "cli-conformance"]
+    assert streamed and streamed[0]["type"] == "shadow_findings", streamed
+    # SHADOW: the convergence findings are untouched; BLOCK: the failing finding is folded in.
+    base = [{"severity": "major", "file": "x.py"}]
+    assert cp._apply_conformance_gate(base, report, "shadow") == base, "shadow must not block"
+    folded = cp._apply_conformance_gate(base, report, "block")
+    assert len(folded) == len(base) + 1 and folded[-1]["check"] == "exit_status", folded
+    print("ok  wired gate streams shadow_findings; shadow never blocks, block folds the failure in")
+
+
+def test_shadow_gate_dormant_for_non_cli_contract():
+    # no contract declares a CLI today, so the gate must be a no-op: no event, returns a not-applicable
+    # report (or None), and the runner is never touched.
+    results = {"aufheben-designer": {"role_id": "aufheben-designer", "implementation_summary": "prose only"}}
+    events = []
+    orig = cp._stream_append
+    cp._stream_append = lambda repo, ev: events.append(ev)
+    try:
+        report = cp._shadow_conformance("/tmp/leaf", results, "run-2",
+                                        runner=fake_runner({}))   # empty table: any exec would raise
+    finally:
+        cp._stream_append = orig
+    assert report is None or report.get("applicable") is False, report
+    assert [e for e in events if e.get("source") == "cli-conformance"] == [], events
+    assert cp.CONFORMANCE_SHADOW == "shadow", "default mode is shadow (observe, never block)"
+    print("ok  gate dormant for a non-CLI contract (no event, no exec, default mode=shadow)")
 
 
 if __name__ == "__main__":

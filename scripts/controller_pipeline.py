@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(HERE).parent / "packages" / "codex-org-bootstrap" / 
 import controller_run  # noqa: E402
 from controller_evidence import RunJournal, sha256_file  # noqa: E402
 from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # noqa: E402
+import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -569,6 +570,54 @@ def _linon_findings(result: dict | str | None) -> list[dict]:
     return [f for f in dicts if _is_reviewable_finding_path(f.get("file") or f.get("path") or "")]
 
 
+# ADR-0009 #1 — the dynamic gate, wired SHADOW-first. When the aufheben contract carries a `conformance.cli`
+# profile, the controller RE-RUNS the built artifact (install + declared examples) in the leaf worktree and
+# checks exit status + stdout/stderr against the contract — instead of trusting the implementer's self-report
+# (the static-review gap, ADR-0009). It is OFF unless a contract declares itself a CLI (no contract does yet,
+# so this is dormant until aufheben emits the profile), and even then it is SHADOW: findings are streamed for
+# observation but are NOT added to the repair `findings`, so they cannot block. Promotion to blocking happens
+# only after telemetry shows effective-FP ~0 (Tricorder discipline). The local worktree run is the single-host
+# SIMULATION of the ADR-0022 inner box; in production the same call runs the box runner.
+CONFORMANCE_SHADOW = os.environ.get("CONFORMANCE_GATE", "shadow").lower()   # shadow (default) | off | block
+
+
+def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
+    """Run the CLI conformance gate over the implemented artifact and stream the result. Returns the report
+    (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
+    a fake. Fail-soft: any error is logged to the stream and swallowed — a verification gate must never break
+    the build it observes."""
+    if CONFORMANCE_SHADOW == "off":
+        return None
+    contract = results.get(AUFHEBEN_ROLE)
+    if not isinstance(contract, dict):
+        return None
+    try:
+        report = conformance.run_cli_conformance(
+            contract, runner or conformance.subprocess_runner(), cwd=str(repo))
+    except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
+        _stream_append(repo, {"source": "cli-conformance", "type": "gate_error",
+                              "run_id": run_id, "detail": repr(exc)})
+        return None
+    if not report.get("applicable"):
+        return report
+    _stream_append(repo, {
+        "source": "cli-conformance",
+        "type": "shadow_findings" if CONFORMANCE_SHADOW != "block" else "findings",
+        "run_id": run_id, "passed": report["passed"], "checks_run": report["checks_run"],
+        "findings": report["findings"], "ts": _iso8601_utc(),
+    })
+    return report
+
+
+def _apply_conformance_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
+    """Fold conformance findings into the convergence `findings` ONLY when the gate is promoted to `block`.
+    In `shadow` (default) the gate observes but never blocks — the returned list is unchanged. This is the
+    one-line, auditable flip from shadow to blocking (ADR-0009 / Tricorder shadow-first)."""
+    if mode != "block" or not report or report.get("passed"):
+        return findings
+    return findings + [f for f in report.get("findings", []) if not f.get("passed")]
+
+
 def _iteration_record(kind: str, iteration: int, started_at: datetime, finished_at: datetime,
                       stages: list[dict], linon_findings_count: int) -> dict:
     return {
@@ -830,8 +879,17 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
                 break
 
+    # ADR-0009 #1: dynamic conformance gate alongside static Linon. Dormant unless the contract declares a CLI;
+    # SHADOW (streamed, non-blocking) until effective-FP is shown ~0. Runs once over the initially-built leaf.
+    conformance_report = None
+    if not pipeline_failed:
+        conformance_report = _shadow_conformance(repo, results, run_id)
+
     initial_finished_at = _utc_now()
     findings = _linon_findings(results.get("linon"))
+    # SHADOW mode contributes nothing to the convergence gate; only an explicit `block` promotion folds the
+    # conformance findings into the repair loop (one-line, auditable flip — see _apply_conformance_gate).
+    findings = _apply_conformance_gate(findings, conformance_report, CONFORMANCE_SHADOW)
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
