@@ -116,6 +116,56 @@ def test_default_mode_is_shadow():
     print("ok  default CONTRACT_PREFLIGHT mode is shadow")
 
 
+def _drive_preflight_gate(preflight_sequence, mode):
+    """Run cp._preflight_gate with a scripted preflight() sequence and a fake aufheben stage; return
+    (report, floored, aufheben_run_count, last_inputs_preflight)."""
+    seq = iter(preflight_sequence)
+    runs = []
+    saved = (cp._contract_preflight, cp._execute_stage, cp._store_stage_output, cp.PREFLIGHT_MODE)
+    cp._contract_preflight = lambda repo, results, run_id: next(seq, {"applicable": True, "passed": True,
+                                                                       "findings": []})
+    def fake_stage(repo, role, entry, objective, inputs, sid, cache, **kw):
+        runs.append(inputs.get("preflight"))
+        return True, {"role_id": role}, {"ok": True}, {"role": role, "sid": sid}
+    cp._execute_stage = fake_stage
+    cp._store_stage_output = lambda *a, **k: None
+    try:
+        cp.PREFLIGHT_MODE = mode
+        rep, floored = cp._preflight_gate("/tmp/x", {"aufheben-designer": {}}, "r", "obj",
+                                          {"aufheben-designer": object()}, {"aufheben-designer": []}, False, [])
+    finally:
+        cp._contract_preflight, cp._execute_stage, cp._store_stage_output, cp.PREFLIGHT_MODE = saved
+    return rep, floored, runs
+
+
+def test_preflight_gate_block_reruns_aufheben_then_proceeds():
+    # block mode: preflight FAILS, then PASSES after one aufheben re-run -> proceed (not floored), aufheben
+    # was re-run ONCE and fed the preflight findings. No implementer/verifier wave was consumed.
+    rep, floored, runs = _drive_preflight_gate(
+        [{"applicable": True, "passed": False, "findings": [{"check": "self_overlapping_scope"}]},
+         {"applicable": True, "passed": True, "findings": []}], mode="block")
+    assert floored is False and rep["passed"], (floored, rep)
+    assert len(runs) == 1 and runs[0]["findings"], "one aufheben re-run, fed the preflight findings"
+    print("ok  preflight gate (block): a contract defect re-runs aufheben only, then proceeds")
+
+
+def test_preflight_gate_block_fails_closed_after_cap():
+    # block mode: preflight ALWAYS fails -> aufheben re-run up to the cap, then fail-closed (floored=True).
+    always_fail = [{"applicable": True, "passed": False, "findings": [{"check": "x"}]}] * 10
+    rep, floored, runs = _drive_preflight_gate(always_fail, mode="block")
+    assert floored is True, "a persistent contract defect must fail closed (no implementer)"
+    assert len(runs) == cp.PREFLIGHT_AUFHEBEN_CAP, ("aufheben re-run exactly cap times", len(runs))
+    print("ok  preflight gate (block): a persistent defect fails closed after the cap")
+
+
+def test_preflight_gate_shadow_never_reruns():
+    # shadow (default): observe only — never re-run aufheben, never floor.
+    rep, floored, runs = _drive_preflight_gate(
+        [{"applicable": True, "passed": False, "findings": [{"check": "x"}]}], mode="shadow")
+    assert floored is False and runs == [], "shadow mode is pure observation"
+    print("ok  preflight gate (shadow): pure observation, no aufheben re-run, no floor")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

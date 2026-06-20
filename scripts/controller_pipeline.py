@@ -648,6 +648,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
 
 
 PREFLIGHT_MODE = os.environ.get("CONTRACT_PREFLIGHT", "shadow").lower()   # shadow (default) | off | block
+PREFLIGHT_AUFHEBEN_CAP = int(os.environ.get("PREFLIGHT_AUFHEBEN_CAP", "2"))   # block-mode aufheben re-runs
 
 
 def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
@@ -675,6 +676,36 @@ def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
         "findings": report["findings"], "ts": _iso8601_utc(),
     })
     return report
+
+
+def _preflight_gate(repo, results: dict, run_id: str, objective: str, entries, predecessors, cache,
+                    stages: list) -> tuple:
+    """ADR-0009 P0 — preflight as a TRUE pre-implementation GATE. Run the deterministic contract review the
+    moment aufheben produces the contract; in `block` mode, if it FAILS, re-run ONLY aufheben (fed the
+    preflight findings) and re-check, up to PREFLIGHT_AUFHEBEN_CAP times — so a contract defect costs an
+    aufheben re-run, NOT a wasted implementer + verifier wave. Returns (report, floored): floored=True means
+    the contract is still defective after the cap (block-mode fail-closed) and the caller must NOT run the
+    implementer. In shadow/off this is pure observation and floored is always False."""
+    report = _contract_preflight(repo, results, run_id)
+    if PREFLIGHT_MODE != "block" or not report or report.get("passed"):
+        return report, False
+    entry = entries.get(AUFHEBEN_ROLE)
+    if entry is None:
+        return report, True
+    for attempt in range(1, PREFLIGHT_AUFHEBEN_CAP + 1):
+        inputs = {u: results[u] for u in predecessors.get(AUFHEBEN_ROLE, []) if u in results}
+        inputs["preflight"] = {"findings": report.get("findings", []), "attempt": attempt}
+        sid = f"{run_id}-preflight{attempt}-aufheben"
+        stage_ok, result, report_dict, stage = _execute_stage(repo, AUFHEBEN_ROLE, entry, objective,
+                                                              inputs, sid, cache)
+        stages.append(stage)
+        _store_stage_output(AUFHEBEN_ROLE, entry, stage_ok, result, report_dict, results)
+        if not stage_ok:
+            return report, True                                # aufheben itself failed -> fail closed
+        report = _contract_preflight(repo, results, sid)
+        if not report or report.get("passed"):
+            return report, False                               # contract now clean -> proceed to implementer
+    return report, True                                        # still defective after the cap -> fail closed
 
 
 SECRET_SCAN_MODE = os.environ.get("SECRET_SCAN", "shadow").lower()   # shadow (default) | off | block
@@ -1029,7 +1060,13 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         # time (shadow: streamed; block: folded into the repair findings post-wave, re-running aufheben).
         if not preflight_done and AUFHEBEN_ROLE in results:
             preflight_done = True
-            preflight_report = _contract_preflight(repo, results, run_id)
+            # TRUE pre-implementation gate (ADR-0009 P0): in block mode a contract defect re-runs ONLY
+            # aufheben here, before the implementer's wave; a persistent defect fails closed (no implementer).
+            preflight_report, _pf_floored = _preflight_gate(repo, results, run_id, objective, entries,
+                                                            predecessors, cache, stages)
+            if _pf_floored:
+                fatal_ok[AUFHEBEN_ROLE] = False
+                pipeline_failed = True
         if pipeline_failed:
             break
 
