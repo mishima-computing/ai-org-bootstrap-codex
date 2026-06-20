@@ -739,6 +739,16 @@ def _preflight_gate(repo, results: dict, run_id: str, objective: str, entries, p
 SECRET_SCAN_MODE = os.environ.get("SECRET_SCAN", "shadow").lower()   # shadow (default) | off | block
 
 
+def _changed_files(repo) -> set | None:
+    """The leaf's changed/added files (git porcelain, scratch excluded) for scoping a scan to the leaf's own
+    work. None when git is unavailable — the caller then scans repo-wide rather than mis-scoping to nothing."""
+    try:
+        import controller_scope
+        return controller_scope.porcelain_touched(Path(repo))
+    except Exception:                                          # noqa: BLE001 — scoping never breaks the gate
+        return None
+
+
 def _secret_scan(repo, run_id: str) -> dict | None:
     """Scan the leaf's deliverable for committed secrets and stream the result. Validity-tiered: the report
     streams all findings, but only CRITICAL ones (known provider tokens / private keys) are eligible to block
@@ -754,12 +764,21 @@ def _secret_scan(repo, run_id: str) -> dict | None:
         return _gate_error_report("secret-scan", repr(exc))
     if not report.get("applicable"):
         return report
+    # LEAF-SCOPED (ADR-0009 P0): a secret in a file the leaf did NOT touch is a pre-existing fixture, not this
+    # leaf's finding — scope the findings to the leaf's changed files (git porcelain). A finding with no file
+    # (e.g. a scanner_error) is kept regardless, so fail-closed is preserved. git-unavailable -> repo-wide.
+    changed = _changed_files(repo)
+    if changed is not None:
+        scoped = [f for f in report.get("findings", [])
+                  if not f.get("file") or str(f.get("file")).split("!", 1)[0] in changed]
+        if len(scoped) != len(report.get("findings", [])):
+            report = dict(report, findings=scoped, passed=not scoped)
     crit = sum(1 for f in report["findings"] if f.get("severity") == "critical")
     _stream_append(repo, {
         "source": "secret-scan",
         "type": "shadow_findings" if SECRET_SCAN_MODE != "block" else "findings",
         "run_id": run_id, "passed": report["passed"], "backend": report.get("backend"),
-        "critical": crit, "total": len(report["findings"]),
+        "critical": crit, "total": len(report["findings"]), "scoped": changed is not None,
         "findings": report["findings"], "ts": _iso8601_utc(),
     })
     return report

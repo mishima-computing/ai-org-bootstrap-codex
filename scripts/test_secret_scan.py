@@ -107,6 +107,31 @@ def test_archive_scan_is_bounded_and_failsoft():
     print("ok  archive scan is fail-soft on a bogus archive; include_archives=False skips")
 
 
+def test_secret_scan_is_leaf_scoped():
+    # P0 leaf-scoped: a secret in a file the leaf did NOT change is a pre-existing fixture, not the leaf's
+    # finding. Only changed-file findings survive; a file-less finding (scanner_error) is always kept.
+    report = {"applicable": True, "passed": False, "backend": "fallback", "findings": [
+        {"source": "secret-scan", "check": "aws-access-token", "severity": "critical", "passed": False,
+         "file": "fixtures/old.py"},                            # pre-existing, NOT in the leaf's changes
+        {"source": "secret-scan", "check": "github-pat", "severity": "critical", "passed": False,
+         "file": "new.py"},                                     # the leaf's changed file
+        {"source": "secret-scan", "check": "scanner_error", "severity": "critical", "passed": False}]}
+    saved = (ss.scan_dir, cp._changed_files, cp._stream_append, cp.SECRET_SCAN_MODE)
+    cp.secret_scan.scan_dir = lambda path: report
+    cp._changed_files = lambda repo: {"new.py"}
+    cp._stream_append = lambda repo, ev: None
+    try:
+        cp.SECRET_SCAN_MODE = "shadow"
+        rep = cp._secret_scan("/tmp/x", "r")
+    finally:
+        cp.secret_scan.scan_dir, cp._changed_files, cp._stream_append, cp.SECRET_SCAN_MODE = saved
+    files = {f.get("file") for f in rep["findings"]}
+    assert "fixtures/old.py" not in files, "a pre-existing secret outside the leaf is not the leaf's finding"
+    assert "new.py" in files, "the leaf's changed-file secret is kept"
+    assert any(f["check"] == "scanner_error" for f in rep["findings"]), "a file-less finding is always kept"
+    print("ok  secret scan leaf-scoped: pre-existing dropped, changed-file + scanner_error kept")
+
+
 def test_wired_secret_gate_only_critical_blocks():
     # the gate streams everything but only CRITICAL folds into the convergence loop in block mode.
     crit = {"source": "secret-scan", "check": "aws-access-token", "severity": "critical", "passed": False}
