@@ -253,6 +253,27 @@ pre-flight re-validates — every leaf. The one gate that does **not** is fuzzin
 so its counterexamples are persisted to a corpus and **replayed first** on every later run: a fixed crash
 that reappears is caught instantly and deterministically, not rediscovered by random luck or an LLM.
 
+End to end the spine is **choose → encode → check → contain → fuzz → regress**: judgment chooses the
+contract, deterministic gates do the rest.
+
+**Proven end to end (live):** an *unchanged* org, given a CLI goal, emitted a `conformance.cli` profile (exit
+codes pinned, six examples covering `--help` / success / error), built a contract-honouring CLI, and the
+conformance gate **ran the artifact** and passed all six examples — verification by *running*, not by
+self-report. (The gates are also exercised by ~50 unit tests across the suites listed above.)
+
+**Deferred, with reason** (so this section is not read as "everything is done"):
+
+- **SAST tiering and sanitizers** wait on an engine (Semgrep / CodeQL / a sanitizer) shipped in the box
+  image — a *blocking* rule needs ~0 effective false positives, which cannot be measured without the engine,
+  so a home-grown regex "SAST" is not built.
+- **The inner build sandbox's network default-deny / read-only-root** belong to the *inner* sandbox that runs
+  the built app's tests, not the carrier's outer box (which needs LLM egress and a writable fs).
+- **An independent *LLM* review of contract-vs-goal** ("is this the right interface?") is the *judgment* half
+  of pre-implementation review; it overlaps the designers and is added only if telemetry shows
+  contract-vs-goal misses the deterministic pre-flight does not.
+- **Promotion from `shadow` to `block`** happens per gate only once its effective-FP is shown ~0 on real
+  runs. ADR-0009 investments #1–#4 are built; the remainder is telemetry-, engine-, or demand-gated.
+
 The full defect-class allocation, repair routing, and the five-step investment sequence are in **ADR-0009**;
 its one-line boundary: *the model/human decides what must be true and whether the contract fits the goal;
 deterministic systems prove, test, or enforce that the implementation obeys it.*
