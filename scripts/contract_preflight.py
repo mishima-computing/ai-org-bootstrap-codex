@@ -14,6 +14,8 @@ severity budget / repair loop with no parallel path.
 """
 from __future__ import annotations
 
+import fnmatch
+
 
 def _finding(check: str, severity: str, detail: str, **extra) -> dict:
     return {"source": "contract-preflight", "check": check, "severity": severity,
@@ -83,6 +85,22 @@ def preflight(contract: dict) -> dict:
     if not (contract.get("acceptance_criteria") or []):
         findings.append(_finding("acceptance_criteria", "major",
                                  "contract has no acceptance_criteria — nothing to verify the build against"))
+
+    # Generic: a SELF-OVERLAPPING scope — a deliverable that is both allowed AND forbidden. A blanket
+    # files_not_allowed entry like "*" matches the allowed deliverable, and the coordination strip would
+    # revert it before the scope check (the deliverable is silently lost). Catch the contradiction at design
+    # time so aufheben narrows the forbidden set instead of paying a wasted repair round.
+    checks += 1
+    allowed = contract.get("files_allowed_to_change") or []
+    forbidden = contract.get("files_not_allowed_to_change") or []
+    for a in allowed:
+        for f in forbidden:
+            if fnmatch.fnmatch(a, f):
+                findings.append(_finding(
+                    "self_overlapping_scope", "major",
+                    f"files_allowed_to_change '{a}' is also matched by files_not_allowed_to_change '{f}' — "
+                    f"the deliverable is both allowed and forbidden; narrow the forbidden set",
+                    allowed=a, forbidden=f))
 
     kind = contract.get("deliverable_kind")
     profile = (contract.get("conformance") or {}).get("cli")

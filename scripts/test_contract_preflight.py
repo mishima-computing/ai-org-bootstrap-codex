@@ -77,6 +77,21 @@ def test_status_inconsistency_flagged():
     print("ok  an example exit code outside the declared policy -> status_consistency major")
 
 
+def test_self_overlapping_scope_is_flagged():
+    # the exact contract that lost a deliverable live: allowed=["jsonpick.py"] AND a blanket forbidden "*"
+    # that matches it. Preflight must flag the contradiction at design time.
+    c = _complete_cli_contract()
+    c["files_allowed_to_change"] = ["jsonpick.py"]
+    c["files_not_allowed_to_change"] = ["*", ".agent-runs/**", "package manifests"]   # "*" matches the deliverable
+    findings = pf.preflight(c)["findings"]
+    overlap = [f for f in findings if f["check"] == "self_overlapping_scope"]
+    assert overlap and overlap[0]["allowed"] == "jsonpick.py" and overlap[0]["forbidden"] == "*", findings
+    # a NON-overlapping forbidden set (prose descriptions, scoped globs) does not false-positive
+    c["files_not_allowed_to_change"] = [".agent-runs/**", "package manifests", "test files"]
+    assert not [f for f in pf.preflight(c)["findings"] if f["check"] == "self_overlapping_scope"]
+    print("ok  self-overlapping scope (allowed also matched by a blanket forbidden) -> flagged; clean set -> not")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []
