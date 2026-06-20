@@ -158,10 +158,14 @@ store — durable, current-state authority, **git-backed**.
 - **Resume is a first-class operation.** `--resume-from <id>` Loads a prior goal's `wip` into a fresh
   worktree and continues — even a *failed*/floored goal is resumable, because its converged work was already
   saved to `wip`. Resume restores the FILES but **intentionally does NOT restore the frontier**: it re-splits
-  the goal fresh, which adapts to a changed goal / codebase / steering and drops a bad earlier plan. Its one
-  cost — the LLM recreating already-built work under new names — is removed by feeding the re-split the
-  inventory of restored files (build on / patch these, do not recreate). The fix is idempotent re-split, not
-  a restored frontier.
+  the goal fresh, which adapts to a changed goal / codebase / steering and drops a bad earlier plan.
+  Restoring a stale frontier would forfeit that; the cost of a fresh re-split — the LLM recreating
+  already-built work under new names — is removed two ways instead, keeping the frontier non-restored:
+  - the resumed top split **CONTINUES the prior goal's splitter codex session**, so the splitter keeps the
+    memory of its original decomposition (the names it chose) and re-plans without amnesiac duplication
+    (the same session-reuse the repair loop uses, applied to resume → re-split);
+  - and it is fed the **inventory of restored files** ("build on / patch these, do not recreate") as explicit
+    ground truth. A declared boundary ("inside `X/` ONLY") is re-applied too, so a resumed plan stays scoped.
 - **Repair keeps its memory.** On a Linon-rejection repair iteration the producer designers and the
   implementer RESUME their prior codex session (recorded per leaf×role in state) instead of re-deliberating
   amnesiac — so a repair turn is a small delta on a server-cached session, not a full regeneration. The
