@@ -224,6 +224,52 @@ deterministic clamp of a deliverable role's effective allow-set to the goal boun
 on the steer); and the implementer's "never edit `.github`" line is now belt-and-suspenders behind the
 cross-lane revert (the prompt could eventually go).
 
+## Verifying the model's work: an executable contract + deterministic gates (ADR-0009)
+
+The same split, applied to **verification**. The dividing line is not "binary defect vs contextual defect";
+it is: **choosing** the contract/policy is judgment, **checking and enforcing** the chosen contract is
+deterministic. So the design agents emit an *executable* contract and deterministic gates prove the build
+obeys it — **"B produces an executable A."** This corrects an earlier review that was almost entirely *static*
+(Linon reads the diff; the implementer self-reports its tests) by adding a *dynamic* tier that **runs** the
+artifact. Every gate is wired **shadow-first**: it streams its findings but blocks nothing until its effective
+false-positive rate is shown ~0, then a one-line flip promotes it to `block`; findings route through the same
+severity budget / repair loop as Linon's.
+
+Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
+
+| Gate | What it does | Env |
+|---|---|---|
+| **CLI conformance** (`scripts/conformance.py`) | runs the built artifact against the contract's declared examples — exit status + stdout/stderr — instead of trusting the implementer's self-report. `library`/`http_service`/`rpc_service`/`batch_job` are recognised empty slots (a real checker drops in per kind) | `CONFORMANCE_GATE` |
+| **Contract pre-flight** (`scripts/contract_preflight.py`) | the moment aufheben emits the contract and *before* the implementer runs, checks completeness + exit-code consistency, so an under-specified contract is caught at design time | `CONTRACT_PREFLIGHT` |
+| **Immutable acceptance bundle** (`controller_pipeline._withhold_acceptance_bundle`) | withholds the golden examples from the implementer — it builds to the spec, the gate checks goldens it never saw, so the implementation and its oracle cannot share one misunderstanding | `WITHHOLD_ACCEPTANCE_BUNDLE` |
+| **Secret scan** (`scripts/secret_scan.py`) | scans source **and the built artifact's archives** via gitleaks (with a pure-Python fallback); known provider tokens / private keys block, generic entropy is advisory, and the secret value is never emitted into a finding | `SECRET_SCAN` |
+| **Resource limits** | the conformance gate's subprocess runner is rlimit/timeout/output-bounded; the per-org Kata box pod (`shagiri runtime/box_runner.py`) caps cpu/memory/ephemeral-storage and drops capabilities | — |
+
+The full defect-class allocation, repair routing, and the five-step investment sequence are in **ADR-0009**;
+its one-line boundary: *the model/human decides what must be true and whether the contract fits the goal;
+deterministic systems prove, test, or enforce that the implementation obeys it.*
+
+**Grounding** — these gates follow a web-research synthesis recorded in ADR-0009, so the reasons and sources
+are traceable:
+
+- **Google Tricorder** — build-breaking analyses needed ~**0** effective false positives, review-time stayed
+  **<10%**: the basis for *shadow-first, promote to blocking only at ~0 FP*.
+- **oasdiff** — separates *definite* from *potential* breaking changes: the model for tiered-confidence gates
+  (never hard-block on a guess).
+- **OSS-Fuzz** (May 2025) — >**13,000** vulnerabilities / **50,000** bugs across ~1,000 projects: the case for
+  fuzzing parsers/codecs (motivates investment #3, not yet built).
+- **Amazon ShardStore** — an executable reference model + property testing prevented **16** production issues
+  at ~13% of codebase size and ~9 person-months: evidence for *selective*, not universal, formal modelling.
+- **TypeScript/Flow repository-mining study** — caught ~**15%** of sampled public JS bugs: types-as-contracts
+  are *one* layer, not a behavioural spec.
+- **GitHub secret scanning / push-protection** — block known-format tokens *before* they enter the repo,
+  validity-check only where confident: the validity-tiered secret gate (provider token blocks, generic
+  advises).
+- **Secret-leak longitudinal study** — >**100,000** public repos affected, thousands of new secrets/day:
+  prevention beats review-only detection; a real hit must be rotated/revoked, not just deleted.
+- **Linux cgroup v2** / **OWASP fail-secure** — deterministic memory/cpu ceilings, and security controls that
+  default to deny: the box resource limits and securityContext.
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
@@ -240,6 +286,8 @@ For source checkout validation:
 python3 scripts/validate-bootstrap-pack.py
 python3 -m unittest discover -s packages/codex-org-bootstrap/tests   # the dialectic harness suite
 python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 scripts/test_controller_goal.py
+# ADR-0009 verification gates:
+python3 scripts/test_conformance.py && python3 scripts/test_contract_preflight.py && python3 scripts/test_secret_scan.py
 ```
 
 ## Documentation
@@ -248,7 +296,9 @@ python3 scripts/test_frontier.py && python3 scripts/test_splitter.py && python3 
 - [`docs/architecture.md`](docs/architecture.md) — the system in depth.
 - [`docs/decisions/`](docs/decisions/) — Architecture Decision Records (why the engine behaves as it does):
   ADR-0001 Codex-only · ADR-0004 controller-python-ification · ADR-0005 settledness-not-dumbing ·
-  ADR-0007 the org owns its state · ADR-0008 floor-is-not-failure (recovery + deterministic scaffold).
+  ADR-0007 the org owns its state · ADR-0008 floor-is-not-failure (recovery + deterministic scaffold) ·
+  [ADR-0009](docs/decisions/ADR-0009-verification-boundary-executable-contract-and-acceptance-bundle.md)
+  the verification boundary — executable contract + acceptance bundle (with its evidence/sources).
 - [`docs/codex-carrier-capabilities.md`](docs/codex-carrier-capabilities.md) — what the Codex carrier can and cannot do.
 - [`docs/evidence/`](docs/evidence/) — measured results (role timing & pipelining, cone-recall).
 
