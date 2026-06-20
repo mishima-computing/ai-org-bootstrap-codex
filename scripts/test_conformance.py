@@ -534,38 +534,39 @@ def test_schema_rpc_profile_requires_start_base_transport_calls():
 
 
 def test_dispatch_routes_every_kind_to_a_real_checker():
-    # the single entry point: every recognized kind now routes to a real checker (no empty slots remain); an
-    # unknown/absent kind is simply not applicable, never a silent pass.
+    # the single entry point: every executable kind routes to a real checker; `undetermined` routes to the
+    # recognized-but-unchecked slot (never a silent pass); an unknown/absent kind is simply not applicable.
     profile = {"entrypoint": {"invocation": "t"}, "examples": [{"invocation": "", "expected_status": 0}]}
     cli = conf.run_conformance(_cli_contract(profile), fake_runner({"t": R(0, "", "")}))
     assert cli["applicable"] and cli["passed"], cli
+    undetermined = conf.run_conformance({"deliverable_kind": "undetermined"}, fake_runner({}))
+    assert undetermined["applicable"] is False and undetermined.get("slot") == "undetermined", undetermined
     assert conf.run_conformance({"role_id": "x"}, fake_runner({})) == {
         "applicable": False, "passed": True, "findings": [], "checks_run": 0}
     unknown = conf.run_conformance({"deliverable_kind": "mystery", "conformance": {"mystery": {}}}, fake_runner({}))
-    assert unknown["applicable"] is False, unknown
-    print("ok  dispatch: cli -> real checker; unknown kind -> not applicable (no empty slots remain)")
+    assert unknown["applicable"] is False and not unknown.get("slot"), unknown
+    print("ok  dispatch: cli -> real checker; undetermined -> slot; unknown/absent -> not applicable")
 
 
 def test_slot_kind_is_streamed_not_silent():
     # a recognized-but-unchecked kind must emit a `slot_unchecked` stream event (no silent cap), while the
     # convergence findings stay untouched.
-    # No current kind is an empty slot (all have real checkers), but the mechanism is RETAINED for a future
-    # kind added before its checker. Verify it still streams slot_unchecked (visible, never silent) and folds
-    # nothing, by standing in a fabricated future-kind slot report.
-    results = {"aufheben-designer": {"deliverable_kind": "futurekind", "conformance": {"futurekind": {}}}}
+    # `undetermined` is the real entry to the empty-slot mechanism: a checkable interface of a kind no checker
+    # supports yet. It streams slot_unchecked (visible, never silent) and folds nothing — it is recognized,
+    # not silently passed.
+    results = {"aufheben-designer": {"deliverable_kind": "undetermined"}}
     events = []
-    orig_run, orig_stream = conf.run_conformance, cp._stream_append
-    conf.run_conformance = lambda *a, **k: conf._empty_slot("futurekind")
+    orig = cp._stream_append
     cp._stream_append = lambda repo, ev: events.append(ev)
     try:
-        rep = cp._shadow_conformance("/tmp/leaf", results, "run-fk", runner=fake_runner({}))
+        rep = cp._shadow_conformance("/tmp/leaf", results, "run-undet", runner=fake_runner({}))
     finally:
-        conf.run_conformance, cp._stream_append = orig_run, orig_stream
-    assert rep and rep.get("slot") == "futurekind", rep
+        cp._stream_append = orig
+    assert rep and rep.get("slot") == "undetermined", rep
     slot_events = [e for e in events if e.get("type") == "slot_unchecked"]
-    assert slot_events and slot_events[0]["slot"] == "futurekind", events
+    assert slot_events and slot_events[0]["slot"] == "undetermined", events
     assert cp._apply_conformance_gate([], rep, "block") == [], "an empty slot folds no findings even in block"
-    print("ok  slot mechanism (retained for future kinds) streams slot_unchecked; folds nothing")
+    print("ok  undetermined streams slot_unchecked (visible, not silent); folds nothing")
 
 
 def test_schema_every_executable_kind_requires_its_profile():
@@ -583,10 +584,12 @@ def test_schema_every_executable_kind_requires_its_profile():
     # every executable kind now REQUIRES its conformance profile — no optional slots remain.
     for kind in ("cli", "http_service", "library", "json", "batch_job", "rpc_service"):
         assert not v.is_valid({**base, "deliverable_kind": kind}), (kind, "executable kind must require its profile")
-    # 'none' and an absent deliverable_kind need no conformance (no-interface / backward compatible).
+    # 'none' (no interface), 'undetermined' (interface but no checker yet), and an absent deliverable_kind
+    # need no conformance profile.
     assert v.is_valid({**base, "deliverable_kind": "none"}), "none needs no profile"
+    assert v.is_valid({**base, "deliverable_kind": "undetermined"}), "undetermined needs no profile"
     assert v.is_valid(base), "a legacy contract without deliverable_kind still validates"
-    print("ok  schema: every executable kind requires its profile; none/legacy need none")
+    print("ok  schema: every executable kind requires its profile; none/undetermined/legacy need none")
 
 
 def test_schema_cli_profile_required_iff_cli():

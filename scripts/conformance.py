@@ -210,10 +210,12 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
 # aufheben emits -> shadow gate -> finding routing) is proven by the CLI path and is kind-agnostic, so it is
 # replicated for free. The per-kind CHECKER is the real, differentiated work and is NOT done: a library has
 # no process to run (it needs API introspection + API-diff), a service needs boot + protocol-driven testing.
-# EVERY current deliverable kind now has a real checker (cli, http_service, library, json, batch_job,
-# rpc_service). The empty-slot mechanism below is retained as the honest "recognized but unchecked" pattern
-# for the NEXT new kind added before its checker exists — it stays VISIBLE on the stream, never a silent pass.
-_SLOT_KINDS: tuple = ()
+# Every executable kind (cli, http_service, library, json, batch_job, rpc_service) has a real checker. The
+# `undetermined` kind is the explicit ENTRY to the empty-slot mechanism: a deliverable WITH a checkable
+# interface whose kind no checker supports yet — recognized, streamed as unchecked (a checker is owed), never
+# a silent pass. It is distinct from `none`, which asserts there is no interface to check. Without it, a novel
+# interface deliverable would have to mislabel itself `none` and ship unverified.
+_SLOT_KINDS = ("undetermined",)
 
 
 def _empty_slot(kind: str) -> dict:
@@ -222,6 +224,13 @@ def _empty_slot(kind: str) -> dict:
     but not checked (no silent cap)."""
     return {"applicable": False, "passed": True, "findings": [], "checks_run": 0,
             "slot": kind, "status": "no-checker-yet"}
+
+
+def run_undetermined_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """A deliverable with a checkable interface of a kind no checker supports yet. Recognized but unchecked —
+    streamed (slot_unchecked), never a silent pass; declaring it (rather than mislabelling the artifact
+    `none`) honestly signals that a real checker is owed for this new kind."""
+    return _empty_slot("undetermined")
 
 
 _LIBRARY_PROBE_MARKER = "__LIBPROBE__ "
@@ -627,6 +636,7 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
 _SLOT_CHECKERS = {
     "library": run_library_conformance,
     "batch_job": run_batch_job_conformance,
+    "undetermined": run_undetermined_conformance,
 }
 
 
