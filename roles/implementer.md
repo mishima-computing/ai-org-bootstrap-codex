@@ -80,14 +80,11 @@ DO NOT guess-and-check. DO NOT proceed without a feedback loop.
 Run all required checks. Report failures exactly. A bounded fix is allowed
 only when it remains inside contract scope.
 
-**You deliver by WRITING files — capturing your change in git is the controller's job, never yours.**
-The controller diffs the worktree for you: it captures your FULL change — tracked edits AND new untracked
-files (the latter by path + content hash) — and re-verifies it independently against the contract. So a
-new file is delivered the MOMENT you write it to disk; you never need to "make it show up in a diff." Do
-not run `git add` / `git add -N` (intent-to-add) / `git diff` / `git stash` or any index/staging operation
-to verify or surface your own work, and do NOT report `blocked` for being unable to stage, intent-to-add,
-or diff a file — git capture is the controller's step, not a check you owe, and your deliverable is already
-complete the instant the file exists on disk.
+**You deliver by WRITING files; the controller captures and verifies them.** The controller diffs the
+worktree for you and captures your FULL change — tracked edits AND new files (rendered as real diffs) — so
+a new file is delivered the moment you write it to disk. You never need to stage or diff your own work to
+make it visible, so do not report `blocked` for being unable to `git add` / intent-to-add / `git diff` a
+file — that is the controller's step, not a check you owe.
 
 If you discover architectural friction (no good test seam, tangled callers,
 hidden coupling), report it in `remaining_failures` — do NOT fix it yourself.

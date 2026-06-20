@@ -141,23 +141,37 @@ def scope_deviations(changed: list[str], allowed_globs: list[str]) -> list[str]:
 def diff_artifact(repo: Path, out_path: Path) -> dict:
     repo = Path(repo)
     diff = _git(repo, "diff")  # tracked changes
-    # `git diff` omits untracked files; a carrier's new deliverables would be invisible in the
-    # artifact/hash. Append an untracked manifest (path + sha256) so the artifact covers them too.
+    # `git diff` omits untracked files; a carrier's new deliverables would otherwise be invisible in the
+    # artifact. Render each new file as a REAL diff hunk via `git diff --no-index /dev/null <file>` — this
+    # writes NOTHING to the index (unlike `git add -N`, which the carrier's guarded sandbox blocks), so it
+    # works read-only and the artifact genuinely CONTAINS every new file as added content, not just a hash.
+    # That removes the "the new file isn't in the diff" gap at its source: the controller owns the capture,
+    # so a carrier never needs to stage/intent-to-add to make its work visible. A sha256 line per file is
+    # kept as a compact integrity/dedup footer (the content-addressed cache keys off this artifact).
     untracked = [ln[3:].strip() for ln in _git(repo, "status", "--porcelain").splitlines()
                  if ln.startswith("??")]
     untracked = [u for u in untracked if not (u == ".agent-runs" or u.startswith(".agent-runs/"))]
-    manifest_lines = []
+    files: list[str] = []
     for u in sorted(untracked):
         p = repo / u
         if p.is_file():
-            manifest_lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {u}")
+            files.append(u)
         elif p.is_dir():
-            for f in sorted(p.rglob("*")):
-                if f.is_file():
-                    rel = f.relative_to(repo).as_posix()
-                    manifest_lines.append(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {rel}")
-    body = diff + ("\n--UNTRACKED (sha256  path)--\n" + "\n".join(manifest_lines) + "\n"
-                   if manifest_lines else "")
+            files.extend(f.relative_to(repo).as_posix() for f in sorted(p.rglob("*")) if f.is_file())
+    new_diffs, manifest_lines = [], []
+    for rel in sorted(dict.fromkeys(files)):
+        f = repo / rel
+        if not f.is_file():
+            continue
+        nd = _git(repo, "diff", "--no-index", os.devnull, rel)   # exit 1 == "files differ" (normal, check=False)
+        if nd:
+            new_diffs.append(nd if nd.endswith("\n") else nd + "\n")
+        manifest_lines.append(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {rel}")
+    body = diff
+    if new_diffs:
+        body += "\n--UNTRACKED (new files, as diffs)--\n" + "".join(new_diffs)
+    if manifest_lines:
+        body += "\n--UNTRACKED (sha256  path)--\n" + "\n".join(manifest_lines) + "\n"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(body, encoding="utf-8")
     sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
