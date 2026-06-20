@@ -115,3 +115,42 @@ triggers), and retrying a persistent Linon rejection is exactly the infinite-loo
 **eliminates the loop's cause** (Linon never sees the scaffold) instead of bounding it with a fragile
 guard. Loop safety for the fan-out is **deterministic only**: depth < `FLOOR_MAX_DEPTH` + the global
 budget (counters, never LLM-content comparison).
+
+## Addendum (2026-06-20) — the autonomous recovery ladder: budget follows information, no human in the loop
+
+Observed live: a Lane-B `packaging-core` leaf floored on a **priority-1 / critical** Linon finding (a
+self-contained bundle whose launcher loses the entrypoint's import context). Linon did its job — refusing
+a broken bundle is correct. The question is what the org does in response. The resolved model:
+
+**The Floor is the Floor.** A floored goal is honest: "the org, within its budget, could not." It rests
+in the basement — *dormant*, with its work preserved (`wip` is saved on failure too, so it is resumable),
+not papered over. A system that never floors is dishonest: it either ships broken work or burns budget
+forever. The floor firing is the system telling the truth about its limit.
+
+**Budget follows INFORMATION, not time.** A new budget granted with no new information is just dishonest
+grinding (the same stuck org retrying with nothing new) — forbidden, the floor holds. A new budget is
+justified only when *new information* arrives. Two levers, both information-proportional:
+
+1. **Severity-weighted initial budget.** The repair allowance (and the depth a leaf may recurse) scales
+   with the **severity of the Linon findings** it must resolve: a critical finding is worth more attempts
+   than a cosmetic one. The org tries *hard* on what matters before flooring — so a critical, decomposable
+   finding is not floored prematurely by a flat cap.
+2. **Self-steer (the org steers ITSELF).** When the budget is spent and the leaf is at the floor, the org
+   runs a **reflective pass from a different vantage than the repair loop** — it re-splits the floored leaf
+   with the findings as context, asking for a *finer decomposition that specifically addresses them*. That
+   re-split is genuinely new information (a different cognitive act, not a repair re-run: "vary strategy or
+   grow a tool"), so it earns a fresh budget. This is the same `steer` channel and the same node-targeted
+   addressing built for human steering — **the org applies it to itself.** Loop-safe the deterministic way
+   (the ADR's stated rule): a **counter** bounds how many self-steers / how far past `FLOOR_MAX_DEPTH` the
+   org may push, severity-weighted; the bound is a count, never an LLM-content (findings-hash) comparison
+   (which this ADR already rejected as fragile). When the self-steer goes **dry** (the re-split yields
+   nothing new) or the counter is exhausted, it is a **real floor**.
+
+**No human in the loop.** The recovery ladder is *severity budget → bounded org self-steer → honest
+floor* — entirely org-internal; there is no human-rescue step the org waits on. The human is **outside**
+the loop: they inject goals and observe, and may, from the outside, deliberately fire a new goal or steer
+a floored node — but the org never has a "waiting for a human" state and never blocks on one. Keeping a
+human safety net inside the loop would **mask the org's true autonomous capability**; removing it makes
+the floor an **honest measure of that limit** ("self-steered and still could not" is a true signal worth
+recording). The same `steer` channel serves both the org's self-steer and a human's external steer; the
+difference is only the source, and only the org's source is *in* the loop.

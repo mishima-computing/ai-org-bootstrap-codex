@@ -42,6 +42,19 @@ AUFHEBEN_ROLE = "aufheben-designer"
 # aufheben must re-synthesize the changed designer outputs, and linon must stay an independent adversary.
 SESSION_REUSE_ROLES = ("aggressive-designer", "conservative-designer", "genius", "implementer")
 
+# Severity-weighted repair allowance (ADR-0008 addendum — budget follows the INFORMATION's importance): a
+# critical Linon finding is worth more repair rounds than a cosmetic one. Used to scale the per-leaf repair
+# cap from the severity of the findings to fix.
+_SEVERITY_REPAIR = {"critical": 6, "blocker": 6, "high": 5, "major": 3, "medium": 2, "minor": 1, "low": 1}
+
+
+def _severity_repair_cap(findings, base: int) -> int:
+    """The repair-iteration cap for THIS leaf, scaled to the worst finding's severity (max over findings);
+    falls back to `base` when no finding carries a known severity."""
+    caps = [_SEVERITY_REPAIR[s] for f in (findings or []) if isinstance(f, dict)
+            for s in [str(f.get("severity", "")).lower()] if s in _SEVERITY_REPAIR]
+    return max(caps) if caps else base   # no KNOWN severity -> keep the base allowance, never reduce to 0
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -819,6 +832,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
 
     initial_finished_at = _utc_now()
     findings = _linon_findings(results.get("linon"))
+    repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
 
@@ -828,7 +842,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         if role in producer_roles or role in {AUFHEBEN_ROLE, "implementer"}
     ]
 
-    while findings and not pipeline_failed and repair_iterations < max_repair_iterations:
+    while findings and not pipeline_failed and repair_iterations < repair_cap:
         repair_iterations += 1
         repair_started_at = _utc_now()
         repair_stages: list[dict] = []

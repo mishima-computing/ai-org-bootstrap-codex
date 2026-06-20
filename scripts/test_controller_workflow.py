@@ -115,6 +115,16 @@ def test_repair_resume_uses_a_delta_prompt():
     print("ok  repair resume sends a delta prompt; fresh/initial sends the full prompt")
 
 
+def test_severity_weighted_repair_cap():
+    # ADR-0008 addendum: the per-leaf repair allowance scales to the worst finding's severity (budget follows
+    # the information's importance) — a critical finding earns more rounds; unknown severity keeps the base.
+    assert cp._severity_repair_cap([{"severity": "critical"}], 3) == 6
+    assert cp._severity_repair_cap([{"severity": "minor"}], 3) == 1
+    assert cp._severity_repair_cap([{"severity": "minor"}, {"severity": "critical"}], 3) == 6
+    assert cp._severity_repair_cap([], 3) == 3 and cp._severity_repair_cap([{"x": 1}], 3) == 3
+    print("ok  severity-weighted repair cap (critical->6, minor->1, unknown/none->base)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

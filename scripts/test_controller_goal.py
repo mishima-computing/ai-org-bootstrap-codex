@@ -333,6 +333,30 @@ def test_resume_feeds_restored_inventory_to_the_resplit():
     print("ok  resume feeds the re-split its restored-file inventory (idempotent re-split)")
 
 
+def test_self_steer_pushes_a_critical_finding_past_floor_then_floors():
+    # ADR-0008 addendum: at the floor with a CRITICAL finding, the org SELF-STEERS a finer re-split up to the
+    # severity-weighted counter (critical -> 2), then floors honestly — no human, deterministic bound.
+    crit = [{"severity": "critical", "title": "import context lost"}]
+    def split(goal, ctx, carrier):
+        rnd = (ctx.get("self_steer") or {}).get("round", 0)        # unique child id per self-steer round
+        return [_leaf(f"a{rnd}", ["a.py"])]                        # atomic (scope==1) -> always at the floor
+    run_leaf = lambda r, t: {"outcome": "failed", "reason": "linon", "findings": crit}
+    events = []
+    cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, emit=events.append)
+    ss = [e for e in events if e.get("type") == "self_steer"]
+    ff = [e for e in events if e.get("type") == "leaf_failed_floor"]
+    assert [e["round"] for e in ss] == [1, 2], ("critical self-steers up to cap=2", [e.get("round") for e in ss])
+    assert ff, "after the self-steer counter is exhausted it floors for REAL"
+    # a minor finding gets NO self-steer (cap 0) — it floors immediately
+    events2 = []
+    cg.run_goal("/repo", "g", run_leaf=lambda r, t: {"outcome": "failed", "reason": "linon",
+                "findings": [{"severity": "minor"}]},
+                split=lambda g, c, ca: [_leaf("m", ["m.py"])], emit=events2.append)
+    assert not [e for e in events2 if e.get("type") == "self_steer"], "minor finding -> no self-steer"
+    assert [e for e in events2 if e.get("type") == "leaf_failed_floor"], "minor -> straight to floor"
+    print("ok  self-steer: critical pushed past floor (bounded), minor floored immediately (severity budget)")
+
+
 def test_declared_boundary_steers_the_split():
     # #48: a goal that declares "inside X/ ONLY" feeds the splitter a scope_boundary so it scopes the plan
     # under X/ from the start (the prose path otherwise drifted to docs/).

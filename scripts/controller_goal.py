@@ -206,6 +206,20 @@ def _declares_smallest(task: dict) -> bool:
         "set up the project", "create the project", "project structure"))
 
 
+# How far past the floor the org may SELF-STEER a leaf, by the SEVERITY of the findings blocking it — a
+# critical finding is worth pushing a finer decomposition on, a cosmetic one is not. Budget follows the
+# INFORMATION's importance (ADR-0008 addendum). 0 for low-severity / no findings.
+_SELF_STEER_CAP = {"critical": 2, "blocker": 2, "high": 1, "major": 1}
+
+
+def _self_steer_cap(findings) -> int:
+    """The deterministic, severity-weighted COUNTER that bounds self-steer (ADR-0008: a count, never an
+    LLM-content / findings-hash guard). Max over the findings' severities; 0 when none qualify."""
+    caps = [_SELF_STEER_CAP.get(str((f or {}).get("severity", "")).lower(), 0)
+            for f in (findings or []) if isinstance(f, dict)]
+    return max(caps) if caps else 0
+
+
 def at_floor(task: dict, depth: int) -> bool:
     """A node not worth splitting further: at max depth, atomic (<= 1 file in scope), or one that is
     already the smallest unit (self-declared minimal/atomic, or a scaffold — see _declares_smallest). The
@@ -496,23 +510,41 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit"), "goal_id": goal_id})
                 continue
             depth = _depth_of(plan, leaf["id"]) or 0
-            if at_floor(leaf, depth):                       # floor reached -> fail it, never split forever
-                plan = frontier.advance(plan, leaf["id"], "failed")
-                emit({"type": "leaf_failed_floor", "id": leaf["id"], "depth": depth})
+            findings = res.get("findings")
+            ss = leaf.get("_self_steer", 0)                  # self-steers already spent on this branch
+            # at the floor with a severe finding and self-steer budget left, the org STEERS ITSELF: it floors
+            # honestly UNLESS it can still push a finer decomposition that the (severity-weighted) counter
+            # permits (ADR-0008 addendum — budget follows information; no human in the loop).
+            if at_floor(leaf, depth) and not (findings and ss < _self_steer_cap(findings)):
+                plan = frontier.advance(plan, leaf["id"], "failed")   # budget AND self-steer dry -> real floor
+                emit({"type": "leaf_failed_floor", "id": leaf["id"], "depth": depth, "self_steers": ss})
                 continue
-            # a Linon rejection is a BAD REFERENCE: re-split, but carry its findings as retry CONTEXT (what
-            # was tried and rejected) so the children do not repeat the rejected approach.
+            self_steering = at_floor(leaf, depth)            # past the floor only because self-steer permits it
+            # a Linon rejection is a BAD REFERENCE: re-split, carrying its findings as retry CONTEXT so the
+            # children do not repeat the rejected approach. A self-steer re-split additionally asks for a FINER
+            # decomposition that resolves the findings (the org's own new information, earning a fresh budget).
             child_ctx = {**(context or {}), "parent": leaf["id"]}
-            if res.get("findings"):
-                child_ctx["prior_rejected_findings"] = res["findings"]
+            if findings:
+                child_ctx["prior_rejected_findings"] = findings
+            if self_steering:
+                child_ctx["self_steer"] = {"round": ss + 1, "instruction":
+                    "This node FLOORED on the findings above. Produce a FINER decomposition whose sub-tasks "
+                    "each resolve a specific part of those findings — smaller and more targeted than before — "
+                    "rather than repeating the rejected approach."}
             children = split(leaf["objective"], child_ctx, carrier)
             if not children or frontier.validate_plan(children):
-                plan = frontier.advance(plan, leaf["id"], "failed")   # bad/empty split -> stop this branch
-                emit({"type": "split_unusable", "id": leaf["id"]})
+                plan = frontier.advance(plan, leaf["id"], "failed")   # dry split (incl. a dry self-steer) -> floor
+                emit({"type": ("leaf_failed_floor" if self_steering else "split_unusable"),
+                      "id": leaf["id"], **({"depth": depth, "self_steers": ss} if self_steering else {})})
                 continue
             if leaf.get("_scaffolded"):                  # re-split inside a scaffolded subtree stays scaffolded
                 for c in children:
                     c["_scaffolded"] = True
+            if self_steering:                            # carry the counter so the bound holds across rounds
+                for c in children:
+                    c["_self_steer"] = ss + 1
+                emit({"type": "self_steer", "id": leaf["id"], "round": ss + 1, "n": len(children),
+                      "depth": depth, "goal_id": goal_id})
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})
