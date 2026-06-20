@@ -27,7 +27,7 @@ def _repo(tmp):
 
 
 def _stub(rel, content):
-    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
         (Path(repo) / rel).write_text(content)
         return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
     return runner

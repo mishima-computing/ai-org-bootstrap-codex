@@ -31,7 +31,7 @@ def _repo(tmp):
 
 
 def _stub(write):
-    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
         if write:
             target = Path(repo) / write
             target.parent.mkdir(parents=True, exist_ok=True)

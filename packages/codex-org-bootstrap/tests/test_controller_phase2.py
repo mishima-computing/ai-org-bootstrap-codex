@@ -34,7 +34,7 @@ def _new_repo(tmp):
 
 
 def _stub_carrier(write_path=None, ok=True):
-    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
         if write_path:
             (Path(repo) / write_path).write_text("carrier output")
         return {"ok": ok, "attempts": [{"attempt": 0, "exit": 0 if ok else 1,
@@ -111,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
         # must be reverted BEFORE the scope check so it neither lands nor sinks the otherwise-correct stage.
         with tempfile.TemporaryDirectory() as d:
             repo = _new_repo(d)
-            def carrier(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def carrier(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 (Path(repo) / "allowed.txt").write_text("ok")
                 wf = Path(repo) / ".github" / "workflows"; wf.mkdir(parents=True)
                 (wf / "x.yml").write_text("on: push")

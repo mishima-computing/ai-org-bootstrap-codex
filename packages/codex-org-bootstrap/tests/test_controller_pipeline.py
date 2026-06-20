@@ -60,7 +60,7 @@ class ControllerPipelineTests(unittest.TestCase):
         self._orig = controller_run.run
         self.calls = []
 
-        def _fake_run(repo, contract, run_id, *, cache=True):
+        def _fake_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
             payload = json.loads(contract["prompt"])
             self.calls.append((role, payload, run_id, cache, contract))
@@ -177,7 +177,7 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertEqual(implementer_stage["artifact"]["diff_artifact"]["sha256"], "diff-sha-implementer")
 
     def test_single_producer_failure_still_reaches_aufheben_implementer_and_reviewers(self):
-        def _producer_failure_run(repo, contract, run_id, *, cache=True):
+        def _producer_failure_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
             payload = json.loads(contract["prompt"])
             self.calls.append((role, payload, run_id, cache, contract))
@@ -223,7 +223,7 @@ class ControllerPipelineTests(unittest.TestCase):
     def test_linon_findings_trigger_repair_loop_until_converged(self):
         linon_runs = 0
 
-        def _repair_run(repo, contract, run_id, *, cache=True):
+        def _repair_run(repo, contract, run_id, *, cache=True, **_):
             nonlocal linon_runs
             role = contract["role"]
             payload = json.loads(contract["prompt"])
@@ -306,7 +306,7 @@ class ControllerPipelineTests(unittest.TestCase):
     def test_linon_findings_stop_at_repair_iteration_cap(self):
         linon_runs = 0
 
-        def _capped_run(repo, contract, run_id, *, cache=True):
+        def _capped_run(repo, contract, run_id, *, cache=True, **_):
             nonlocal linon_runs
             role = contract["role"]
             payload = json.loads(contract["prompt"])
@@ -367,7 +367,7 @@ class ControllerPipelineTests(unittest.TestCase):
             )
 
     def test_malformed_result_json_fails_stage_without_crashing(self):
-        def _malformed_run(repo, contract, run_id, *, cache=True):
+        def _malformed_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
             try:                                   # the reask path appends a non-JSON repair instruction
                 payload = json.loads(contract["prompt"])
@@ -400,7 +400,7 @@ class ControllerPipelineTests(unittest.TestCase):
                     pipeline.run_pipeline(ROOT, "wire declared org", bad_run_id, cache=False)
 
     def test_manifest_records_freeze_events_from_attempts(self):
-        def _freeze_run(repo, contract, run_id, *, cache=True):
+        def _freeze_run(repo, contract, run_id, *, cache=True, **_):
             result = {"role_id": contract["role"], "seen_inputs": json.loads(contract["prompt"])["inputs"]}
             (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
             rep = _Rep(True, run_id=run_id, role=contract["role"])
@@ -607,7 +607,7 @@ class ParallelWaveTests(unittest.TestCase):
         peak = {"n": 0, "max": 0}
         lock = threading.Lock()
 
-        def _fake_run(repo, contract, run_id, *, cache=True):
+        def _fake_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
             if not entries[role].write_scope:                 # the read-only producers (parallelized)
                 with lock:

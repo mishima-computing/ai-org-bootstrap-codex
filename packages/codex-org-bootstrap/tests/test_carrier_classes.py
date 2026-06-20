@@ -54,7 +54,7 @@ class SchemaGateTests(unittest.TestCase):
             r = _repo(d)
             sp = r / "schema.json"; sp.write_text(json.dumps(SCHEMA))
 
-            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 (Path(repo) / "result.json").write_text('{"verdict": "WRONG"}')  # invalid enum
                 return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
             contract = {"role": "linon", "prompt": "p", "sandbox": "read-only",
@@ -74,7 +74,7 @@ class CacheTests(unittest.TestCase):
                         "timeout": 30, "retries": 0, "files_allowed_to_change": ["out.txt"]}
             calls = {"n": 0}
 
-            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 calls["n"] += 1
                 (Path(repo) / "out.txt").write_text("carrier output v1")
                 return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
@@ -91,7 +91,7 @@ class CacheTests(unittest.TestCase):
             self.assertFalse((r / "out.txt").exists())
 
             # run 2: cache hit → carrier MUST NOT be called; result replayed
-            def boom(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def boom(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 raise AssertionError("carrier should not run on a cache hit")
             rep2 = workflow.run_contract(r, contract, "c2", carrier_runner=boom,
                                          include_builtin_gates=False, cache_enabled=True, clock=lambda: 1)
@@ -106,7 +106,7 @@ class CacheTests(unittest.TestCase):
             contract = {"role": "implementer", "prompt": "p", "sandbox": "workspace-write",
                         "timeout": 30, "retries": 0, "files_allowed_to_change": ["out.txt"]}
 
-            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 (Path(repo) / "out.txt").write_text("v1")
                 return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
             workflow.run_contract(r, contract, "m1", carrier_runner=stub,
@@ -116,7 +116,7 @@ class CacheTests(unittest.TestCase):
             git(r, "clean", "-fdq")
             calls = {"n": 0}
 
-            def stub2(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def stub2(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 calls["n"] += 1
                 (Path(repo) / "out.txt").write_text("v2")
                 return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
@@ -186,7 +186,7 @@ class LinonFixTests(unittest.TestCase):
             r = _repo(d)
             sp = r / "schema.json"; sp.write_text(json.dumps(SCHEMA))
 
-            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir):
+            def stub(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
                 return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
             rep = workflow.run_contract(r, {"role": "linon", "prompt": "p", "sandbox": "read-only",
                                             "timeout": 30, "retries": 0},

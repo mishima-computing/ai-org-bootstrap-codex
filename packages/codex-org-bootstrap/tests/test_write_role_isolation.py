@@ -58,7 +58,7 @@ class WriteRoleIsolationTests(unittest.TestCase):
         self._git("commit", "-m", "init")
         self.visibility = {}
 
-        def _fake_run(repo, contract, run_id, *, cache=True):
+        def _fake_run(repo, contract, run_id, *, cache=True, resume_session=None, **_):
             repo = Path(repo)
             role = contract["role"]
             if "files_allowed_to_change" not in contract:          # producer / aufheben: emit result.json

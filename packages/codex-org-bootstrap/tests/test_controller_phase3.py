@@ -25,7 +25,7 @@ def _new_repo(tmp):
 
 
 def _stub_carrier(write_path):
-    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir):
+    def runner(repo, prompt, sandbox, *, timeout, retries, out_dir, **_):
         if write_path:
             (Path(repo) / write_path).write_text("x")
         return {"ok": True, "attempts": [{"attempt": 0, "exit": 0}]}
