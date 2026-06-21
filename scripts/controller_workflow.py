@@ -243,7 +243,11 @@ def run_contract(repo, contract, run_id, *, verifier_specs=None, include_builtin
 
     unresolved = []
     if not carrier_ok:
-        unresolved.append("carrier did not complete (timeout/hang/nonzero)")
+        # a carrier_runner (e.g. the design-role host) that exhausts its in-runner schema-retry returns
+        # ok=False WITH the gate errors — surface those so the failure is not mislabeled as a transport hang.
+        schema_errs = carrier.get("schema_errors") if isinstance(carrier, dict) else None
+        unresolved.append(f"schema-output gate (in-runner): {schema_errs}" if schema_errs
+                          else "carrier did not complete (timeout/hang/nonzero)")
     if not scope_report.scope_ok:
         unresolved.append(f"scope: deviations={scope_report.deviations} "
                           f"forbidden={scope_report.forbidden_hits} undeclared={scope_report.undeclared}")
