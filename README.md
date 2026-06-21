@@ -198,6 +198,14 @@ capability with a single contract, so every edition inherits it rather than re-i
   implementer RESUME their prior codex session (recorded per leaf×role in state) instead of re-deliberating
   amnesiac — so a repair turn is a small delta on a server-cached session, not a full regeneration. The
   structure (full wave, independent Linon) is unchanged; only the wasted re-writing is gone.
+- **Contract-level findings get a deterministic patch, not a re-synthesis.** A contract-preflight finding
+  whose fix target is fully determined by its structured detail — a missing conformance profile, an
+  over-broad forbidden glob that swallows an allowed deliverable, a `deliverable_kind` implied by a sole
+  profile — is resolved by `scripts/contract_patch.py`: a targeted, LLM-free edit to just that field, instead
+  of re-running aufheben to re-synthesize the whole contract (which drifts unrelated fields). The patch is
+  confirmed by re-running contract-preflight (unproven never passes); a finding that is judgment
+  (`acceptance_criteria`, an ambiguous kind) escalates to re-synthesis. The audit delta is returned
+  *separately* and persisted to provenance, so the patched contract stays schema-valid. ADR-0013.
 - **Steering is additive and node-targeted.** Guidance injected mid-run (`steer`, via an append-only
   sidecar) folds into the not-yet-dispatched leaves of the `queue` — targeted at the goal or a specific
   Queue node — so you redirect a running build without killing and re-injecting it.
