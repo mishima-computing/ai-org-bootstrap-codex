@@ -21,6 +21,11 @@ import pre_localizer
 OUTPUT_FILE = "result.json"
 DESIGN_ROLES = ("genius", "aggressive-designer", "conservative-designer")
 GUARD_MAP_HEADER = "## GUARD-MAP (deterministic — the existing law that binds the files in scope)"
+OPERABILITY_MAP_HEADER = "## OPERABILITY-MAP (deterministic — repo facts about deploy/run/observe/bound/rollback)"
+# the design-proposal continuity fields determinism owns vs the LLM owns (selected_profiles stays LLM-owned:
+# it is authorization-validated against authorized profile ids, so an inferred-kind candidate cannot ride in it)
+_CONTINUITY_FACTUAL = ("version_constraints", "ecosystem_facts_used", "forbidden_expansions", "missing_safety_checks")
+_CONTINUITY_JUDGMENT = ("selected_profiles", "safe_change_path", "reversibility_plan", "knowledge_gaps")
 _ASSERT_HINT_RE = re.compile(r"assert|indexOf|\.match\(|expect\(|\.ok\(|toBe|toEqual|toContain")
 _ALIAS_RE_TMPL = r"([A-Za-z_$][\w$]*)\s*=\s*[^=\n]*['\"][^'\"]*{name}['\"]"
 _EXPORT_RES = [
@@ -184,6 +189,52 @@ def _default_carrier(repo, prompt, sandbox, *, timeout, retries, out_dir, output
                                        out_dir=out_dir, output_file=output_file, resume_session=resume_session)
 
 
+def format_operability_section(op_map: dict) -> str:
+    return "\n\n".join([
+        OPERABILITY_MAP_HEADER,
+        "Detected operability facts about the target (deploy/run/observe/bound/rollback). The factual "
+        "continuity fields (version_constraints, ecosystem_facts_used, forbidden_expansions, "
+        "missing_safety_checks) are PRE-FILLED from this map — do NOT re-derive them. Spend your judgment on "
+        "selected_profiles, safe_change_path, reversibility_plan, knowledge_gaps, and which detected gap should "
+        "become a gate. The inferred deliverable_kind is ADVISORY (aufheben declares the real one); use it to "
+        "scope which operability checks actually matter for this kind.",
+        "```json\n" + json.dumps(op_map, indent=2, ensure_ascii=False) + "\n```",
+    ])
+
+
+def inject_operability_evidence(packet: dict, op_map: dict, op_rel_path: str) -> dict:
+    """Carry the operability-map into a design-proposal packet, schema-validly: overwrite the FACTUAL
+    continuity fields with the deterministic facts (determinism wins on facts), preserve the LLM's judgment
+    fields, ensure the continuity block carries all 8 required sub-fields, and append a pointer + capped gap
+    strings to things_to_avoid. Never touches selected_profiles (it is LLM/authorization-owned)."""
+    if not isinstance(packet, dict):
+        return packet
+    prefill = op_map.get("continuity_prefill") or {}
+    src = packet.get("continuity") if isinstance(packet.get("continuity"), dict) else {}
+    # rebuild continuity from EXACTLY the 8 schema keys (drops any unknown key the LLM added -> keeps
+    # additionalProperties:false happy) and clamp every value to its schema cap (maxItems + item maxLength 200,
+    # judgment strings 600) so a long repo path can never make the determinism overwrite schema-invalid.
+    _arr = {"version_constraints": 6, "ecosystem_facts_used": 8, "forbidden_expansions": 6,
+            "missing_safety_checks": 6, "selected_profiles": 5, "knowledge_gaps": 6}
+
+    def _items(seq, cap):
+        return [str(x)[:200] for x in (seq or [])][:cap]
+
+    cont = {f: _items(prefill.get(f), _arr[f]) for f in _CONTINUITY_FACTUAL}   # deterministic wins on facts
+    cont["selected_profiles"] = _items(src.get("selected_profiles"), _arr["selected_profiles"])  # LLM/auth-owned
+    cont["safe_change_path"] = str(src.get("safe_change_path") or "")[:600]
+    cont["reversibility_plan"] = str(src.get("reversibility_plan") or "")[:600]
+    cont["knowledge_gaps"] = _items(src.get("knowledge_gaps"), _arr["knowledge_gaps"])
+    packet["continuity"] = cont
+    ta = packet.get("things_to_avoid")
+    if not isinstance(ta, list):
+        ta = packet["things_to_avoid"] = []
+    ta.append(f"OPERABILITY (see {op_rel_path}): {op_map.get('summary', '')}"[:600])
+    for m in (op_map.get("missing_safety_checks") or [])[:4]:
+        ta.append(f"OPERABILITY GAP: {m}"[:600])
+    return packet
+
+
 def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier=None, max_attempts=3):
     """Return a carrier_runner with the signature controller_workflow.run_contract expects:
         runner(repo, prompt, sandbox, *, timeout, retries, out_dir, resume_session) -> carrier dict.
@@ -209,7 +260,25 @@ def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier
         except ValueError:
             guard_rel = str(guard_file)
 
-        base_prompt = format_guard_section(guard_map) + "\n\n---\n\n" + prompt
+        # conservative-designer additionally gets a deterministic operability-map (kind inference + the
+        # kind-aware missing-checks + the factual continuity pre-fill). genius/aggressive stay guard-only.
+        op_map = op_rel = None
+        if role_id == "conservative-designer":
+            try:                                  # the operability scan must never sink the stage — degrade
+                import operability_scan            # to guard-only on any scan failure (genius/aggressive prove
+                op_map = operability_scan.OperabilityScan(rp, [c.path for c in candidates], guard_map).build()
+                op_file = out_dir / "operability-map.json"
+                op_file.write_text(json.dumps(op_map, indent=2, ensure_ascii=False), encoding="utf-8")
+                try:
+                    op_rel = op_file.resolve().relative_to(rp).as_posix()
+                except ValueError:
+                    op_rel = str(op_file)
+            except Exception:                     # noqa: BLE001 — guard-only is a valid fallback
+                op_map = op_rel = None
+
+        base_prompt = format_guard_section(guard_map) \
+            + (("\n\n" + format_operability_section(op_map)) if op_map is not None else "") \
+            + "\n\n---\n\n" + prompt
         # ONE loop absorbs transport-empty AND schema-fail (each launch uses retries=0 so the harness
         # transport-retry does not compound with this schema-retry). attempts are aggregated; logs go to
         # per-attempt subdirs so they do not overwrite. A final failure returns ok=False so a rejected
@@ -238,6 +307,8 @@ def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier
                 last_reason = ["output was empty or unsalvageable JSON"]
                 continue
             packet = inject_guard_evidence(packet, guard_map, guard_rel, role_id)
+            if op_map is not None:
+                packet = inject_operability_evidence(packet, op_map, op_rel)
             result_file.write_text(json.dumps(packet, ensure_ascii=False), encoding="utf-8")
             verdict = _gate(json.dumps(packet), schema_path)
             if verdict.get("output_ok"):

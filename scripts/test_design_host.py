@@ -102,6 +102,25 @@ class CarriageTest(unittest.TestCase):
             self.assertTrue(v["output_ok"], v.get("errors"))
 
 
+class OperabilityCarriageTest(unittest.TestCase):
+    def test_injection_clamps_long_strings_and_stays_schema_valid(self):
+        # a deep/vendored repo path would overflow continuity maxLength:200 — the injector must clamp it,
+        # else determinism produces a packet the schema gate rejects every retry (the BLOCKER fix).
+        op_map = {"summary": "s", "missing_safety_checks": [],
+                  "continuity_prefill": {"version_constraints": ["x" * 300],
+                                         "ecosystem_facts_used": ["inferred deliverable_kind=cli"],
+                                         "forbidden_expansions": ["do not clobber " + "y" * 300],
+                                         "missing_safety_checks": ["z" * 300]}}
+        pkt = design_host.inject_operability_evidence(valid_design("conservative-designer"),
+                                                      op_map, ".agent-runs/op.json")
+        for f in design_host._CONTINUITY_FACTUAL:
+            for item in pkt["continuity"][f]:
+                self.assertLessEqual(len(item), 200)
+        self.assertEqual(set(pkt["continuity"]),
+                         set(design_host._CONTINUITY_FACTUAL) | set(design_host._CONTINUITY_JUDGMENT))
+        self.assertTrue(controller_output.gate_output(json.dumps(pkt), str(DESIGN_SCHEMA))["output_ok"])
+
+
 class RunnerTest(unittest.TestCase):
     def _run(self, repo, packets, objective="add a live chat view to the seller dashboard"):
         carrier = StubCarrier(packets)
@@ -158,6 +177,37 @@ class RunnerTest(unittest.TestCase):
             cr = runner(repo, "## Contract\no", "read-only", out_dir=Path(repo) / ".agent-runs" / "r")
             self.assertTrue(cr["ok"])
             self.assertEqual(carrier.calls, 2)
+
+
+class ConservativeOperabilityTest(unittest.TestCase):
+    def test_conservative_gets_operability_substrate_schema_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            carrier = StubCarrier([valid_design("conservative-designer")])
+            runner = design_host.make_design_carrier_runner(repo, "conservative-designer", str(DESIGN_SCHEMA),
+                                                            "make the cockpit deployable and operable", carrier=carrier)
+            out_dir = Path(repo) / ".agent-runs" / "r"
+            cr = runner(repo, "## Contract\no", "read-only", out_dir=out_dir)
+            self.assertTrue(cr["ok"])
+            # operability folded into the prompt BEFORE the carrier, and the full map written to disk
+            self.assertIn(design_host.OPERABILITY_MAP_HEADER, carrier.prompts[0])
+            self.assertTrue((out_dir / "operability-map.json").is_file())
+            # the continuity block is present, has all 8 fields, factual ones deterministically filled
+            packet = json.loads((Path(repo) / "result.json").read_text())
+            cont = packet["continuity"]
+            self.assertEqual(set(cont) >= set(design_host._CONTINUITY_FACTUAL) | set(design_host._CONTINUITY_JUDGMENT), True)
+            self.assertTrue(cont["version_constraints"])             # deterministically filled
+            self.assertTrue(any("deliverable_kind=" in f for f in cont["ecosystem_facts_used"]))
+            # still schema-valid against the real design-proposal schema
+            self.assertTrue(controller_output.gate_output(json.dumps(packet), str(DESIGN_SCHEMA))["output_ok"])
+
+    def test_genius_and_aggressive_get_no_operability(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            carrier = StubCarrier([valid_genius()])
+            runner = design_host.make_design_carrier_runner(repo, "genius", str(GENIUS_SCHEMA), "x", carrier=carrier)
+            runner(repo, "## Contract\no", "read-only", out_dir=Path(repo) / ".agent-runs" / "g")
+            self.assertNotIn(design_host.OPERABILITY_MAP_HEADER, carrier.prompts[0])  # guard-only, unchanged
 
 
 if __name__ == "__main__":
