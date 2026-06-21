@@ -378,6 +378,46 @@ are traceable:
 - **Linux cgroup v2** / **OWASP fail-secure** — deterministic memory/cpu ceilings, and security controls that
   default to deny: the box resource limits and securityContext.
 
+## Lineage: the convergence of pre-LLM coding automation
+
+The architecture is not novel in its parts. It is the convergence of decades of work on the one question every
+pre-LLM automation system fought — how to get reliable output from an unreliable generator — and each
+structural choice traces to a precedent that earned it and a failure that shaped it.
+
+- **The oracle carries the reliability, not the generator.** Counterexample-guided inductive synthesis
+  (Solar-Lezama et al., *Combinatorial Sketching for Finite Programs*, 2006) showed that a weak — even random —
+  generator converges on a correct program when the **verifier is complete**: generate → check → feed the
+  counterexample back → regenerate. That is the repair loop, and the lesson is load-bearing: capability lives
+  in the completeness of the deterministic gates, not in the agent — push the agent arbitrarily low and a
+  complete oracle still carries the result. The corollary, from automated program repair (Weimer et al.,
+  *GenProg*, 2009): when the oracle is a **weak** test suite the generator games it — a patch that crash-guards
+  with an early `return` to pass the tests while breaking the behaviour. That is exactly why the acceptance
+  bundle is withheld from the implementer and the gate checks goldens the producer never saw.
+
+- **Diversity is worthless unless it is orthogonal by mechanism.** N-version programming (Chen & Avizienis,
+  1978) assumed independently-written versions fail independently; Knight & Leveson (*An experimental
+  evaluation of the assumption of independence in multiversion programming*, 1986) disproved it — isolated
+  authors make the **same** mistakes at the **same** edge cases, so a majority vote launders a shared blind
+  spot. So the review half here is not a second model that shares the producer's blind spots — a producer
+  self-review was measured against this and rejected (ADR-0010); the load-bearing diversity is the
+  **deterministic gate**, a mechanism orthogonal to the model, paired with an unanchored adversary. Tricorder
+  (above) sets the precondition: a blocking check needs ~0 effective false positives, or the generator
+  destroys correct code chasing a phantom and the repair loop diverges.
+
+- **Do not demand a complete spec up front — infer the executable contract, and keep the flow one-way.** Every
+  "automatic programming" wave (deductive synthesis, CASE, MDA) stalled at the same two walls: the
+  *specification bottleneck* — a machine-checkable spec costs more to write than the code — and the
+  *round-trip problem* — a human edits the generated artifact and the model desyncs forever. The answer is the
+  ADR-0009 thesis: the value is not code generation but **inferring a machine-checkable executable contract
+  from a vague goal and hardening it**, with finding-to-regression folding every accepted defect back into the
+  contract rather than leaving a manual fix that desyncs. This is also a deliberate **departure** — full
+  formal verification (Hoare, 1969; Design by Contract, Meyer, 1992) is avoided on purpose, its annotation
+  burden never scaled, in favour of a cheaper *executable* contract checked by running the artifact.
+
+Recorded so the architecture reads as the legitimate convergence it is, not an invention: a weak generator
+inside a complete, orthogonal, one-way verification structure is the shape this problem has been pushing
+toward for decades.
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
