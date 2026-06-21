@@ -194,9 +194,11 @@ class PreLocalizer:
         for p in literal_names - literal_paths:
             add(p, 100, "literal filename in objective")
         for tok in toks:
-            for p in idx.symbol_to_paths.get(tok, []):
+            # dedup per (file, token): a symbol declared N times in a file must score ONCE, not N times,
+            # else a file that mentions a common token a lot dominates and drowns reference propagation.
+            for p in set(idx.symbol_to_paths.get(tok, [])):
                 add(p, 60, f"symbol '{tok}'")
-            for p in idx.stem_to_paths.get(tok, []):
+            for p in set(idx.stem_to_paths.get(tok, [])):
                 add(p, 45, f"filename stem '{tok}'")
             members = idx.dir_token_to_paths.get(tok)
             if members:
