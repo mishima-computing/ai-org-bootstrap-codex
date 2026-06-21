@@ -151,6 +151,39 @@ verification (G4); (7) every known behavioural disagreement is dispositioned as 
 fails, the output stays a *contract family*: skeptical core + unresolved variation points + distinguishing
 counterexamples + explicit decision obligations.
 
+### D8 — The LLM is the strongest aufheben *generator* the archaeology lacked — which is *why* D1, not despite it
+
+The archaeology above has a blind spot, and naming it sharpens this ADR rather than weakening it: **every cited
+field concluded "verifiable synthesis is impossible / only conjunction is safe" from inside a world that had no
+strong synthesis *generator*.** Schema merge needed the correspondences supplied by hand; belief merge needed a
+distance function chosen by hand; argumentation needed the attack relation built by hand; semantic merge fell
+back to manual resolution (Horwitz et al., 1989, is NP-hard in general). The field-wide pain was that
+*generation* of a synthesis was the manual / NP-hard / semi-automatic bottleneck. An LLM **dissolves that
+generation bottleneck** — and it does not merely propose conjunctions. It can propose a genuine *Aufhebung*: a
+fourth design that reframes the conflict at a higher level and dissolves it. (Lock-free vs mutex vs actor is
+UNSAT as an implementation conjunction; an LLM can propose a *key-sharded mutex* that meets the aggressive p99,
+the conservative reasoning-simplicity, and the genius isolation at once — a reframing none of the three stated,
+and one the formal operators of §Grounding *cannot* emit.)
+
+This does not violate the impossibility results of D-context. Those killed the existence of a *fair, neutral,
+closed-form* operator. The LLM is not that — it is an **untrusted heuristic proposer**, so it sidesteps the
+theorems by making *generate-and-check* viable for design contracts for the first time (the CEGIS move:
+Solar-Lezama, 2008 — propose, verify, learn from the counterexample). The consequence is the central thesis of
+ADR-0011 made concrete here: **generation cost collapses, so the binding constraint relocates entirely to
+verification.** D1 (proposer ≠ authority) is not a hedge against a weak synthesizer — it is the *necessary*
+discipline for the strongest one. A weak generator's chimera can be eyeballed and discarded; a strong
+generator's chimera reads as correct while silently dropping a perspective (D3) or inventing a clause (D4). The
+fluency that makes the LLM the best aufheben generator ever is exactly what makes its bad syntheses most
+dangerous — so the gate ladder is needed *more*, not less, as the generator improves.
+
+Therefore the emphasis of D2–D7 is corrected: the gate ladder does **not** exist to *demote* synthesis to
+conjunction. It exists to **safely accept a sublation *richer* than conjunction** — a verified conflict-
+dissolving reframing — by checking it preserved every constraint. "Collapse only by proof" (D5) is upgraded: the
+*proof* may now be "the LLM found a higher unity **and** it passed G0–G6," which yields strictly more than the
+pre-LLM ceiling of conjunction. The contract family (D2) is the **fallback when a proposed sublation fails to
+verify**, not the expected output. Pre-LLM, "collapse by proof" could only ever yield conjunction, because that
+was all the generators could produce; with an LLM generator it can yield a verified *Aufhebung*.
+
 ## Relationship to the existing pipeline
 
 ADR-0009's contract pre-flight already gates the `aufheben` output; this ADR turns that single gate into the
