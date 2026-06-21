@@ -77,6 +77,8 @@ class ControllerPipelineTests(unittest.TestCase):
                             "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
                         ],
                         "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["pipeline reaches implementer and verifiers"],
+                        "deliverable_kind": "none",
                     }
                 (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
             return _Rep(True, run_id=run_id, role=role)
@@ -192,6 +194,8 @@ class ControllerPipelineTests(unittest.TestCase):
                         "files_not_allowed_to_change": [],
                         "required_checks": [],
                         "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["pipeline reaches implementer and verifiers"],
+                        "deliverable_kind": "none",
                     }
                 (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
             return _Rep(role != "aggressive-designer", run_id=run_id, role=role)
@@ -240,6 +244,8 @@ class ControllerPipelineTests(unittest.TestCase):
                             "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
                         ],
                         "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["pipeline reaches implementer and verifiers"],
+                        "deliverable_kind": "none",
                     }
                 elif role == "linon":
                     linon_runs += 1
@@ -323,6 +329,8 @@ class ControllerPipelineTests(unittest.TestCase):
                             "python -m unittest packages/codex-org-bootstrap/tests/test_controller_pipeline.py"
                         ],
                         "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["pipeline reaches implementer and verifiers"],
+                        "deliverable_kind": "none",
                     }
                 elif role == "linon":
                     linon_runs += 1

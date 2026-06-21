@@ -89,14 +89,29 @@ def run(repo, contract: dict, run_id: str, *, cache=True,
     info = _registry_role(repo, role)
     is_implementer = role == "implementer"
     is_producing = not info["write_scope"]  # read-only producers / verifiers emit JSON, write no files
+    objective = contract.get("prompt", "")  # the RAW task, captured BEFORE role.md injection (pre-localize)
 
     contract = _inject_role_instructions(repo, contract, info["role_file"])   # the carrier must SEE its role
     kwargs = {"cache_enabled": cache, "quality_gate_enabled": is_implementer,
               "resume_session": resume_session}
     if is_producing:
         contract = _inject_output_schema(repo, contract, info["schema"])
-        kwargs["output_schema"] = str(org_root(repo) / info["schema"])   # schema lives in the org install
+        schema_path = str(org_root(repo) / info["schema"])   # schema lives in the org install
+        kwargs["output_schema"] = schema_path
         kwargs["output_path"] = OUTPUT_FILE
+        # DESIGN roles get a deterministic guard-map folded into the prompt BEFORE the carrier runs
+        # (ADR-0014, PLAN A): the host is a carrier_runner, so run_contract keeps owning the cache,
+        # the output_gate, journaling, and the ControllerRunReport — the producer contract is unchanged.
+        import design_host
+        if role in design_host.DESIGN_ROLES:
+            kwargs["carrier_runner"] = design_host.make_design_carrier_runner(
+                repo, role, schema_path, objective)
+            # Cache is OFF for design roles: run_contract's content-addressed cache stores BEFORE the
+            # output_gate (so a schema-failed packet would be replayed as a success), and on replay it
+            # neither carries the codex session_id (breaking repair session-reuse) nor materialises the
+            # guard-map.json artifact the injected evidence points at. Re-enable once the cache bundle
+            # carries session_id + the guard-map artifact and stores only post-gate. (ADR-0014 follow-up.)
+            kwargs["cache_enabled"] = False
     return workflow.run_contract(repo, contract, run_id, **kwargs)
 
 

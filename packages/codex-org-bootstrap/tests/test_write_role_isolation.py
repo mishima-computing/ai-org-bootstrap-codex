@@ -69,6 +69,8 @@ class WriteRoleIsolationTests(unittest.TestCase):
                               "objective": payload["objective"],
                               "files_allowed_to_change": [IMPL_FILE],
                               "files_not_allowed_to_change": [], "required_checks": [],
+                              "acceptance_criteria": ["implementer writes its marker file"],
+                              "deliverable_kind": "none",
                               "received_from": sorted(payload["inputs"])}
                 (repo / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
                 return _Rep(True, run_id, role, [])
