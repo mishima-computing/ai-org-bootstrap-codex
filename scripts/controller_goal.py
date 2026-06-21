@@ -177,7 +177,24 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
         subprocess.run(["git", "-C", wt, "apply", "--whitespace=nowarn", str(resume_diff)],
                        capture_output=True)
     try:
-        result = run_pipeline(wt, task["objective"], run_id)
+        try:
+            result = run_pipeline(wt, task["objective"], run_id)
+        except Exception as exc:                               # noqa: BLE001 — a run_pipeline CRASH (a harness/
+            # setup error, NOT carrier work): the registry/imports/worktree, e.g. AI_ORG_ROOT unset -> the
+            # registry yaml missing. Surface it LOUDLY and classify it "crash"; NEVER swallow it. A swallowed
+            # crash was treated as "mechanical", retried, re-split to the floor, and reported as a quiet
+            # "failed" — masking a hard setup error and burning the whole budget on a crash re-split can't fix.
+            # Scoped to run_pipeline ONLY: a later merge/handoff error stays "mechanical" (retryable), not an
+            # abort (cross-checked — the broad boundary would also catch a merge crash and could abort on
+            # partial files).
+            import traceback
+            detail = f"{type(exc).__name__}: {exc}"
+            try:
+                stream_emit(repo)({"type": "leaf_crash", "task_id": task.get("id"), "run_id": run_id,
+                                   "error": detail, "traceback": traceback.format_exc()[-1500:]})
+            except Exception:                                  # noqa: BLE001 — telemetry never breaks the run
+                pass
+            return fail(reason="crash", error=detail)          # "crash" (not "mechanical"): re-split can't fix it
         if not bool(result.get("converged")):
             if (result.get("linon_findings_count") or 0) > 0:  # Linon judged the diff -> a bad reference
                 lin = (result.get("results") or {}).get("linon") or {}
@@ -191,8 +208,8 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
         if sha is None:                                       # None = handoff FAILED (paths rolled back)
             return fail(reason="mechanical")                  # "" = nothing to commit (still converged)
         return {"outcome": "converged", "commit": sha or None, "sessions": result.get("sessions") or {}}
-    except Exception:                                          # noqa: BLE001 - a leaf crash is mechanical
-        return fail(reason="mechanical")
+    except Exception:                                          # noqa: BLE001 — a merge/handoff error is NOT a
+        return fail(reason="mechanical")                      # setup crash: retryable, never a goal-abort
     finally:
         subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], capture_output=True)
         shutil.rmtree(wt, ignore_errors=True)
@@ -490,6 +507,15 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 # no in-base children -> build the logic atomically on the seed (fallback)
             outcome = run_leaf(repo, exec_leaf)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
+            # A CRASH (harness/setup error, e.g. a missing registry / AI_ORG_ROOT unset) is systemic — every
+            # leaf will crash the same way, so re-splitting/retrying only burns budget and ends in a quiet
+            # "failed". Fail the goal LOUDLY and immediately instead (ADR-0011: unproven/broken never passes).
+            if res.get("reason") == "crash":
+                emit({"type": "goal_blocked", "id": leaf["id"], "error": res.get("error"),
+                      "detail": "a leaf crashed before producing work — a harness/setup error re-splitting "
+                                "cannot fix. Failing the goal loudly rather than burning the budget on retries."})
+                plan = frontier.advance(plan, leaf["id"], "failed")
+                return _finalize(plan)
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
             # is not a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
             tries = 0

@@ -103,6 +103,56 @@ def test_mechanical_failure_resumes_same_leaf():
     print("ok  mechanical (non-Linon) failure resumes the same leaf, no re-split")
 
 
+def test_crash_fails_loud_and_aborts_without_burning_budget():
+    # a CRASH (a harness/setup error, NOT carrier work) must NOT be retried/re-split into the floor: the goal
+    # fails LOUDLY with a goal_blocked event carrying the error, the top split is the ONLY split, and it
+    # finishes "failed". Regression guard for the silent swallow that masked a missing registry / AI_ORG_ROOT.
+    splits = []
+
+    def split(goal, ctx, carrier):
+        splits.append(goal)
+        return [_leaf("a", ["x.py", "y.py"]), _leaf("b", ["z.py"])]   # multi-file: COULD re-split if not aborted
+
+    run_leaf = lambda r, t: {"outcome": "failed", "reason": "crash", "error": "FileNotFoundError: registry yaml"}
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, emit=events.append)
+    blocked = [e for e in events if e["type"] == "goal_blocked"]
+    assert blocked and "FileNotFoundError" in blocked[0]["error"], events
+    assert len(splits) == 1, f"a crash must abort, not keep re-splitting: {splits}"
+    fin = [e for e in events if e["type"] == "goal_finished"]
+    assert fin and fin[0]["status"] == "failed", events
+    print("ok  a crash fails loud (goal_blocked) and aborts without re-splitting/burning budget")
+
+
+def test_default_run_leaf_surfaces_a_crash_not_silently():
+    # default_run_leaf must EMIT the exception (leaf_crash) and return reason="crash" with the detail, never
+    # swallow it as a quiet "mechanical" failure (which masked the real error for an hour in practice).
+    import os
+    import subprocess
+    import tempfile
+    repo = tempfile.mkdtemp()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "-C", repo, "init", "-q"], capture_output=True)
+    subprocess.run(["git", "-C", repo, "commit", "--allow-empty", "-m", "base", "-q"], capture_output=True, env=env)
+    events = []
+    orig = cg.stream_emit
+    cg.stream_emit = lambda r: events.append           # capture the per-leaf stream emitter
+    try:
+        res = cg.default_run_leaf(repo, {"id": "x", "objective": "o"},
+                                  run_pipeline=lambda wt, obj, run_id: _raise(FileNotFoundError("registry yaml")))
+    finally:
+        cg.stream_emit = orig
+    assert res["outcome"] == "failed" and res["reason"] == "crash", res
+    assert "FileNotFoundError" in res["error"], res
+    assert any(e.get("type") == "leaf_crash" for e in events), events
+    print("ok  default_run_leaf surfaces a crash (leaf_crash + reason=crash), never swallows it")
+
+
+def _raise(exc):
+    raise exc
+
+
 def test_linon_failure_carries_findings_to_children():
     # a Linon rejection (bad reference) re-splits AND passes its findings to the children's split context.
     seen = {}
