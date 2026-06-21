@@ -179,6 +179,28 @@ def diff_artifact(repo: Path, out_path: Path) -> dict:
             "untracked_count": len(manifest_lines)}
 
 
+# After the carrier process exits, its pipes may still be held OPEN by a GRANDCHILD it spawned (a sandbox
+# helper, a language server, an MCP child). Drain them for at most this long, then stop — otherwise the read
+# loop waits on a pipe that never reaches EOF. This (with the watchdog ungated from the child's liveness) is
+# the hang that ran a goal for an hour: codex exited, a grandchild held stdout, and the timeouts — gated on
+# `proc.poll() is None` — never fired.
+POST_EXIT_DRAIN_SECONDS = 5.0
+
+
+def _kill_process_group(pgid: int) -> None:
+    """Kill the carrier AND any grandchildren it spawned, by the CAPTURED process-group id. The carrier runs
+    in its own session (start_new_session=True), so its pgid equals its pid and one killpg reaps the whole
+    tree — a grandchild holding the pipe open is exactly what defeated a watchdog that only killed the direct
+    child. The pgid MUST be captured right after Popen, NOT looked up via os.getpgid at kill time: proc.poll()
+    reaps the leader, so the lookup would then fail with ESRCH while the grandchildren are still alive (the
+    group persists, keyed by this pgid, as long as any member lives — cross-checked)."""
+    import signal
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):   # already gone / non-POSIX
+        pass
+
+
 def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
                             no_output_timeout: float) -> tuple[str, str, int | None, bool, bool, bool]:
     stdout_chunks: list[bytes] = []
@@ -195,33 +217,56 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=str(repo),
+        start_new_session=True,     # own process group, so killpg reaps grandchildren that hold the pipe open
     )
+    pgid = proc.pid                 # capture NOW (== the group id under start_new_session); proc.poll() later
+    #                                 reaps the leader, so os.getpgid(proc.pid) at kill time would ESRCH while
+    #                                 grandchildren still live. The group persists, keyed by this pgid.
     selector = selectors.DefaultSelector()
     if proc.stdout is not None:
         selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
     if proc.stderr is not None:
         selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
 
+    exited_at = None
     try:
         while selector.get_map() or proc.poll() is None:
             now = time.monotonic()
-            if proc.poll() is None and timeout and now - started >= timeout:
+            alive = proc.poll() is None
+            if not alive and exited_at is None:
+                exited_at = now
+                # The leader EXITED — reap any orphaned grandchildren NOW (cross-checked: do not wait for the
+                # drain). killpg on the captured pgid reaches a live group member even though poll() reaped the
+                # leader; once the orphan dies the pipe EOFs and the loop ends cleanly. The drain below is only
+                # a backstop for the brief window before the pipe closes.
+                _kill_process_group(pgid)
+            # HARD WALL — an ABSOLUTE ceiling. It fires even after the child exits, because a grandchild can
+            # hold the pipe open past it (the old code gated this on `proc.poll() is None`, so a post-exit
+            # pipe-hold escaped every timeout and span forever).
+            if timeout and now - started >= timeout:
                 timed_out = True
                 killed = True
-                proc.kill()
-            elif proc.poll() is None and no_output_timeout and now - last_output >= no_output_timeout:
+                _kill_process_group(pgid)
+                break
+            if alive and no_output_timeout and now - last_output >= no_output_timeout:
                 frozen = True
                 killed = True
-                proc.kill()
+                _kill_process_group(pgid)
+                break
+            # the child has EXITED but a pipe is still open (a grandchild holds it) — drain briefly, then stop
+            if not alive and now - exited_at >= POST_EXIT_DRAIN_SECONDS:
+                _kill_process_group(pgid)
+                break
 
-            deadlines = []
-            if proc.poll() is None:
+            deadlines = [0.05]
+            if alive:
                 if timeout:
                     deadlines.append(timeout - (now - started))
                 if no_output_timeout:
                     deadlines.append(no_output_timeout - (now - last_output))
-            wait = min(max(0.0, min(deadlines)) if deadlines else 0.05, 0.05)
-            events = selector.select(wait)
+            else:
+                deadlines.append(POST_EXIT_DRAIN_SECONDS - (now - exited_at))
+            events = selector.select(max(0.0, min(deadlines)))
             if not events and proc.poll() is not None and not selector.get_map():
                 break
 
@@ -242,7 +287,7 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
     finally:
         selector.close()
         if proc.poll() is None:
-            proc.kill()
+            _kill_process_group(pgid)
             killed = True
         code = proc.wait()
 
