@@ -387,12 +387,25 @@ structural choice traces to a precedent that earned it and a failure that shaped
 - **The oracle carries the reliability, not the generator.** Counterexample-guided inductive synthesis
   (Solar-Lezama et al., *Combinatorial Sketching for Finite Programs*, 2006) showed that a weak — even random —
   generator converges on a correct program when the **verifier is complete**: generate → check → feed the
-  counterexample back → regenerate. That is the repair loop, and the lesson is load-bearing: capability lives
-  in the completeness of the deterministic gates, not in the agent — push the agent arbitrarily low and a
-  complete oracle still carries the result. The corollary, from automated program repair (Weimer et al.,
+  counterexample back → regenerate. That is the repair loop, and the lesson is load-bearing: the *reliability*
+  lives in the completeness of the verifier, not in the generator — push the generator arbitrarily low and a
+  complete oracle still carries the result. The intelligence does not vanish, though; it **relocates** — into
+  the contract, the oracle, the search space, and the decomposition — so "dumb agents" is precise only about
+  the *proposal* layer, never the spec or the certifier (weaken those and the mechanism converges efficiently
+  on a wrong artifact). The corollary, from automated program repair (Weimer et al.,
   *GenProg*, 2009): when the oracle is a **weak** test suite the generator games it — a patch that crash-guards
   with an early `return` to pass the tests while breaking the behaviour. That is exactly why the acceptance
   bundle is withheld from the implementer and the gate checks goldens the producer never saw.
+
+- **Shrink the trusted base; verify the artifact, not the generator.** The purest form of this is not
+  redundancy but a *small trusted kernel*: in LCF (Milner, 1972) an arbitrarily complex, untrusted tactic may
+  search for a proof, yet the theorem exists only if it passes a tiny inference kernel. Proof-carrying code
+  (Necula, 1997) ships the artifact with a proof a small checker validates; translation validation (Pnueli et
+  al., 1998) verifies each individual output instead of proving the generator correct. The transferable rule:
+  do not try to make the model trustworthy — keep the generators arbitrarily weak and untrusted, make the
+  certifier small and the verification per-artifact, and let the artifact carry its own evidence (the
+  contract, the counterexamples, the gate results, the toolchain hashes). It is why the gates verify the built
+  artifact and never the agent — and the strongest prior here is this, not N-version redundancy.
 
 - **Diversity is worthless unless it is orthogonal by mechanism.** N-version programming (Chen & Avizienis,
   1978) assumed independently-written versions fail independently; Knight & Leveson (*An experimental
