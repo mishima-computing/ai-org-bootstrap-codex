@@ -13,7 +13,7 @@ just the implicated field instead — no LLM, no drift, auditable.
   - `audit` is a plain dict `{"applied": [<delta>, ...], "skipped": [{"check", "reason"}, ...]}`.
 
 WHY the audit is RETURNED SEPARATELY (not attached to the contract): this module is the synthesis of a
-two-carrier experiment (Claude and Codex each implemented it independently, then exchanged code). Each found a
+two-carrier experiment — two independent carriers each implemented it, then exchanged code. Each found a
 real flaw in the other's audit-storage choice:
   - an IN-BAND key (`contract["_contract_patch"]`) is JSON-durable but makes the contract SCHEMA-INVALID — the
     implementation-contract schema is `additionalProperties: false`, so the patched contract fails the very
