@@ -32,6 +32,36 @@ def _declared_dir(text: str) -> str | None:
     return m.group(1).strip("/") if m else None
 
 
+# A scope entry that NAMES A FILE (a basename with a short trailing extension) is not a package directory.
+# Generalized from a fixed (.py/.md/.json/.txt/.toml) allowlist, which mis-read code files of OTHER languages
+# (.js/.ts/.css/…) as directories and scaffolded e.g. `chat-thread.js/__init__.py` (a Python package inside a
+# path meant to be a JavaScript file).
+_FILE_SCOPE_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
+
+# The deterministic seed is a PYTHON-package bootstrap (ADR-0008: __init__.py / __main__.py / _smoke.py with a
+# `python -m` acceptance gate). A deliverable in ANOTHER language must not be seeded as a Python package — it
+# belongs to the (language-general) carrier. A scope naming a non-Python SOURCE/ASSET file is the decisive
+# signal: the seed declines (match returns None) instead of directory-izing the file into a Python package.
+_NON_PY_SOURCE_EXTS = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".scss", ".less",
+                       ".html", ".htm", ".vue", ".svelte", ".go", ".rs", ".rb", ".java", ".kt",
+                       ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".swift", ".sh", ".bash",
+                       ".ps1", ".psm1", ".sql", ".lua", ".dart", ".scala", ".ex", ".exs")
+
+
+def _is_file_scope(s: str) -> bool:
+    """True when a scope entry names a file (basename with a short trailing extension), not a directory."""
+    return bool(_FILE_SCOPE_RE.search(s.rsplit("/", 1)[-1]))
+
+
+def _names_non_python_source(scope) -> bool:
+    """True when any scope entry is a non-Python source/asset FILE — the python-package seed cannot apply."""
+    for s in (scope or []):
+        base = str(s).strip().strip("/").rsplit("/", 1)[-1].lower()
+        if base.endswith(_NON_PY_SOURCE_EXTS):
+            return True
+    return False
+
+
 def _scope_base(objective: str, scope=None, goal_text: str | None = None) -> str:
     """The package directory (repo-relative, no trailing slash) to scaffold into. Priority, most specific
     first: (1) a directory named in the leaf's scope; (2) a directory the GOAL text explicitly declares
@@ -41,7 +71,7 @@ def _scope_base(objective: str, scope=None, goal_text: str | None = None) -> str
     `replace/` directories; the declared-dir lookups above exist to prevent exactly that."""
     for s in (scope or []):
         s = str(s).strip().strip("/")
-        if s and not s.endswith((".py", ".md", ".json", ".txt", ".toml")):   # a directory scope
+        if s and not _is_file_scope(s):                                       # a directory scope (not a file)
             return s
     for txt in (goal_text, objective):                                       # the goal/objective's declared dir
         d = _declared_dir(txt)
@@ -80,7 +110,10 @@ TEMPLATES: dict = {
 
 def match_template(objective: str, scope=None) -> str | None:
     """Deterministic stack match: the template whose keywords the objective/scope hit most (>=1). None = no
-    supported template -> the caller falls back to the LLM path. No LLM, no network."""
+    supported template -> the caller falls back to the LLM (carrier) path. No LLM, no network. A scope naming a
+    non-Python source/asset file vetoes the (Python-only) seed: that deliverable goes to the carrier."""
+    if _names_non_python_source(scope):           # JS/TS/CSS/… deliverable -> not a Python package -> carrier
+        return None
     text = ((objective or "") + " " + " ".join(str(s) for s in (scope or []))).lower()
     best, best_hits = None, 0
     for tid, spec in TEMPLATES.items():
@@ -160,6 +193,17 @@ def self_test() -> int:
         assert instantiate("python-package", d, "marketplace/packaging") == [], "instantiate is idempotent"
         # no supported template -> None (caller falls back to the LLM path)
         assert scaffold("integrate the stripe billing webhook with live keys", d + "/x") is None
+        # a NON-PYTHON deliverable must NOT be seeded as a Python package — the seed declines so the
+        # (language-general) carrier builds it. Regression: a `.js` scope was directory-ized into
+        # `chat-thread.js/__init__.py` because the Python-package template matched on "module"/"library".
+        assert match_template("Create the chat-thread module library", ["cockpit/clay/chat-thread.js"]) is None, \
+            "a non-Python source scope must veto the Python-package seed"
+        assert scaffold("Create the chat-thread module library", d + "/js",
+                        {"scope": ["cockpit/clay/chat-thread.js"]}) is None, "no Python seed for a .js deliverable"
+        for ext in (".js", ".ts", ".css", ".html", ".go", ".rs"):
+            assert _is_file_scope("a/b" + ext) and not _is_file_scope("a/b"), ext
+        assert _scope_base("build the view", ["cockpit/clay/chat-thread.js"]) != "cockpit/clay/chat-thread.js", \
+            "a .js file scope must not be treated as the package directory"
         assert _scope_base("", ["mocks/"]) == "mocks"
         assert _scope_base("build the parser", ["a/b.py"]) == "build", "a file scope is skipped -> objective"
         # the verb-fallback bug: a verb-first leaf objective must NOT become a `create/`/`implement/` dir
