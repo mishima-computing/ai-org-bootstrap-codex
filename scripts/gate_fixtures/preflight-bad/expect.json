@@ -1,0 +1,6 @@
+{
+  "label": "preflight-bad",
+  "kind": "cli",
+  "preflight": "fail",
+  "note": "declares an executable interface (cli) but carries no conformance.cli profile; preflight must catch the contract-level defect. Conformance is not asserted here: with no profile it is correctly not-applicable (na), not a pass."
+}

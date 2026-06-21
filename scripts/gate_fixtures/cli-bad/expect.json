@@ -1,0 +1,7 @@
+{
+  "label": "cli-bad",
+  "kind": "cli",
+  "preflight": "pass",
+  "conformance": "fail",
+  "note": "well-formed contract (preflight passes) but the artifact leaks exit 0 on no-args; conformance must catch it"
+}

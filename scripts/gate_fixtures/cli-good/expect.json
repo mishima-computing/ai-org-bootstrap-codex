@@ -1,0 +1,7 @@
+{
+  "label": "cli-good",
+  "kind": "cli",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "correct CLI: a well-formed contract and an artifact that obeys it should pass both gates"
+}

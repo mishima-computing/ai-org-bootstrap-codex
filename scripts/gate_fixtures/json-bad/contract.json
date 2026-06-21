@@ -1,0 +1,23 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["data.json validates against its schema and carries name, version, tags"],
+  "deliverable_kind": "json",
+  "conformance": {
+    "json": {
+      "files": [
+        {
+          "path": "data.json",
+          "schema": {
+            "type": "object",
+            "required": ["name", "version"],
+            "properties": {
+              "name": {"type": "string"},
+              "version": {"type": "integer"}
+            }
+          },
+          "required_paths": ["name", "version", "tags"]
+        }
+      ]
+    }
+  }
+}

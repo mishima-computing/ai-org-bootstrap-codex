@@ -1,0 +1,7 @@
+{
+  "label": "json-good",
+  "kind": "json",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "the document satisfies its schema and every required path resolves; the json gate should pass"
+}

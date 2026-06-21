@@ -1,0 +1,7 @@
+{
+  "label": "library-good",
+  "kind": "library",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "the module exposes exactly the claimed symbols; the import-probe should pass"
+}

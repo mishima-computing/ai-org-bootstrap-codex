@@ -1,0 +1,6 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["the tool runs and greets a name"],
+  "deliverable_kind": "cli",
+  "conformance": {}
+}

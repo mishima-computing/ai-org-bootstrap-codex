@@ -1,0 +1,7 @@
+{
+  "label": "library-bad",
+  "kind": "library",
+  "preflight": "pass",
+  "conformance": "fail",
+  "note": "the contract claims an exported symbol `baz` the module does not define; the import-probe must catch it"
+}

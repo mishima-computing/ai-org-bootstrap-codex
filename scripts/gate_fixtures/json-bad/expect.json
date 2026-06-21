@@ -1,0 +1,7 @@
+{
+  "label": "json-bad",
+  "kind": "json",
+  "preflight": "pass",
+  "conformance": "fail",
+  "note": "data.json omits the schema-required `version`; the json gate must catch the schema + required-path violation"
+}

@@ -1,0 +1,16 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["the CLI greets a name and rejects bad input with exit 2"],
+  "deliverable_kind": "cli",
+  "conformance": {
+    "cli": {
+      "entrypoint": {"invocation": "python3 app.py"},
+      "examples": [
+        {"invocation": "--help", "expected_status": 0, "expected_stdout_contains": ["usage"]},
+        {"invocation": "", "expected_status": 2, "expected_stderr_contains": ["error"]},
+        {"invocation": "--nope", "expected_status": 2, "expected_stderr_contains": ["error"]}
+      ],
+      "status_and_errors": {"success": [0], "invalid_input": [2], "operational_failure": [1]}
+    }
+  }
+}

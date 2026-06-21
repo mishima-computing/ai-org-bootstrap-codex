@@ -1,0 +1,12 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["the module imports and exposes foo, bar, baz"],
+  "deliverable_kind": "library",
+  "conformance": {
+    "library": {
+      "module": "mymod",
+      "exported_symbols": ["foo", "bar", "baz"],
+      "language": "python"
+    }
+  }
+}
