@@ -418,6 +418,39 @@ Recorded so the architecture reads as the legitimate convergence it is, not an i
 inside a complete, orthogonal, one-way verification structure is the shape this problem has been pushing
 toward for decades.
 
+## What this deliberately does not do (and why)
+
+The mirror of the lineage: techniques the same history produced that this design rejects — each for a reason
+that history also recorded. A "don't, and why it doesn't pay" list is as much of the rationale as the "do."
+
+- **Full formal verification as the gate** (Hoare logic; theorem-proved contracts). The annotation burden —
+  hand-writing loop invariants so a solver terminates — never scaled past mid-size systems, and SMT
+  state-explosion stalls on loops and dynamic data. We use a cheaper *executable* contract checked by running
+  the artifact, and reserve solvers for narrow, decidable checks.
+- **Evolutionary search over ASTs** (genetic programming, Koza 1992; SBSE, Harman & Jones 2001). Code's
+  fitness landscape is discontinuous — one token flips a program to non-compiling, zero fitness — so
+  crossover/mutation degenerates into a random walk. The dialectic is *directed* synthesis + repair, not a
+  population search.
+- **Majority voting over N same-kind generators** (N-version, Chen & Avizienis 1978). Knight & Leveson (1986)
+  showed correlated failure makes the vote launder a shared blind spot — and N prompts of one model is the
+  same fallacy in modern dress. Diversity comes from an *orthogonal* deterministic gate, not a vote of
+  look-alikes.
+- **A weak test suite as the implementer's oracle** (generate-and-validate, GenProg). Optimising against weak
+  tests overfits them — the early-`return` patch that passes the suite and breaks the behaviour. The
+  acceptance bundle is withheld and the gate checks goldens the producer never saw.
+- **A hand-curated idiom / clichés knowledge base** (KBEmacs, Rich & Waters 1988). The knowledge-acquisition
+  bottleneck: every new API or paradigm needs manual ontology upkeep that never keeps pace. The contract is
+  inferred per goal, not looked up in a maintained library.
+- **Round-trip on generated artifacts** (MDA). Hand-editing a generated artifact desyncs it from its source
+  forever. The flow is one-way: an accepted fix becomes a contract clause / regression (finding-to-regression),
+  never an edit left in the artifact.
+- **Symbolic execution as the primary oracle** (KLEE, Cadar et al. 2008). Path explosion and the cost of
+  modelling real I/O do not survive production code; black-box conformance + property fuzzing are the
+  affordable oracle, with symbolic / coverage-guided backends reserved for the inner box.
+- **An unscheduled blackboard** (Hearsay-II, Erman et al. 1980). Many async knowledge sources with no
+  focus-of-control deadlock and diverge; the shared stream is read by roles under an explicit scheduler (the
+  frontier), not a free-for-all.
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
