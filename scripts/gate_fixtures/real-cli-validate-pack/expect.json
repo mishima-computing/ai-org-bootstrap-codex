@@ -1,0 +1,8 @@
+{
+  "label": "real:validate-pack",
+  "kind": "cli",
+  "workdir": ".",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "a REAL in-repo CLI (scripts/validate-bootstrap-pack.py), CI-green, audited in place; no-arg validates the repo (exit 0), bad input exits 2"
+}

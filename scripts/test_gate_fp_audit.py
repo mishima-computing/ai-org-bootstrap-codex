@@ -74,6 +74,15 @@ def test_preflight_bad_is_caught_by_preflight_and_conformance_is_na():
     print("ok  preflight-bad: preflight catches the missing profile; conformance correctly does not fire")
 
 
+def test_real_in_repo_cli_audited_in_place_via_workdir_passes():
+    # a REAL, CI-green in-repo tool, audited where it lives (workdir) — the gate must not false-positive
+    for name in ("real-cli-merge-gate", "real-cli-validate-pack"):
+        r = audit.run_fixture(FIXTURES / name)
+        assert r["gates"]["preflight"]["verdict"] == "correct_accept", (name, r)
+        assert r["gates"]["conformance"]["verdict"] == "correct_accept", (name, r)
+    print("ok  real in-repo CLIs (merge-gate, validate-pack) pass in place — no false positive on real tools")
+
+
 # --- aggregation + the promotion verdict ---------------------------------------------------------
 
 def test_audit_corpus_shows_zero_fp_and_full_catch():

@@ -33,6 +33,7 @@ import conformance  # noqa: E402
 import contract_preflight  # noqa: E402
 
 DEFAULT_FIXTURES = Path(__file__).resolve().parent / "gate_fixtures"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 GATES = ("preflight", "conformance")
 _FLIP = {"conformance": "CONFORMANCE_GATE=block", "preflight": "CONTRACT_PREFLIGHT=block"}
 
@@ -56,10 +57,15 @@ def _classify(expected: str, actual: str) -> str:
 def run_fixture(fixture_dir: Path) -> dict:
     contract = json.loads((fixture_dir / "contract.json").read_text(encoding="utf-8"))
     expect = json.loads((fixture_dir / "expect.json").read_text(encoding="utf-8"))
+    # A fixture may audit a REAL in-repo artifact in place: `workdir` (relative to the repo root) sets the
+    # conformance cwd so the contract's entrypoint can point at a real script (e.g. scripts/merge-gate.py)
+    # without copying it. Absent `workdir`, the artifact lives in the fixture dir (the synthetic fixtures).
+    workdir = expect.get("workdir")
+    cwd = (REPO_ROOT / workdir).resolve() if workdir else fixture_dir
     reports = {
         "preflight": contract_preflight.preflight(contract),
         "conformance": conformance.run_conformance(
-            contract, conformance.subprocess_runner(timeout=20), cwd=str(fixture_dir)),
+            contract, conformance.subprocess_runner(timeout=20), cwd=str(cwd)),
     }
     gates = {}
     for gate in GATES:

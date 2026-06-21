@@ -1,0 +1,8 @@
+{
+  "label": "real:merge-gate",
+  "kind": "cli",
+  "workdir": ".",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "a REAL in-repo CLI (scripts/merge-gate.py), CI-green, audited in place via workdir; the gate must not false-positive on a genuinely-working tool"
+}

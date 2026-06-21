@@ -1,0 +1,16 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["validate-bootstrap-pack passes on the repo, help works, bad input exits 2"],
+  "deliverable_kind": "cli",
+  "conformance": {
+    "cli": {
+      "entrypoint": {"invocation": "python3 scripts/validate-bootstrap-pack.py"},
+      "examples": [
+        {"invocation": "", "expected_status": 0, "expected_stdout_contains": ["pack validation passed"]},
+        {"invocation": "--help", "expected_status": 0, "expected_stdout_contains": ["usage"]},
+        {"invocation": "--definitely-not-a-flag", "expected_status": 2, "expected_stderr_contains": ["error"]}
+      ],
+      "status_and_errors": {"success": [0], "invalid_input": [2], "operational_failure": [1]}
+    }
+  }
+}
