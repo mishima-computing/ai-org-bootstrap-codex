@@ -703,11 +703,14 @@ def test_shadow_gate_streams_but_does_not_block():
 
     events = []
     orig = cp._stream_append
+    orig_mode = cp.CONFORMANCE_GATE_MODE
     cp._stream_append = lambda repo, ev: events.append(ev)        # capture stream, touch no disk
+    cp.CONFORMANCE_GATE_MODE = "shadow"                           # this test asserts the SHADOW stream type
     try:
         report = cp._shadow_conformance("/tmp/leaf", results, "run-1", runner=runner)
     finally:
         cp._stream_append = orig
+        cp.CONFORMANCE_GATE_MODE = orig_mode
 
     assert report and report["applicable"] and report["passed"] is False, report
     streamed = [e for e in events if e.get("source") == "cli-conformance"]
@@ -734,8 +737,8 @@ def test_shadow_gate_dormant_for_non_cli_contract():
         cp._stream_append = orig
     assert report is None or report.get("applicable") is False, report
     assert [e for e in events if e.get("source") == "cli-conformance"] == [], events
-    assert cp.CONFORMANCE_SHADOW == "shadow", "default mode is shadow (observe, never block)"
-    print("ok  gate dormant for a non-CLI contract (no event, no exec, default mode=shadow)")
+    assert cp.CONFORMANCE_GATE_MODE == "block", "default mode is block (promoted 2026-06-21 on FP-audit evidence)"
+    print("ok  gate dormant for a non-CLI contract (no event, no exec; default mode=block, still a no-op here)")
 
 
 def test_acceptance_bundle_withheld_from_implementer_only():
@@ -777,20 +780,20 @@ def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
     results = {"linon": {"findings": []}}                       # linon says clean
     failing = {"applicable": True, "passed": False,
                "findings": [{"check": "exit_status", "severity": "major", "passed": False}]}
-    saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_SHADOW)
+    saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_GATE_MODE)
     cp._shadow_conformance = lambda repo, results, run_id: failing
     cp._secret_scan = lambda repo, run_id: None
     cp._fuzz_cli = lambda repo, results, run_id: None
     try:
-        cp.CONFORMANCE_SHADOW = "block"
+        cp.CONFORMANCE_GATE_MODE = "block"
         findings, gate_ctx = cp._closed_loop_findings("/tmp/x", results, "r", None)
         assert findings, "a failing BLOCK gate must keep findings non-empty even when linon is clean"
         assert gate_ctx["conformance"], "the gate findings are carried to feed the repair agents"
-        cp.CONFORMANCE_SHADOW = "shadow"                        # same failing gate, but shadow folds nothing
+        cp.CONFORMANCE_GATE_MODE = "shadow"                        # same failing gate, but shadow folds nothing
         sh_findings, _ = cp._closed_loop_findings("/tmp/x", results, "r", None)
         assert sh_findings == [], "in shadow the failing gate is telemetry only (no fold)"
     finally:
-        cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_SHADOW = saved
+        cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_GATE_MODE = saved
     print("ok  closed loop: a block gate that fails keeps the loop open (linon-clean no longer converges)")
 
 

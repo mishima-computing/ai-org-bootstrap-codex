@@ -602,15 +602,16 @@ def _linon_findings(result: dict | str | None) -> list[dict]:
     return [f for f in dicts if _is_reviewable_finding_path(f.get("file") or f.get("path") or "")]
 
 
-# ADR-0009 #1 — the dynamic gate, wired SHADOW-first. When the aufheben contract carries a `conformance.cli`
-# profile, the controller RE-RUNS the built artifact (install + declared examples) in the leaf worktree and
-# checks exit status + stdout/stderr against the contract — instead of trusting the implementer's self-report
-# (the static-review gap, ADR-0009). It is OFF unless a contract declares itself a CLI (no contract does yet,
-# so this is dormant until aufheben emits the profile), and even then it is SHADOW: findings are streamed for
-# observation but are NOT added to the repair `findings`, so they cannot block. Promotion to blocking happens
-# only after telemetry shows effective-FP ~0 (Tricorder discipline). The local worktree run is the single-host
-# SIMULATION of the ADR-0022 inner box; in production the same call runs the box runner.
-CONFORMANCE_SHADOW = os.environ.get("CONFORMANCE_GATE", "shadow").lower()   # shadow (default) | off | block
+# ADR-0009 #1 — the dynamic gate. When the aufheben contract carries a `conformance` profile, the controller
+# RE-RUNS the built artifact (install + declared examples/probe) in the leaf worktree and checks it against
+# the contract — instead of trusting the implementer's self-report (the static-review gap, ADR-0009). It is a
+# no-op for a contract with no profile (applicable=False), so it only fires where there is an interface to
+# check. PROMOTED to `block` (2026-06-21): a failing finding now folds into the repair `findings` and gates
+# convergence. Promotion followed the Tricorder discipline — shadow until effective-FP ~0 is MEASURED, not
+# assumed — via scripts/gate_fp_audit.py over real + synthetic fixtures across every kind (FP 0%, catch 100%;
+# see the ADR-0009 promotion record). Reversible by env with CONFORMANCE_GATE=shadow|off, no code change. The
+# local worktree run is the single-host SIMULATION of the inner box; in production the same call runs the box.
+CONFORMANCE_GATE_MODE = os.environ.get("CONFORMANCE_GATE", "block").lower()   # block (default) | shadow | off
 
 
 _DETERMINISTIC_IMPL_SOURCES = {"cli-conformance", "conformance", "cli-fuzz", "secret-scan"}
@@ -646,7 +647,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
     (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
     a fake. Fail-soft: any error is logged to the stream and swallowed — a verification gate must never break
     the build it observes."""
-    if CONFORMANCE_SHADOW == "off":
+    if CONFORMANCE_GATE_MODE == "off":
         return None
     contract = results.get(AUFHEBEN_ROLE)
     if not isinstance(contract, dict):
@@ -668,14 +669,18 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
         return report
     _stream_append(repo, {
         "source": "cli-conformance",
-        "type": "shadow_findings" if CONFORMANCE_SHADOW != "block" else "findings",
+        "type": "shadow_findings" if CONFORMANCE_GATE_MODE != "block" else "findings",
         "run_id": run_id, "passed": report["passed"], "checks_run": report["checks_run"],
         "findings": report["findings"], "ts": _iso8601_utc(),
     })
     return report
 
 
-PREFLIGHT_MODE = os.environ.get("CONTRACT_PREFLIGHT", "shadow").lower()   # shadow (default) | off | block
+# PROMOTED to `block` (2026-06-21) alongside the conformance gate: a contract-level defect now routes back to
+# aufheben (up to PREFLIGHT_AUFHEBEN_CAP) instead of being merely observed. Promotion evidence: gate_fp_audit.py
+# over 10 good (real + synthetic) contracts at FP 0%, plus test_contract_preflight's 14 catch tests. Reversible
+# by env with CONTRACT_PREFLIGHT=shadow|off (the ADR-0009 promotion record has the details).
+PREFLIGHT_MODE = os.environ.get("CONTRACT_PREFLIGHT", "block").lower()   # block (default) | shadow | off
 PREFLIGHT_AUFHEBEN_CAP = int(os.environ.get("PREFLIGHT_AUFHEBEN_CAP", "2"))   # block-mode aufheben re-runs
 
 
@@ -833,7 +838,7 @@ def _closed_loop_findings(repo, results: dict, run_id: str, preflight_report: di
     secret = _secret_scan(repo, run_id)
     fuzz = _fuzz_cli(repo, results, run_id)
     findings = _linon_findings(results.get("linon"))
-    findings = _apply_conformance_gate(findings, conf, CONFORMANCE_SHADOW)
+    findings = _apply_conformance_gate(findings, conf, CONFORMANCE_GATE_MODE)
     findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
     findings = _apply_secret_gate(findings, secret, SECRET_SCAN_MODE)
     findings = _apply_conformance_gate(findings, fuzz, FUZZ_CLI_MODE)

@@ -134,11 +134,14 @@ def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []
     orig = cp._stream_append
+    orig_mode = cp.PREFLIGHT_MODE
     cp._stream_append = lambda repo, ev: events.append(ev)
+    cp.PREFLIGHT_MODE = "shadow"                                  # this test asserts the SHADOW stream type
     try:
         rep = cp._contract_preflight("/tmp/leaf", results, "run-pf")
     finally:
         cp._stream_append = orig
+        cp.PREFLIGHT_MODE = orig_mode
     assert rep and rep["applicable"] and rep["passed"] is False, rep
     streamed = [e for e in events if e.get("source") == "contract-preflight"]
     assert streamed and streamed[0]["type"] == "shadow_findings", streamed
@@ -149,9 +152,9 @@ def test_wired_preflight_streams_before_block_folds():
     print("ok  wired preflight streams shadow_findings; shadow never blocks, block folds in")
 
 
-def test_default_mode_is_shadow():
-    assert cp.PREFLIGHT_MODE == "shadow", "preflight defaults to shadow (observe, never block)"
-    print("ok  default CONTRACT_PREFLIGHT mode is shadow")
+def test_default_mode_is_block():
+    assert cp.PREFLIGHT_MODE == "block", "preflight promoted to block 2026-06-21 (FP-audit evidence, ADR-0009)"
+    print("ok  default CONTRACT_PREFLIGHT mode is block (promoted; reversible via CONTRACT_PREFLIGHT=shadow)")
 
 
 def _drive_preflight_gate(preflight_sequence, mode):
