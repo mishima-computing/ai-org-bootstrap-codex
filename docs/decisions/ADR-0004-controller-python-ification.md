@@ -2,8 +2,13 @@
 
 ## Status
 
-Proposed. (Designed by the agent team — aggressive / conservative / genius, launched through
-`scripts/carrier_harness.py` itself — and synthesized by aufheben. Implementation pending owner.)
+Accepted (Phases 0–3 implemented; suite → 61, all green). Designed by the agent team — aggressive /
+conservative / genius, launched through `scripts/carrier_harness.py` itself — and synthesized by
+aufheben. The Workflow/Activity split below is built and live: `controller_scope.py`,
+`controller_models.py`, `controller_evidence.py`, `controller_verifiers.py`, `controller_workflow.py`,
+and `controller_loop.py` exist, are tested (12 + 7 + 6 offline + a live Codex end-to-end), and Python
+advances while the LLM decides — exactly the typed handoff this ADR specifies. (Status corrected
+2026-06-21: the decision had shipped through Phase 3 while this header still read "Proposed".)
 
 ## Context
 
