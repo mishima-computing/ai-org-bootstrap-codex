@@ -1,0 +1,8 @@
+{
+  "label": "real:schema-json",
+  "kind": "json",
+  "workdir": "schemas",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "a REAL in-repo JSON file (schemas/implementation-contract.schema.json), audited in place against a meta-schema; the json gate must not false-positive on a valid committed document"
+}

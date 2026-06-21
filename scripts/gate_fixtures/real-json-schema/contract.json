@@ -1,0 +1,20 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["the implementation-contract schema is a well-formed JSON Schema document"],
+  "deliverable_kind": "json",
+  "conformance": {
+    "json": {
+      "files": [
+        {
+          "path": "implementation-contract.schema.json",
+          "schema": {
+            "type": "object",
+            "required": ["$schema", "type"],
+            "properties": {"type": {"type": "string"}}
+          },
+          "required_paths": ["$schema", "type", "properties"]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "role_id": "aufheben-designer",
+  "acceptance_criteria": ["the frontier module imports and exposes its declared public API"],
+  "deliverable_kind": "library",
+  "conformance": {
+    "library": {
+      "module": "frontier",
+      "exported_symbols": ["validate_plan", "ready_tasks", "advance", "node_status", "scope_conflict"],
+      "language": "python"
+    }
+  }
+}

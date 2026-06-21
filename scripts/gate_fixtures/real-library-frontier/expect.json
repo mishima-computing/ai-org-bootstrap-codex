@@ -1,0 +1,8 @@
+{
+  "label": "real:frontier",
+  "kind": "library",
+  "workdir": "scripts",
+  "preflight": "pass",
+  "conformance": "pass",
+  "note": "a REAL in-repo module (scripts/frontier.py) with a declared __all__, audited in place; the import-probe must not false-positive on a working library"
+}
