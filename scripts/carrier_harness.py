@@ -201,8 +201,48 @@ def _kill_process_group(pgid: int) -> None:
         pass
 
 
+TERMINAL_EVENT_TYPES = {"turn.completed", "task_complete"}
+
+
+def _codex_event_type(line: str) -> str | None:
+    """The `type` of one codex --json event line (top-level or under `msg`), or None if not JSON."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    msg = ev.get("msg") if isinstance(ev.get("msg"), dict) else {}
+    typ = ev.get("type") or msg.get("type")
+    return typ if isinstance(typ, str) else None
+
+
+def _is_terminal_event(line: str) -> bool:
+    return _codex_event_type(line) in TERMINAL_EVENT_TYPES
+
+
+def _buffer_is_terminal_event(buf: bytes) -> bool:
+    """Accept codex's final JSON event even when it is NOT newline-terminated (codex can block on stdin
+    before flushing the trailing newline, leaving turn.completed stranded in the partial buffer)."""
+    s = buf.decode("utf-8", "replace").strip()
+    return bool(s) and _is_terminal_event(s)
+
+
+def _terminal_output_ready(output_file: Path | None) -> bool:
+    """A write role gets no -o file (turn.completed alone is terminal); a producer needs a non-empty -o."""
+    if output_file is None:
+        return True
+    try:
+        return output_file.is_file() and output_file.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
-                            no_output_timeout: float) -> tuple[str, str, int | None, bool, bool, bool]:
+                            no_output_timeout: float,
+                            output_file: Path | None = None,
+                            ) -> tuple[str, str, int | None, bool, bool, bool, bool]:
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
     started = time.monotonic()
@@ -210,6 +250,8 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
     timed_out = False
     frozen = False
     killed = False
+    terminal_completed = False
+    stdout_line_buffer = b""
 
     proc = subprocess.Popen(
         argv,
@@ -275,15 +317,42 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
                 if chunk:
                     if key.data == "stdout":
                         stdout_chunks.append(chunk)
+                        stdout_line_buffer += chunk
+                        while b"\n" in stdout_line_buffer:
+                            raw_line, stdout_line_buffer = stdout_line_buffer.split(b"\n", 1)
+                            if _is_terminal_event(raw_line.decode("utf-8", "replace")) and \
+                                    _terminal_output_ready(output_file):
+                                # codex finished the turn and the deliverable is captured, but it may now block
+                                # re-reading stdin and never exit — proactively reap so a SUCCESSFUL turn is not
+                                # mis-scored as a no-output freeze and retried (which discards the good deliverable).
+                                terminal_completed = True
+                                killed = True
+                                _kill_process_group(pgid)
+                                break
+                        if not terminal_completed and _buffer_is_terminal_event(stdout_line_buffer) and \
+                                _terminal_output_ready(output_file):
+                            # codex's final turn.completed can arrive WITHOUT a trailing newline before it
+                            # blocks on stdin — catch it in the partial buffer too, not only on full lines.
+                            terminal_completed = True
+                            killed = True
+                            _kill_process_group(pgid)
                     else:
                         stderr_chunks.append(chunk)
-                    last_output = time.monotonic()
+                    # the stdin-wait marker is a BLOCK, not progress — it must NOT reset the no-output watchdog
+                    # (on EITHER stream: codex may print it to stdout or stderr), or a carrier that emits it then
+                    # goes silent escapes the 300s backstop forever.
+                    if STDIN_HANG_MARKER not in chunk.decode("utf-8", "replace"):
+                        last_output = time.monotonic()
+                    if terminal_completed:
+                        break
                 else:
                     try:
                         selector.unregister(key.fileobj)
                     except KeyError:
                         pass
                     key.fileobj.close()
+            if terminal_completed:
+                break
     finally:
         selector.close()
         if proc.poll() is None:
@@ -293,7 +362,7 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
 
     stdout = b"".join(stdout_chunks).decode("utf-8", "replace")
     stderr = b"".join(stderr_chunks).decode("utf-8", "replace")
-    return stdout, stderr, code, timed_out, frozen, killed
+    return stdout, stderr, code, timed_out, frozen, killed, terminal_completed
 
 
 def _carrier_view_exclude_patterns() -> list:
@@ -433,30 +502,37 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
         argv = build_codex_resume_argv(repo, sandbox, resume_session, model)
     else:
         argv = build_codex_argv(repo, sandbox, model)
-    if output_file:
-        argv += ["-o", str(output_file)]
+    output_path = Path(output_file).resolve() if output_file else None
+    if output_path:
+        argv += ["-o", str(output_path)]
     argv += [full_prompt]
     no_output_timeout = _no_output_timeout_seconds()
 
     attempts = []
     for attempt in range(retries + 1):
         timestamp = _iso8601_utc()
+        if output_path is not None:
+            try:
+                output_path.unlink()   # a stale -o from a prior attempt must not fake a terminal success
+            except FileNotFoundError:
+                pass
         # _stream_carrier_process passes stdin=subprocess.DEVNULL and streams output for liveness.
-        stdout, stderr, code, timed_out, frozen, killed = _stream_carrier_process(
-            argv, repo, timeout, no_output_timeout)
+        stdout, stderr, code, timed_out, frozen, killed, terminal_completed = _stream_carrier_process(
+            argv, repo, timeout, no_output_timeout, output_path)
         log = out_dir / f"carrier-attempt{attempt}.log"
         log.write_text("timestamp: " + timestamp + "\n" + stdout +
                        ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
-        hang = STDIN_HANG_MARKER in stdout and code != 0
+        hang = STDIN_HANG_MARKER in (stdout + stderr) and code != 0   # marker can land on either stream
         usage = extract_token_usage(stdout)   # token + context spend, from codex's --json stream
         # capture this run's session id so a later REPAIR iteration can RESUME it; fall back to the id we
         # resumed (resume reuses the same thread, which codex may or may not re-announce as thread.started).
         session_id = extract_session_id(stdout) or resume_session
         attempts.append({"attempt": attempt, "timestamp": timestamp, "exit": code,
                          "timed_out": timed_out, "stdin_hang": hang, "frozen": frozen,
-                         "killed": killed, "retryable": attempt < retries,
+                         "killed": killed, "turn_completed": terminal_completed,
+                         "retryable": attempt < retries,
                          "no_output_timeout": no_output_timeout, "log": str(log), "usage": usage})
-        if code == 0 and not timed_out and not frozen and not killed and not hang:
+        if terminal_completed or (code == 0 and not timed_out and not frozen and not killed and not hang):
             return {"ok": True, "attempts": attempts, "log": str(log), "usage": usage,
                     "session_id": session_id}
         # else retry (timeout/hang/nonzero)
@@ -529,6 +605,28 @@ def self_test() -> int:
         fails.append("extract_token_usage must capture context_window + percent")
     if extract_token_usage("no events here") is not None:
         fails.append("extract_token_usage must return None when no usage is present")
+    # terminal-event early-success exit (the fix for the post-turn stdin-block hang: a carrier that emits
+    # turn.completed + a captured deliverable must be scored SUCCESS, not waited-out as a no-output freeze).
+    if not _is_terminal_event('{"type":"turn.completed"}'):
+        fails.append("_is_terminal_event must accept top-level turn.completed")
+    if not _is_terminal_event('{"msg":{"type":"task_complete"}}'):
+        fails.append("_is_terminal_event must accept msg.type task_complete")
+    if _is_terminal_event('{"type":"item.completed"}') or _is_terminal_event("not json"):
+        fails.append("_is_terminal_event must reject non-terminal / non-JSON lines")
+    if not _buffer_is_terminal_event(b'{"type":"turn.completed"}'):
+        fails.append("_buffer_is_terminal_event must accept a turn.completed WITHOUT a trailing newline")
+    if _buffer_is_terminal_event(b'{"type":"item.completed"}'):
+        fails.append("_buffer_is_terminal_event must reject a non-terminal partial buffer")
+    if not _terminal_output_ready(None):
+        fails.append("_terminal_output_ready(None) must be True (write roles have no -o file)")
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _d:
+        _empty = Path(_d) / "empty.json"; _empty.write_text("")
+        if _terminal_output_ready(_empty):
+            fails.append("_terminal_output_ready must be False for an empty -o file")
+        _full = Path(_d) / "full.json"; _full.write_text("{}")
+        if not _terminal_output_ready(_full):
+            fails.append("_terminal_output_ready must be True for a non-empty -o file")
     if fails:
         for f in fails:
             print("FAIL " + f, file=sys.stderr)

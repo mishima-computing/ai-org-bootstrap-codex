@@ -25,3 +25,10 @@ jobs:
         run: python3 -m pip install -e packages/codex-org-bootstrap
       - name: Unit tests
         run: python3 -m unittest discover -s packages/codex-org-bootstrap/tests
+      - name: Scripts test suites (plain def-test runners under scripts/)
+        run: |
+          python3 scripts/carrier_harness.py --self-test
+          python3 scripts/test_carrier_harness_runtime.py
+          python3 scripts/test_goal_refiner.py
+          python3 scripts/test_controller_goal.py
+          python3 scripts/test_stream_log_shared.py

@@ -188,6 +188,14 @@ and the gate ran the artifact and passed 6 examples). The pieces:
   what the designers/aufheben already do and is closer to the role/prompt layer the sequence ranks last; add
   it as a carrier-backed reviewer **only if telemetry shows contract-vs-goal misses** the deterministic
   preflight and the designers do not catch.
+  **First increment wired (2026-06-22), shadow-first** (ADR-0016 D4/D7): a goal-level **shadow acceptance
+  obligation** — a `goal_acceptance` needs-info record marking a `done` goal's composed outcome as unverified
+  against the WHY (never a fabricated green). **Forward work, NOT yet built:** propagating the WHY to the leaf
+  dialectic and to Linon; the goal-fit *judgment* as (a) a **WHY-bound Linon** advisory finding (the least
+  session-correlated reviewer) and (b) a **shadow contract-vs-goal critic** in this preflight slot (advisory,
+  promoted to block only at effective-FP ~0); and the *executable* goal-level acceptance run on the merged
+  artifact reusing the conformance harness. A leaf proves only that it obeys its own contract; the goal layer
+  owns goal-fit.
 - **Per-kind real checkers** (library API-diff; service boot + protocol-driven testing) — built when the
   first deliverable of that kind needs one.
 - **Shadow → block promotion** — flip each gate to blocking only after its effective-FP is shown ~0 (Tricorder).

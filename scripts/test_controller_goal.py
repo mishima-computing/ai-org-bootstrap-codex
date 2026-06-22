@@ -17,6 +17,13 @@ def _leaf(i, scope, deps=None):
             "status": "pending", "run_id": None, "pr_url": None}
 
 
+# a passing intake-refiner stub (ADR-0016 D1b): the real-splitter path now goes through the sufficiency
+# gate, so tests that exercise splitter.split inject this to clear the gate and reach decomposition.
+def _ok_refine(goal, ctx, carrier):
+    return {"sufficient": True, "missing": [],
+            "structured": {"outcome": "o", "success_condition": "s", "negative_control": "n", "owner": "w"}}
+
+
 def _statuses(plan):
     out = {}
     def walk(ts):
@@ -441,12 +448,12 @@ def test_splitter_session_resumes_on_resume():
                 git(repo, *a)
             open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
             cg.run_goal(repo, "build inside mocks/ ONLY", run_leaf=lambda r, t: "converged",
-                        split=splitter.split, goal_id="goal-A")
+                        split=splitter.split, refine=_ok_refine, goal_id="goal-A")
             assert ((goal_store.GoalStore(repo).read("goal-A") or {}).get("sessions") or {}).get("_goal:splitter") \
                 == "splitsid-0", "initial run records the splitter session"
             seen["resume"].clear()
             cg.run_goal(repo, "build inside mocks/ ONLY", run_leaf=lambda r, t: "converged",
-                        split=splitter.split, goal_id="goal-B", resume_from="goal-A")
+                        split=splitter.split, refine=_ok_refine, goal_id="goal-B", resume_from="goal-A")
             assert "splitsid-0" in seen["resume"], ("the resumed top split RESUMES the prior splitter session",
                                                     seen["resume"])
     finally:
@@ -454,8 +461,196 @@ def test_splitter_session_resumes_on_resume():
     print("ok  splitter session recorded on initial split, RESUMED on resume (planning memory kept)")
 
 
+def test_intake_gate_holds_underdetermined_goal():
+    # ADR-0016 D1b NEGATIVE CONTROL: an underdetermined goal must NOT be decomposed. Pre-gate, run_goal had
+    # no `refine` and ALWAYS split -> this assertion FAILS without the gate (red), passes with it (green).
+    split_calls = {"n": 0}
+    def split(goal, ctx, carrier):
+        split_calls["n"] += 1
+        return [_leaf("a", ["x.py"])]
+    insufficient = lambda g, c, k: {"sufficient": False, "structured": {"outcome": ""},
+                                    "missing": ["outcome", "owner"]}
+    events = []
+    leaf_ran = {"n": 0}
+    plan = cg.run_goal("/repo", "make it nice", run_leaf=lambda r, t: leaf_ran.__setitem__("n", leaf_ran["n"] + 1),
+                       split=split, refine=insufficient, emit=events.append)
+    assert split_calls["n"] == 0, "an underdetermined goal must NOT be decomposed (HOLD)"
+    assert leaf_ran["n"] == 0, "nothing is built for a held goal"
+    assert plan == [], plan
+    und = [e for e in events if e["type"] == "goal_underdetermined"]
+    assert und and set(und[0]["missing"]) == {"outcome", "owner"}, events
+    assert not any(e["type"] == "goal_split" for e in events), "no split event on a held goal"
+    print("ok  intake gate HOLDS an underdetermined goal, no decomposition (ADR-0016 D1b negative control)")
+
+
+def test_intake_gate_proceeds_and_threads_structured_goal():
+    # a sufficient goal proceeds to decomposition AND the named structured WHY is threaded into the splitter.
+    seen_ctx = {}
+    def split(goal, ctx, carrier):
+        seen_ctx.update(ctx)
+        return [_leaf("a", ["x.py"])]
+    structured = {"outcome": "X", "success_condition": "Y", "negative_control": "Z", "owner": "W"}
+    sufficient = lambda g, c, k: {"sufficient": True, "structured": structured, "missing": []}
+    plan = cg.run_goal("/repo", "do X", run_leaf=lambda r, t: "converged", split=split, refine=sufficient)
+    assert _statuses(plan) == {"a": "done"}, plan
+    assert seen_ctx.get("structured_goal") == structured, ("the structured WHY is threaded into split", seen_ctx)
+    print("ok  sufficient goal proceeds + threads the structured WHY into split")
+
+
+def test_intake_gate_records_needs_info_in_store():
+    # the ASK is the org's terminal state: a held goal_id run records status=needs_info + the missing fields.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    insufficient = lambda g, c, k: {"sufficient": False, "structured": {"outcome": ""}, "missing": ["owner"]}
+    split = lambda g, c, k: [_leaf("a", ["x.py"])]
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        plan = cg.run_goal(repo, "vague", run_leaf=lambda r, t: "converged",
+                           split=split, refine=insufficient, goal_id="goal-h")
+        assert plan == [], plan
+        rec = goal_store.GoalStore(repo).read("goal-h") or {}
+        assert rec.get("status") == "needs_info", rec
+        assert rec.get("missing") == ["owner"], rec
+    print("ok  underdetermined goal_id run records status=needs_info (the org records the ASK)")
+
+
+def test_goal_acceptance_shadow_on_done():
+    # ADR-0016 D7: a done goal carrying a structured WHY emits a SHADOW goal_acceptance (verified=False,
+    # needs_info) — the composed outcome was NOT checked against the WHY. NEGATIVE CONTROL: pre-D7 run_goal
+    # emitted no such record, so this assertion fails without the change (red) and passes with it (green).
+    sufficient = lambda g, c, k: {"sufficient": True, "missing": [], "structured": {
+        "outcome": "O", "success_condition": "S", "negative_control": "N", "owner": "W"}}
+    split = lambda g, c, k: [_leaf("a", ["x.py"])]
+    events = []
+    cg.run_goal("/repo", "do O", run_leaf=lambda r, t: "converged",
+                split=split, refine=sufficient, emit=events.append)
+    acc = [e for e in events if e["type"] == "goal_acceptance"]
+    assert acc, ("a done goal with a WHY emits a goal_acceptance shadow record", events)
+    assert acc[0]["verified"] is False and acc[0]["status"] == "needs_info", acc
+    assert acc[0]["negative_control"] == "N", acc
+    assert any(e["type"] == "goal_finished" and e["status"] == "done" for e in events)
+    # the record must precede goal_finished is not required; presence + shape is the contract
+    print("ok  done goal emits SHADOW goal_acceptance (verified=False, needs_info) — D7, no fabricated green")
+
+
+def test_no_goal_acceptance_without_why():
+    # without a structured WHY (no refine injected) there is nothing to verify the composed outcome against,
+    # so NO goal_acceptance record is emitted (the shadow record is only meaningful with a named acceptance).
+    split = lambda g, c, k: [_leaf("a", ["x.py"])]
+    events = []
+    cg.run_goal("/repo", "g", run_leaf=lambda r, t: "converged", split=split, emit=events.append)
+    assert not any(e["type"] == "goal_acceptance" for e in events), events
+    print("ok  no WHY -> no goal_acceptance record (nothing to verify against)")
+
+
+def test_no_goal_acceptance_on_failed_goal():
+    # pins the `done` term: a FAILED goal (WITH a WHY) emits NO goal_acceptance — the shadow record is only
+    # for a goal that reached `done`. A regression dropping the `done and` guard would emit on failure -> red here.
+    sufficient = lambda g, c, k: {"sufficient": True, "missing": [], "structured": {
+        "outcome": "O", "success_condition": "S", "negative_control": "N", "owner": "W"}}
+    split = lambda g, c, k: [_leaf("a", ["x.py"])]      # atomic single-file -> floors on repeated failure
+    events = []
+    cg.run_goal("/repo", "do O", run_leaf=lambda r, t: "failed",
+                split=split, refine=sufficient, emit=events.append)
+    assert not any(e["type"] == "goal_acceptance" for e in events), ("no acceptance on a non-done goal", events)
+    assert any(e["type"] == "goal_finished" and e["status"] == "failed" for e in events), events
+    print("ok  FAILED goal with a WHY emits NO goal_acceptance (the `done` term is pinned)")
+
+
+def test_goal_acceptance_persisted_in_store():
+    # the shadow obligation is durable: a done goal_id run records goal_acceptance{verified:False} in the org's
+    # record (the field a consumer reads), alongside status=done — exercising the store.update path (store None
+    # in the other tests left it uncovered).
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    sufficient = lambda g, c, k: {"sufficient": True, "missing": [], "structured": {
+        "outcome": "O", "success_condition": "S", "negative_control": "N", "owner": "W"}}
+    split = lambda g, c, k: [_leaf("a", ["x.py"])]
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        cg.run_goal(repo, "do O", run_leaf=lambda r, t: "converged",
+                    split=split, refine=sufficient, goal_id="goal-acc")
+        rec = goal_store.GoalStore(repo).read("goal-acc") or {}
+        assert rec.get("status") == "done", rec
+        acc = rec.get("goal_acceptance") or {}
+        assert acc.get("verified") is False and acc.get("negative_control") == "N", rec
+    print("ok  goal_acceptance persisted in the org record (verified=False) on a done goal_id run")
+
+
+def test_intake_gate_auto_binds_real_refiner_and_holds():
+    # PRODUCTION PATH: split defaults to splitter.split, refine=None -> active_refine auto-binds the REAL
+    # goal_refiner.refine with a real carrier. The refine-injecting tests above do NOT cover this seam; a
+    # regression that drops the auto-binding (controller_goal.py line ~465) would pass them but lose the gate
+    # in production. Here a real carrier returns "{}" (nothing nameable) -> the real kernel HOLDs.
+    import splitter
+    real = cg.codex_carrier
+    def fake(repo, *, model=None, resume_session=None):
+        c = lambda prompt: "{}"
+        c.captured = {}
+        return c
+    cg.codex_carrier = fake
+    try:
+        events = []
+        plan = cg.run_goal("/repo", "make it nice", run_leaf=lambda r, t: "converged",
+                           split=splitter.split, emit=events.append)   # refine omitted -> auto-bind real refiner
+        assert plan == [], plan
+        assert any(e["type"] == "goal_underdetermined" for e in events), events
+        assert not any(e["type"] == "goal_split" for e in events), "real path HELD before decomposition"
+    finally:
+        cg.codex_carrier = real
+    print("ok  default-split path auto-binds the REAL refiner and HOLDs an empty intake (production path pinned)")
+
+
+def test_intake_gate_auto_binds_real_refiner_and_proceeds():
+    # the proceed half of the production path: a real carrier that NAMES the four fields for the refiner
+    # prompt and a task array for the splitter prompt -> the real refiner passes and the real splitter runs.
+    import json, splitter
+    real = cg.codex_carrier
+    def fake(repo, *, model=None, resume_session=None):
+        def c(prompt):
+            if "Decompose the goal" in prompt:          # the SPLITTER prompt (splitter._build_prompt)
+                return '[{"id":"a","objective":"do a","scope":["x.py"],"depends_on":[]}]'
+            return json.dumps({"outcome": "o", "success_condition": "s",   # else: the refiner prompt
+                               "negative_control": "n", "owner": "w", "intent": "i"})
+        c.captured = {}
+        return c
+    cg.codex_carrier = fake
+    try:
+        events = []
+        plan = cg.run_goal("/repo", "do a clear thing", run_leaf=lambda r, t: "converged",
+                           split=splitter.split, emit=events.append)
+        assert any(e["type"] == "goal_split" for e in events), ("sufficient intake proceeds to split", events)
+        assert _statuses(plan) == {"a": "done"}, plan
+    finally:
+        cg.codex_carrier = real
+    print("ok  default-split path: sufficient intake auto-refines then decomposes (production proceed path)")
+
+
+def test_main_returns_exit_2_on_intake_hold():
+    """The public CLI contract: an underdetermined goal HELD at intake makes main() return exit code 2."""
+    import goal_refiner
+    import subprocess
+    import tempfile
+    real = goal_refiner.refine
+    goal_refiner.refine = lambda goal, ctx, carrier: {"sufficient": False, "missing": ["owner"], "structured": {}}
+    repo = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    try:
+        code = cg.main(["--repo", repo, "--goal", "make it nice", "--goal-id", "hold1"])
+        assert code == 2, f"main() must return exit 2 on an intake HOLD (goal_underdetermined), got {code}"
+    finally:
+        goal_refiner.refine = real
+    print("ok  main() returns exit 2 on an intake HOLD (underdetermined goal)")
+
+
 if __name__ == "__main__":
+    import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
+        os.environ.pop("STREAM_LOG", None)   # isolate: run_goal binds STREAM_LOG (+ the GoalStore root); don't leak it across cases
         fn()
     print(f"\n{len(fns)} passed")

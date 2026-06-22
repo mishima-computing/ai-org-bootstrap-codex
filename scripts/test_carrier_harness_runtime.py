@@ -15,7 +15,7 @@ _HERE = Path(__file__).resolve().parent
 
 
 def test_clean_run_captures_output_and_exit_code():
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", "import sys; print('hi'); sys.exit(3)"], _HERE,
         timeout=30.0, no_output_timeout=10.0)
     assert "hi" in out, out
@@ -26,7 +26,7 @@ def test_clean_run_captures_output_and_exit_code():
 
 def test_no_output_timeout_kills_a_silent_carrier():
     start = time.monotonic()
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", "import time; time.sleep(30)"], _HERE,
         timeout=30.0, no_output_timeout=1.0)
     elapsed = time.monotonic() - start
@@ -56,7 +56,7 @@ def test_does_not_hang_and_reaps_a_grandchild_that_holds_the_pipe():
         "os._exit(0)\n"                   # the carrier (parent) exits right away
     )
     start = time.monotonic()
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=30.0)
     elapsed = time.monotonic() - start
     assert "hello" in out, out
@@ -76,6 +76,41 @@ def test_does_not_hang_and_reaps_a_grandchild_that_holds_the_pipe():
     os.unlink(pidfile)
     assert not alive, f"the orphan grandchild {gc_pid} was NOT reaped — it can still mutate state"
     print(f"ok  no hang + grandchild reaped: stopped in ~{elapsed:.1f}s, orphan dead")
+
+
+def test_turn_completed_without_trailing_newline_reaps_fast_as_success():
+    # THE headline hang fix: codex emits turn.completed with NO trailing newline, then blocks on stdin forever.
+    # The harness must detect the terminal event in the partial buffer, reap, and return terminal_completed.
+    script = ("import sys, time\n"
+              "sys.stdout.write('{\"type\":\"item.started\"}\\n')\n"
+              "sys.stdout.write('{\"type\":\"turn.completed\"}')\n"   # NO trailing newline
+              "sys.stdout.flush()\n"
+              "time.sleep(40)\n")
+    start = time.monotonic()
+    out, err, code, timed_out, frozen, killed, terminal = ch._stream_carrier_process(
+        [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=30.0)
+    elapsed = time.monotonic() - start
+    assert terminal and not frozen and not timed_out, (terminal, frozen, timed_out)
+    assert elapsed < 5, f"a turn.completed (even without a trailing newline) must reap fast, took {elapsed:.1f}s"
+    print(f"ok  turn.completed without trailing newline reaped in ~{elapsed:.1f}s as success")
+
+
+def test_stdin_marker_does_not_extend_the_no_output_watchdog():
+    # The stdin-wait marker is a BLOCK, not progress: emitting it (here on stdout, repeatedly) must NOT keep the
+    # no-output watchdog alive, or a genuinely stuck carrier escapes the backstop forever.
+    marker = ch.STDIN_HANG_MARKER
+    script = ("import sys, time\n"
+              "sys.stdout.write('{\"type\":\"item.started\"}\\n'); sys.stdout.flush()\n"
+              "for _ in range(30):\n"
+              f"    sys.stdout.write({marker!r} + '\\n'); sys.stdout.flush()\n"
+              "    time.sleep(0.3)\n")
+    start = time.monotonic()
+    out, err, code, timed_out, frozen, killed, terminal = ch._stream_carrier_process(
+        [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=1.5)
+    elapsed = time.monotonic() - start
+    assert frozen and not terminal, (frozen, terminal)
+    assert elapsed < 5, f"repeated stdin markers must not extend the watchdog, took {elapsed:.1f}s"
+    print(f"ok  stdin-marker (on stdout) does not extend the watchdog: frozen in ~{elapsed:.1f}s")
 
 
 if __name__ == "__main__":
