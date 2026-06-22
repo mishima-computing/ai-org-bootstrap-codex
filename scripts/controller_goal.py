@@ -64,14 +64,14 @@ def stream_emit(repo):
             # told fresh from stale, so "is this goal still moving?" leaked to fragile `pgrep`.
             ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             with log.open("a", encoding="utf-8") as f:
-                try:                                     # advisory cross-process guard on the shared log:
-                    import fcntl                          # best-effort edge-case insurance (signal-interrupted
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # write, exotic/NFS fs). POSIX-only -> skip if absent.
-                except Exception:                        # a regular-file O_APPEND write is already atomic for any
+                try:                                     # advisory cross-process guard on the shared log: cheap
+                    import fcntl                          # insurance for exotic/NFS filesystems. POSIX-only -> skip
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # (unlocked) if fcntl is absent (Windows) or unsupported.
+                except Exception:                        # A regular-file O_APPEND write is already atomic for any
                     pass                                 # size on Linux/macOS, so the lock is belt-and-suspenders.
                 f.write(json.dumps({"ts": ts, **dict(event)}, ensure_ascii=False) + "\n")
-        except Exception:                                # observability NEVER breaks a build (incl. no-fcntl Windows)
-            pass
+        except Exception:                                # fail-soft: observability never breaks a build. (Widened from
+            pass                                         # OSError so a malformed event drops silently, never raises.)
 
     return emit
 
@@ -407,7 +407,6 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     becomes the org's at receipt: it records the goal, commits its build (wip) and its outcome, in its own
     GoalStore. A consumer only READS that state. Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
-    import os
     # Bind STREAM_LOG to the SHARED stream (ABSOLUTE) so the leaf dialectic — which runs in-process with
     # repo=<temp worktree> — appends to the shared log, not an ephemeral worktree-local one that is destroyed
     # with the worktree (the deep dialectic was both invisible to consumers AND lost). Absolute is required:

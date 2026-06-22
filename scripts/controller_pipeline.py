@@ -1049,12 +1049,14 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
     repo = Path(repo).resolve()
+    run_id = _validate_run_id(repo, run_id)              # validate BEFORE mutating env (a bad run id must not poison it)
     if not os.environ.get("STREAM_LOG"):
         # Cover a DIRECT run_pipeline(real_repo) call: bind the shared stream so this run's isolated stage
-        # worktrees (pl-iso-*) append here, not to their ephemeral worktree. Called via run_goal the env is
-        # already bound, so this is a no-op then — we never (re)bind it to a leaf worktree here.
+        # worktrees (pl-iso-*) append here, not their ephemeral worktree. Via run_goal the env is already bound,
+        # so this is a no-op then. INVARIANT (as in run_goal): process-global, only-when-unset, ONE repo per
+        # process. A direct caller passing a leaf worktree as `repo` would (mis)bind to it — direct callers must
+        # pass a real repo or pre-set STREAM_LOG; a long-lived multi-repo process must set it per call.
         os.environ["STREAM_LOG"] = str(repo / ".agent-runs" / "stream.jsonl")
-    run_id = _validate_run_id(repo, run_id)
     entries = _entries(repo)
     predecessors = _predecessors(entries)
     verifiers = set(_verifier_roles(entries))

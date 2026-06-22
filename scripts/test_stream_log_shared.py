@@ -71,7 +71,7 @@ def test_concurrent_large_appends_do_not_corrupt():
         bad = sum(1 for l in lines if _is_bad(l))
         assert bad == 0, f"{bad}/{len(lines)} lines corrupted by concurrent cross-process appends"
         assert len(lines) == N * PER, f"expected {N*PER} intact lines, got {len(lines)}"
-    print(f"ok  {N*PER} concurrent cross-process 20KB appends: every line intact (flock works)")
+    print(f"ok  {N*PER} concurrent cross-process 20KB appends: no torn/interleaved lines (O_APPEND atomicity)")
 
 
 def _is_bad(line: str) -> bool:
@@ -99,34 +99,43 @@ def test_bind_makes_leaf_worktree_append_inherit_shared_stream():
     print("ok  run_goal's bind makes a leaf's worktree-side append inherit the shared stream")
 
 
-def test_preset_stream_log_is_respected():
-    with tempfile.TemporaryDirectory() as preset_dir, tempfile.TemporaryDirectory() as repo:
-        preset = str(Path(preset_dir) / "shared.jsonl")
-        os.environ["STREAM_LOG"] = preset
-        controller_goal.run_goal(repo, "g", run_leaf=lambda r, t: "converged",
-                                 split=lambda *a, **k: [{"id": "L", "objective": "o"}])
-        assert os.environ.get("STREAM_LOG") == preset, "a pre-set STREAM_LOG must be respected (cockpit shared-log case)"
-        os.environ.pop("STREAM_LOG", None)
-    print("ok  a pre-set STREAM_LOG is respected, not overwritten")
-
-
-def test_goalstore_record_lands_under_repo():
-    """GoalStore root derives from STREAM_LOG; the bind must put the record under the repo, not a worktree."""
+def test_preset_stream_log_routes_stream_and_goalstore():
+    """A pre-set STREAM_LOG (the cockpit shared-log case) wins: it is respected, and BOTH the stream events AND
+    the GoalStore record land under ITS root (!= the passed repo), not the repo. Discriminating: the STREAM_LOG
+    root differs from `repo`, so the _shared_state_repo coupling can't be masked by the fallback `return str(repo)`."""
     os.environ.pop("STREAM_LOG", None)
-    with tempfile.TemporaryDirectory() as repo:
+    with tempfile.TemporaryDirectory() as shared, tempfile.TemporaryDirectory() as repo:
+        preset = str(Path(shared) / ".agent-runs" / "stream.jsonl")
+        os.environ["STREAM_LOG"] = preset
         controller_goal.run_goal(repo, "g", goal_id="g1", run_leaf=lambda r, t: "converged",
                                  split=lambda *a, **k: [{"id": "L", "objective": "o"}])
-        rec = Path(repo) / ".agent-runs" / "goals" / "g1.json"
-        assert rec.exists(), f"the GoalStore record must land under the repo: {rec}"
+        assert os.environ.get("STREAM_LOG") == preset, "a pre-set STREAM_LOG must be respected, not overwritten"
+        assert Path(preset).exists() and Path(preset).read_text().strip(), "goal stream events must land in the PRESET log"
+        assert not (Path(repo) / ".agent-runs" / "stream.jsonl").exists(), "no stream events may go to the repo"
+        assert (Path(shared) / ".agent-runs" / "goals" / "g1.json").exists(), "GoalStore record must land under STREAM_LOG's root"
+        assert not (Path(repo) / ".agent-runs" / "goals" / "g1.json").exists(), "GoalStore record must NOT go to the repo"
         os.environ.pop("STREAM_LOG", None)
-    print("ok  GoalStore record lands under the repo (root follows the bound STREAM_LOG)")
+    print("ok  pre-set STREAM_LOG routes BOTH the stream and the GoalStore to its root, not the repo")
 
 
-def test_flock_guard_present_in_both_append_sites():
-    import inspect
-    assert "flock" in inspect.getsource(controller_goal.stream_emit), "stream_emit must take the flock guard"
-    assert "flock" in inspect.getsource(controller_pipeline._stream_append), "_stream_append must take the flock guard"
-    print("ok  flock guard present in both append sites (deleting it fails this test)")
+def test_flock_is_actually_called_at_both_append_sites():
+    """Prove the lock CALL fires — a source-substring match would pass on a comment or a dead branch."""
+    import fcntl
+    calls = []
+    orig = fcntl.flock
+    fcntl.flock = lambda fd, op: calls.append(op)
+    os.environ.pop("STREAM_LOG", None)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["STREAM_LOG"] = str(Path(d) / "s.jsonl")
+            controller_pipeline._stream_append(d, {"type": "x"})
+            controller_goal.stream_emit(d)({"type": "y"})
+        assert len(calls) >= 2 and all(op == fcntl.LOCK_EX for op in calls), \
+            f"fcntl.flock(LOCK_EX) must fire at BOTH append sites, recorded ops: {calls}"
+    finally:
+        fcntl.flock = orig
+        os.environ.pop("STREAM_LOG", None)
+    print("ok  fcntl.flock(LOCK_EX) is actually invoked at both append sites")
 
 
 if __name__ == "__main__":
