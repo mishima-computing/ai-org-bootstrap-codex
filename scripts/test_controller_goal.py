@@ -631,7 +631,9 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
 
 
 if __name__ == "__main__":
+    import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
+        os.environ.pop("STREAM_LOG", None)   # isolate: run_goal binds STREAM_LOG (+ the GoalStore root); don't leak it across cases
         fn()
     print(f"\n{len(fns)} passed")

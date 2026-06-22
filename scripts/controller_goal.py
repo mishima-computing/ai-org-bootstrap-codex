@@ -63,8 +63,10 @@ def stream_emit(repo):
             # process poll. A poor, ts-less goal log was a time bomb: leaf_start/leaf_done could not be
             # told fresh from stale, so "is this goal still moving?" leaked to fragile `pgrep`.
             ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            import fcntl
             with log.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"ts": ts, **dict(event)}, ensure_ascii=False) + "\n")   # event ts wins if present
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # serialize concurrent appends: O_APPEND is atomic only
+                f.write(json.dumps({"ts": ts, **dict(event)}, ensure_ascii=False) + "\n")   # for <= PIPE_BUF; lines exceed it
         except OSError:
             pass
 
@@ -402,6 +404,13 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     becomes the org's at receipt: it records the goal, commits its build (wip) and its outcome, in its own
     GoalStore. A consumer only READS that state. Returns the final task tree."""
     run_leaf = run_leaf or default_run_leaf
+    import os
+    # Bind STREAM_LOG to the SHARED stream (ABSOLUTE) so the leaf dialectic — which runs in-process with
+    # repo=<temp worktree> — appends to the shared log, not an ephemeral worktree-local one that is destroyed
+    # with the worktree (the deep dialectic was both invisible to consumers AND lost). Absolute is required:
+    # the child runs with cwd in a temp worktree, so a relative value would resolve under /tmp.
+    if not os.environ.get("STREAM_LOG"):
+        os.environ["STREAM_LOG"] = str(Path(repo).resolve() / ".agent-runs" / "stream.jsonl")
     emit = emit or stream_emit(repo)
     # the org's state STORE is durable + SHARED (so a consumer can READ current state, DB-style): write it where
     # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already

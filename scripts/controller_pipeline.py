@@ -377,7 +377,9 @@ def _stream_append(repo, event: dict) -> None:
     try:
         log = Path(os.environ.get("STREAM_LOG") or (Path(repo) / ".agent-runs" / "stream.jsonl"))
         log.parent.mkdir(parents=True, exist_ok=True)
+        import fcntl
         with log.open("a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # serialize concurrent appends from many leaf worktrees / parallel goals
             f.write(json.dumps({"ts": _iso8601_utc(), **dict(event)}, ensure_ascii=False) + "\n")
     except Exception:                                      # noqa: BLE001 - observability never breaks a run
         pass
