@@ -78,6 +78,41 @@ def test_does_not_hang_and_reaps_a_grandchild_that_holds_the_pipe():
     print(f"ok  no hang + grandchild reaped: stopped in ~{elapsed:.1f}s, orphan dead")
 
 
+def test_turn_completed_without_trailing_newline_reaps_fast_as_success():
+    # THE headline hang fix: codex emits turn.completed with NO trailing newline, then blocks on stdin forever.
+    # The harness must detect the terminal event in the partial buffer, reap, and return terminal_completed.
+    script = ("import sys, time\n"
+              "sys.stdout.write('{\"type\":\"item.started\"}\\n')\n"
+              "sys.stdout.write('{\"type\":\"turn.completed\"}')\n"   # NO trailing newline
+              "sys.stdout.flush()\n"
+              "time.sleep(40)\n")
+    start = time.monotonic()
+    out, err, code, timed_out, frozen, killed, terminal = ch._stream_carrier_process(
+        [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=30.0)
+    elapsed = time.monotonic() - start
+    assert terminal and not frozen and not timed_out, (terminal, frozen, timed_out)
+    assert elapsed < 5, f"a turn.completed (even without a trailing newline) must reap fast, took {elapsed:.1f}s"
+    print(f"ok  turn.completed without trailing newline reaped in ~{elapsed:.1f}s as success")
+
+
+def test_stdin_marker_does_not_extend_the_no_output_watchdog():
+    # The stdin-wait marker is a BLOCK, not progress: emitting it (here on stdout, repeatedly) must NOT keep the
+    # no-output watchdog alive, or a genuinely stuck carrier escapes the backstop forever.
+    marker = ch.STDIN_HANG_MARKER
+    script = ("import sys, time\n"
+              "sys.stdout.write('{\"type\":\"item.started\"}\\n'); sys.stdout.flush()\n"
+              "for _ in range(30):\n"
+              f"    sys.stdout.write({marker!r} + '\\n'); sys.stdout.flush()\n"
+              "    time.sleep(0.3)\n")
+    start = time.monotonic()
+    out, err, code, timed_out, frozen, killed, terminal = ch._stream_carrier_process(
+        [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=1.5)
+    elapsed = time.monotonic() - start
+    assert frozen and not terminal, (frozen, terminal)
+    assert elapsed < 5, f"repeated stdin markers must not extend the watchdog, took {elapsed:.1f}s"
+    print(f"ok  stdin-marker (on stdout) does not extend the watchdog: frozen in ~{elapsed:.1f}s")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

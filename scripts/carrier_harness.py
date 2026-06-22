@@ -338,9 +338,10 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
                             _kill_process_group(pgid)
                     else:
                         stderr_chunks.append(chunk)
-                    # the stdin-wait marker is a BLOCK, not progress — it must NOT reset the no-output watchdog,
-                    # or a carrier that emits it then goes silent escapes the 300s backstop forever.
-                    if key.data == "stdout" or STDIN_HANG_MARKER not in chunk.decode("utf-8", "replace"):
+                    # the stdin-wait marker is a BLOCK, not progress — it must NOT reset the no-output watchdog
+                    # (on EITHER stream: codex may print it to stdout or stderr), or a carrier that emits it then
+                    # goes silent escapes the 300s backstop forever.
+                    if STDIN_HANG_MARKER not in chunk.decode("utf-8", "replace"):
                         last_output = time.monotonic()
                     if terminal_completed:
                         break
@@ -521,7 +522,7 @@ def run_carrier(repo, prompt, sandbox="workspace-write", *, model=None, timeout=
         log = out_dir / f"carrier-attempt{attempt}.log"
         log.write_text("timestamp: " + timestamp + "\n" + stdout +
                        ("\n--STDERR--\n" + (stderr or "")), encoding="utf-8")
-        hang = STDIN_HANG_MARKER in stdout and code != 0
+        hang = STDIN_HANG_MARKER in (stdout + stderr) and code != 0   # marker can land on either stream
         usage = extract_token_usage(stdout)   # token + context spend, from codex's --json stream
         # capture this run's session id so a later REPAIR iteration can RESUME it; fall back to the id we
         # resumed (resume reuses the same thread, which codex may or may not re-announce as thread.started).

@@ -17,11 +17,11 @@ def _carrier(payload):
 
 def test_sufficient_when_all_four_named():
     v = goal_refiner.refine("g", {}, _carrier({
-        "outcome": "the chat submit drives the recovery visual",
-        "success_condition": "a frozen stage shows recovery, a green run shows delivery",
-        "negative_control": "a frozen stage that shows the delivery visual instead",
-        "owner": "the steerer",
-        "intent": "restore the visual wiring",
+        "outcome": "the parser rejects an unknown record type",
+        "success_condition": "a malformed record is rejected and a valid one is accepted",
+        "negative_control": "a malformed record that is wrongly accepted must fail acceptance",
+        "owner": "the maintainer",
+        "intent": "harden the record parser",
     }))
     assert v["sufficient"] is True, v
     assert v["missing"] == []

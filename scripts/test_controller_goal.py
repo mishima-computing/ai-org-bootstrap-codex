@@ -630,6 +630,23 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
     print("ok  default-split path: sufficient intake auto-refines then decomposes (production proceed path)")
 
 
+def test_main_returns_exit_2_on_intake_hold():
+    """The public CLI contract: an underdetermined goal HELD at intake makes main() return exit code 2."""
+    import goal_refiner
+    import subprocess
+    import tempfile
+    real = goal_refiner.refine
+    goal_refiner.refine = lambda goal, ctx, carrier: {"sufficient": False, "missing": ["owner"], "structured": {}}
+    repo = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    try:
+        code = cg.main(["--repo", repo, "--goal", "make it nice", "--goal-id", "hold1"])
+        assert code == 2, f"main() must return exit 2 on an intake HOLD (goal_underdetermined), got {code}"
+    finally:
+        goal_refiner.refine = real
+    print("ok  main() returns exit 2 on an intake HOLD (underdetermined goal)")
+
+
 if __name__ == "__main__":
     import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
