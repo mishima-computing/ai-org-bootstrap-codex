@@ -237,6 +237,49 @@ def test_goal_id_makes_the_org_own_its_state():
         print("ok  goal_id -> the org owns its goal state (record + wip) AND flows it to its rich log")
 
 
+def test_converged_leaf_updates_wip_before_goal_finalize():
+    # RESUME REGRESSION: a mid-run interruption after leaf A lands must be resumable from A's committed state.
+    # This assertion runs while dependent leaf B is executing, before _finalize() can write the terminal wip.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a):
+        return subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+        split = lambda goal, ctx, carrier: [
+            {"id": "a", "objective": "do a", "scope": ["a.py"], "depends_on": []},
+            {"id": "b", "objective": "do b", "scope": ["b.py"], "depends_on": ["a"]},
+        ]
+        events = []
+        seen = {}
+
+        def run_leaf(r, t):
+            if t["id"] == "a":
+                open(os.path.join(r, "a.py"), "w").write("landed a\n")
+                return "converged"
+            rec = goal_store.GoalStore(repo).read("goal-mid-wip") or {}
+            seen["record"] = rec
+            seen["ref"] = git(repo, "rev-parse", "--verify", "refs/goals/goal-mid-wip/wip").stdout.strip()
+            seen["goal_finished_before_b"] = any(e.get("type") == "goal_finished" for e in events)
+            w2 = os.path.join(d, "resume-target")
+            git(repo, "worktree", "add", "-q", "--detach", w2, base)
+            seen["loaded"] = goal_store.GoalStore(repo).load("goal-mid-wip", w2)
+            seen["loaded_a"] = os.path.isfile(os.path.join(w2, "a.py"))
+            return "failed"
+
+        plan = cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split,
+                           goal_id="goal-mid-wip", emit=events.append)
+        rec = seen.get("record") or {}
+        assert seen.get("goal_finished_before_b") is False, events
+        assert rec.get("wip"), ("wip must be set after leaf A lands, before goal finalization", rec)
+        assert seen.get("ref") == rec["wip"], (seen, rec)
+        assert seen.get("loaded") and seen.get("loaded_a"), ("store.load can resume leaf A mid-run", seen)
+        assert _statuses(plan) == {"a": "done", "b": "failed"}, _statuses(plan)
+    print("ok  each landed leaf updates durable wip before goal finalization (mid-run resume pointer)")
+
+
 def test_additive_steering_reaches_the_dispatched_leaf():
     # a steering note added to a RUNNING goal is folded into the objective the leaf-runner actually
     # executes — the org consumes mid-run guidance at dispatch, with NO kill + re-fire (no work discarded).

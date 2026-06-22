@@ -874,6 +874,15 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 leaf_commits[leaf["id"]] = res.get("commit")   # this leaf's own commit (git scattered here)
                 # rich log: carry the leaf's COMMIT sha (its build state), not just "it's done"
                 emit({"type": "leaf_done", "id": leaf["id"], "commit": res.get("commit"), "goal_id": goal_id})
+                if store is not None and goal_id:
+                    try:
+                        store.save_wip(goal_id, repo)
+                    except Exception as e:                       # noqa: BLE001 - resume pointer is fail-soft
+                        try:
+                            emit({"type": "wip_save_failed", "goal_id": goal_id, "id": leaf["id"],
+                                  "error": repr(e)})
+                        except Exception:                         # noqa: BLE001 - observability is fail-soft
+                            pass
                 continue
             depth = _depth_of(plan, leaf["id"]) or 0
             findings = res.get("findings")
