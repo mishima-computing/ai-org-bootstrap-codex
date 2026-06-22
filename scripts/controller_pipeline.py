@@ -377,9 +377,12 @@ def _stream_append(repo, event: dict) -> None:
     try:
         log = Path(os.environ.get("STREAM_LOG") or (Path(repo) / ".agent-runs" / "stream.jsonl"))
         log.parent.mkdir(parents=True, exist_ok=True)
-        import fcntl
         with log.open("a", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # serialize concurrent appends from many leaf worktrees / parallel goals
+            try:                                     # advisory cross-process/-worktree guard on the shared log:
+                import fcntl                          # best-effort edge-case insurance (POSIX-only -> skip if absent).
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # a regular-file O_APPEND write is already atomic for any
+            except Exception:                        # size on Linux/macOS, so the lock is belt-and-suspenders.
+                pass
             f.write(json.dumps({"ts": _iso8601_utc(), **dict(event)}, ensure_ascii=False) + "\n")
     except Exception:                                      # noqa: BLE001 - observability never breaks a run
         pass
@@ -1046,6 +1049,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
     repo = Path(repo).resolve()
+    if not os.environ.get("STREAM_LOG"):
+        # Cover a DIRECT run_pipeline(real_repo) call: bind the shared stream so this run's isolated stage
+        # worktrees (pl-iso-*) append here, not to their ephemeral worktree. Called via run_goal the env is
+        # already bound, so this is a no-op then — we never (re)bind it to a leaf worktree here.
+        os.environ["STREAM_LOG"] = str(repo / ".agent-runs" / "stream.jsonl")
     run_id = _validate_run_id(repo, run_id)
     entries = _entries(repo)
     predecessors = _predecessors(entries)
