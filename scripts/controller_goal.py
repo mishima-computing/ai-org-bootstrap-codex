@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os  # noqa: E402
+import ask_search  # noqa: E402 — bounded search + provenance kernel for underdetermined asks
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
 import goal_refiner  # noqa: E402 — ADR-0016 D1b intake sufficiency gate (raw goal -> candidate structured goal)
@@ -356,9 +357,155 @@ def _make_ask(node_id: str, missing: list, structured: dict | None) -> dict:
             "structured": structured or {}, "status": "open"}
 
 
+def _candidate_label(cand: dict) -> str:
+    ref = cand.get("source_ref") or cand.get("url") or "source"
+    return f"{ref}: {cand.get('value')}"
+
+
+def _make_confirm_ask(node_id: str, missing: list, structured: dict | None, candidates: list[dict]) -> dict:
+    fields = ", ".join(f"`{c.get('field')}`" for c in candidates)
+    found = " ".join(f"I found `{c.get('field')}` in {c.get('source_ref')}: \"{c.get('value')}\"."
+                     for c in candidates)
+    residual = ""
+    if missing:
+        residual = " " + _ask_question(node_id, missing)
+    return {"node_id": node_id, "missing": list(missing or []), "kind": "confirm",
+            "original_missing": sorted({*(str(m) for m in missing or []),
+                                        *(str(c.get("field")) for c in candidates if c.get("field"))}),
+            "candidates": [dict(c) for c in candidates],
+            "question": f"{found} Confirm {fields}? Reply yes to confirm, or supply the correction.{residual}",
+            "structured": structured or {}, "status": "open"}
+
+
+def _make_disambiguate_ask(node_id: str, missing: list, structured: dict | None, conflicts: list[dict]) -> dict:
+    candidates = []
+    lines = []
+    for conflict in conflicts or []:
+        field = conflict.get("field")
+        lines.append(f"Conflicting candidates for `{field}`:")
+        for cand in conflict.get("candidates") or []:
+            candidates.append(dict(cand))
+            lines.append(f"- {_candidate_label(cand)}")
+    lines.append("Reply with the source/value to use, or supply the corrected value.")
+    return {"node_id": node_id, "missing": list(missing or []), "kind": "disambiguate",
+            "original_missing": list(missing or []),
+            "candidates": candidates, "conflicts": [dict(c) for c in conflicts or []],
+            "question": " ".join(lines), "structured": structured or {}, "status": "open"}
+
+
+def _ask_search_enabled() -> bool:
+    return os.environ.get("AOB_ASK_SEARCH", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _ask_or_confirm(repo: str, node_id: str, missing: list, structured: dict | None,
+                    objective: str, emit) -> dict:
+    bare = _make_ask(node_id, missing, structured)
+    if not _ask_search_enabled():
+        return bare
+    try:
+        found = ask_search.search_candidates(repo, node_id, missing, structured, objective, emit=emit, enabled=True)
+    except Exception as exc:                                  # noqa: BLE001 - search is fail-soft
+        if callable(emit):
+            emit({"type": "ask_search_failed", "node_id": node_id, "error": str(exc)[:300]})
+        return bare
+    conflicts = found.get("conflicts") or []
+    if conflicts:
+        if callable(emit):
+            emit({"type": "confirm_requested", "node_id": node_id, "fields": [c.get("field") for c in conflicts],
+                  "shape": "disambiguate"})
+        return _make_disambiguate_ask(node_id, missing, structured, conflicts)
+    candidates = found.get("candidates") or []
+    if not candidates:
+        return bare
+    answered = {c.get("field") for c in candidates}
+    residual = [m for m in (missing or []) if m not in answered]
+    if callable(emit):
+        emit({"type": "confirm_requested", "node_id": node_id, "fields": list(answered), "shape": "confirm"})
+    return _make_confirm_ask(node_id, residual, structured, candidates)
+
+
 def _upsert_open_ask(asks: list[dict], ask: dict) -> list[dict]:
     out = [dict(a) for a in asks if not (a.get("node_id") == ask.get("node_id") and a.get("status") == "open")]
     out.append(dict(ask))
+    return out
+
+
+def _affirmed(text: str) -> bool:
+    return (text or "").strip().lower().strip(".! ") in {"yes", "y", "confirm", "confirmed", "approve", "approved"}
+
+
+def _rejected(text: str) -> bool:
+    return (text or "").strip().lower().strip(".! ") in {"no", "n", "reject", "rejected", "decline", "declined"}
+
+
+def _open_ask_by_node(asks: list[dict]) -> dict:
+    return {a.get("node_id"): a for a in asks or [] if a.get("status") in {"open", "answered"}}
+
+
+def _resolve_confirmations(notes: list[dict], asks: list[dict], emit=None) -> list[dict]:
+    """Resolve confirm/disambiguate replies before refinement sees steering text."""
+    open_by_node = _open_ask_by_node(asks)
+    resolved = []
+    for note in notes or []:
+        copied = dict(note)
+        target = copied.get("target")
+        ask = open_by_node.get(target)
+        text = copied.get("text", "")
+        if not ask:
+            resolved.append(copied)
+            continue
+        kind = ask.get("kind") or "bare"
+        if kind == "confirm" and _affirmed(text):
+            values = [str(c.get("value")) for c in ask.get("candidates") or [] if str(c.get("value") or "").strip()]
+            copied["text"] = "\n".join(values)
+            copied["_resolved"] = "confirmed"
+            if callable(emit):
+                emit({"type": "confirmation_affirmed", "node_id": target})
+        elif kind in {"confirm", "disambiguate"} and _rejected(text):
+            copied["_resolved"] = "rejected"
+            if callable(emit):
+                emit({"type": "confirmation_rejected", "node_id": target})
+        elif kind == "disambiguate":
+            chosen = None
+            low = (text or "").lower()
+            for cand in ask.get("candidates") or []:
+                ref = str(cand.get("source_ref") or "")
+                ref_l = ref.lower()
+                ref_name = Path(ref).name.lower()
+                ref_stem = Path(ref).stem.lower()
+                value_l = str(cand.get("value") or "").lower()
+                if ref_l in low or ref_name in low or ref_stem in low or value_l in low:
+                    chosen = cand
+                    break
+            if chosen:
+                copied["text"] = str(chosen.get("value") or "")
+                copied["_resolved"] = "confirmed"
+                if callable(emit):
+                    emit({"type": "confirmation_affirmed", "node_id": target})
+            else:
+                copied["_resolved"] = "corrected"
+        else:
+            copied["_resolved"] = "corrected"
+        resolved.append(copied)
+    return resolved
+
+
+def _repark_rejected_confirmations(asks: list[dict], notes: list[dict]) -> list[dict]:
+    rejected = {n.get("target") for n in notes or [] if n.get("_resolved") == "rejected"}
+    if not rejected:
+        return asks
+    out = []
+    for ask in asks or []:
+        copied = dict(ask)
+        if copied.get("node_id") in rejected and copied.get("status") == "open":
+            original_missing = copied.get("original_missing") or copied.get("missing") or []
+            copied.pop("kind", None)
+            copied.pop("candidates", None)
+            copied.pop("conflicts", None)
+            copied.pop("original_missing", None)
+            copied["missing"] = list(original_missing)
+            copied["question"] = _ask_question(copied.get("node_id"), copied.get("missing"))
+        out.append(copied)
     return out
 
 
@@ -404,16 +551,19 @@ def _reactivate_answered(tasks: list, answer_targets: set[str]) -> tuple[list, l
 
 def _mark_answered_asks(asks: list[dict], notes: list[dict], reactivated: set[str]) -> list[dict]:
     answer_by_target = {}
+    resolved_by_target = {}
     for note in notes:
         target = note.get("target")
         if target in reactivated:
             answer_by_target[target] = note.get("text", "")
+            resolved_by_target[target] = "confirmed" if note.get("_resolved") == "confirmed" else "corrected"
     out = []
     for ask in asks or []:
         copied = dict(ask)
         if copied.get("node_id") in reactivated and copied.get("status") == "open":
             copied["status"] = "answered"
             copied["answer"] = answer_by_target.get(copied.get("node_id"), "")
+            copied["resolved"] = resolved_by_target.get(copied.get("node_id"), "corrected")
         out.append(copied)
     return out
 
@@ -606,14 +756,15 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     active_refine = refine if refine is not None else (goal_refiner.refine if split is splitter.split else None)
     if active_refine is not None:
         refine_carrier = top_carrier if refine is not None else codex_carrier(repo)
-        goal_notes = [n for n in _read_steering(store, steering_goal_ids)
+        goal_notes = [n for n in _resolve_confirmations(_read_steering(store, steering_goal_ids), asks, emit)
                       if n.get("target", "goal") in ("goal", "_goal")]
+        goal_notes = [n for n in goal_notes if n.get("_resolved") != "rejected"]
         refine_goal, refine_context = _steer_refine(goal, context or {}, goal_notes)
         verdict = active_refine(refine_goal, refine_context, refine_carrier)
         if not verdict.get("sufficient"):
             missing = verdict.get("missing", [])
             emit({"type": "goal_underdetermined", "goal": goal, "missing": missing})
-            ask = _make_ask("_goal", missing, verdict.get("structured"))
+            ask = _ask_or_confirm(repo, "_goal", missing, verdict.get("structured"), goal, emit)
             asks[:] = _upsert_open_ask(asks, ask)
             if store is not None:                       # the org records the ASK as its terminal state
                 store.update(goal_id, status="needs_info", missing=missing,
@@ -622,9 +773,11 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         context = {**(context or {}), "structured_goal": verdict.get("structured")}
     plan = None
     if prior_record and prior_record.get("queue"):
-        notes = _read_steering(store, steering_goal_ids)
+        notes = _resolve_confirmations(_read_steering(store, steering_goal_ids), asks, emit)
+        asks[:] = _repark_rejected_confirmations(asks, notes)
         blocked_prior = _blocked_ids(prior_record["queue"])
-        answer_targets = {n.get("target") for n in notes if n.get("target") in blocked_prior}
+        answer_targets = {n.get("target") for n in notes
+                          if n.get("target") in blocked_prior and n.get("_resolved") != "rejected"}
         if answer_targets:
             plan, reactivated = _reactivate_answered(prior_record["queue"], answer_targets)
             asks[:] = _mark_answered_asks(asks, notes, set(reactivated))
@@ -733,12 +886,14 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 child_ctx["prior_rejected_findings"] = findings
             if active_refine is not None:
                 refine_carrier = carrier if refine is not None else codex_carrier(repo)
-                notes = _steering_notes_for(store, steering_goal_ids, leaf, plan)
+                notes = _resolve_confirmations(_steering_notes_for(store, steering_goal_ids, leaf, plan), asks, emit)
+                notes = [n for n in notes if n.get("_resolved") != "rejected"]
                 refine_goal, refine_context = _steer_refine(leaf["objective"], child_ctx, notes)
                 verdict = active_refine(refine_goal, refine_context, refine_carrier)
                 if not verdict.get("sufficient"):
                     missing = verdict.get("missing", [])
-                    ask = _make_ask(leaf["id"], missing, verdict.get("structured"))
+                    ask = _ask_or_confirm(repo, leaf["id"], missing, verdict.get("structured"),
+                                          leaf.get("objective") or "", emit)
                     asks[:] = _upsert_open_ask(asks, ask)
                     plan = frontier.advance(plan, leaf["id"], "blocked_hitl")
                     if store is not None:

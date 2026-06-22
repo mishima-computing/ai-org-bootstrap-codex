@@ -692,6 +692,317 @@ def test_answer_reactivates_parked_node_and_reaches_refine():
     print("ok  supplied answer un-parks the node and is delivered into that node's refine")
 
 
+def _write_doc(root, rel, text):
+    path = Path(root) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_ask_search_single_adr_hit_emits_confirm_not_bare():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    old_gh = os.environ.get("AOB_ASK_SEARCH_GH")
+    os.environ["AOB_ASK_SEARCH_GH"] = "0"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            git(repo, "init", "-b", "main")
+            _write_doc(repo, "docs/decisions/ADR-0999.md", "# ADR-0999\n\nOwner: Platform QA.")
+            insufficient = lambda g, c, k: {"sufficient": False, "structured": {}, "missing": ["owner"]}
+            events = []
+            cg.run_goal(repo, "build the owner-gated feature", run_leaf=lambda r, t: "converged",
+                        split=lambda g, c, k: [_leaf("a", ["x.py"])], refine=insufficient,
+                        goal_id="goal-confirm", emit=events.append)
+            rec = goal_store.GoalStore(repo).read("goal-confirm") or {}
+        ask = (rec.get("open_asks") or [])[0]
+        assert ask.get("kind") == "confirm", ask
+        assert ask.get("candidates") and ask["candidates"][0]["source_ref"] == "docs/decisions/ADR-0999.md", ask
+        assert "Confirm `owner`" in ask.get("question", ""), ask
+        assert any(e.get("type") == "confirm_requested" for e in events), events
+    finally:
+        if old_gh is None:
+            os.environ.pop("AOB_ASK_SEARCH_GH", None)
+        else:
+            os.environ["AOB_ASK_SEARCH_GH"] = old_gh
+    print("ok  underdetermined ask with one ADR hit becomes confirm, not bare")
+
+
+def test_ask_search_conflicting_adr_hits_emit_disambiguation():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    old_gh = os.environ.get("AOB_ASK_SEARCH_GH")
+    os.environ["AOB_ASK_SEARCH_GH"] = "0"
+    real = cg.ask_search.propose_candidates
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            git(repo, "init", "-b", "main")
+            _write_doc(repo, "docs/decisions/ADR-1001.md", "Owner: Platform QA.")
+            _write_doc(repo, "docs/decisions/ADR-1002.md", "Owner: Release Engineering.")
+
+            def fake_propose(missing, structured, objective, passages):
+                return [
+                    {"field": "owner", "value": "Owner: Platform QA.",
+                     "source_ref": "docs/decisions/ADR-1001.md", "excerpt": "Owner: Platform QA."},
+                    {"field": "owner", "value": "Owner: Release Engineering.",
+                     "source_ref": "docs/decisions/ADR-1002.md", "excerpt": "Owner: Release Engineering."},
+                ]
+
+            cg.ask_search.propose_candidates = fake_propose
+            insufficient = lambda g, c, k: {"sufficient": False, "structured": {}, "missing": ["owner"]}
+            cg.run_goal(repo, "build it", run_leaf=lambda r, t: "converged",
+                        split=lambda g, c, k: [_leaf("a", ["x.py"])], refine=insufficient,
+                        goal_id="goal-conflict")
+            rec = goal_store.GoalStore(repo).read("goal-conflict") or {}
+        ask = (rec.get("open_asks") or [])[0]
+        q = ask.get("question", "")
+        assert ask.get("kind") == "disambiguate", ask
+        assert "docs/decisions/ADR-1001.md" in q and "docs/decisions/ADR-1002.md" in q, q
+        assert "Conflicting candidates" in q and len(ask.get("candidates") or []) == 2, ask
+    finally:
+        cg.ask_search.propose_candidates = real
+        if old_gh is None:
+            os.environ.pop("AOB_ASK_SEARCH_GH", None)
+        else:
+            os.environ["AOB_ASK_SEARCH_GH"] = old_gh
+    print("ok  contradictory ADR candidates surface side-by-side for human disambiguation")
+
+
+def test_ask_search_no_result_is_byte_identical_bare_ask():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    old_gh = os.environ.get("AOB_ASK_SEARCH_GH")
+    os.environ["AOB_ASK_SEARCH_GH"] = "0"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            git(repo, "init", "-b", "main")
+            insufficient = lambda g, c, k: {"sufficient": False, "structured": {}, "missing": ["owner"]}
+            cg.run_goal(repo, "vague", run_leaf=lambda r, t: "converged",
+                        split=lambda g, c, k: [_leaf("a", ["x.py"])], refine=insufficient,
+                        goal_id="goal-bare")
+            rec = goal_store.GoalStore(repo).read("goal-bare") or {}
+        assert (rec.get("open_asks") or [])[0] == cg._make_ask("_goal", ["owner"], {}), rec
+    finally:
+        if old_gh is None:
+            os.environ.pop("AOB_ASK_SEARCH_GH", None)
+        else:
+            os.environ["AOB_ASK_SEARCH_GH"] = old_gh
+    print("ok  no search result falls back to the existing bare ask byte-for-byte")
+
+
+def test_ask_search_fabricated_provenance_is_rejected_to_bare():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    old_gh = os.environ.get("AOB_ASK_SEARCH_GH")
+    os.environ["AOB_ASK_SEARCH_GH"] = "0"
+    real = cg.ask_search.propose_candidates
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            git(repo, "init", "-b", "main")
+            _write_doc(repo, "docs/decisions/ADR-1003.md", "Owner: Real Team.")
+            cg.ask_search.propose_candidates = lambda m, s, o, p: [
+                {"field": "owner", "value": "Owner: Fake Team.",
+                 "source_ref": "docs/decisions/ADR-DOES-NOT-EXIST.md", "excerpt": "Owner: Fake Team."}
+            ]
+            insufficient = lambda g, c, k: {"sufficient": False, "structured": {}, "missing": ["owner"]}
+            events = []
+            cg.run_goal(repo, "vague", run_leaf=lambda r, t: "converged",
+                        split=lambda g, c, k: [_leaf("a", ["x.py"])], refine=insufficient,
+                        goal_id="goal-fabricated", emit=events.append)
+            rec = goal_store.GoalStore(repo).read("goal-fabricated") or {}
+        assert (rec.get("open_asks") or [])[0] == cg._make_ask("_goal", ["owner"], {}), rec
+        assert any(e.get("type") == "ask_candidate_rejected" and e.get("reason") == "bad_provenance"
+                   for e in events), events
+    finally:
+        cg.ask_search.propose_candidates = real
+        if old_gh is None:
+            os.environ.pop("AOB_ASK_SEARCH_GH", None)
+        else:
+            os.environ["AOB_ASK_SEARCH_GH"] = old_gh
+    print("ok  fabricated candidate provenance is rejected visibly and falls back to bare")
+
+
+def test_confirmation_affirm_threads_candidate_value_and_marks_confirmed():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo); st.create("prior-confirm", "g", org="")
+        prior_queue = [_leaf("blocked", ["a.py", "b.py"])]; prior_queue[0]["status"] = "blocked_hitl"
+        candidate = {"field": "owner", "value": "Owner: Platform QA.",
+                     "source_ref": "docs/decisions/ADR-1001.md", "excerpt": "Owner: Platform QA."}
+        st.update("prior-confirm", status="blocked_hitl", queue=prior_queue,
+                  asks=[{"node_id": "blocked", "missing": [], "kind": "confirm",
+                         "original_missing": ["owner"], "candidates": [candidate],
+                         "question": "confirm?", "structured": {}, "status": "open"}])
+        st.steer("prior-confirm", "yes", target="blocked")
+        seen = []
+        def refine(g, ctx, carrier):
+            seen.append((g, ctx))
+            if ctx.get("parent") == "blocked":
+                assert "Owner: Platform QA." in g or "Owner: Platform QA." in str(ctx), (g, ctx)
+            return _ok_refine(g, ctx, carrier)
+        def split(g, ctx, carrier):
+            return [_leaf("blocked.child", ["a.py"])] if ctx.get("parent") else [_leaf("wrong", ["x.py"])]
+        def run_leaf(r, t):
+            return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+                if t["id"] == "blocked" else "converged"
+        cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=refine,
+                    goal_id="goal-confirmed", resume_from="prior-confirm")
+        rec = goal_store.GoalStore(repo).read("goal-confirmed") or {}
+    ask = (rec.get("asks") or [])[0]
+    assert ask.get("status") == "answered" and ask.get("resolved") == "confirmed", rec
+    assert ask.get("answer") == "Owner: Platform QA.", rec
+    assert any(ctx.get("parent") == "blocked" for _, ctx in seen), seen
+    print("ok  affirmative confirmation threads candidate value into refine and records resolved=confirmed")
+
+
+def test_confirmation_reject_reparks_as_bare_ask():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main")
+        st = goal_store.GoalStore(repo); st.create("prior-reject", "g", org="")
+        prior_queue = [_leaf("blocked", ["a.py", "b.py"])]; prior_queue[0]["status"] = "blocked_hitl"
+        st.update("prior-reject", status="blocked_hitl", queue=prior_queue,
+                  asks=[{"node_id": "blocked", "missing": [], "kind": "confirm",
+                         "original_missing": ["owner"], "candidates": [{"field": "owner", "value": "Owner: X"}],
+                         "question": "confirm?", "structured": {}, "status": "open"}])
+        st.steer("prior-reject", "no", target="blocked")
+        events = []
+        plan = cg.run_goal(repo, "g", run_leaf=lambda r, t: "converged",
+                           split=lambda g, c, k: [_leaf("wrong", ["x.py"])], refine=_ok_refine,
+                           goal_id="goal-rejected", resume_from="prior-reject", emit=events.append)
+        rec = goal_store.GoalStore(repo).read("goal-rejected") or {}
+    ask = (rec.get("open_asks") or [])[0]
+    assert _statuses(plan) == {"blocked": "blocked_hitl"}, _statuses(plan)
+    assert "kind" not in ask and "candidates" not in ask, ask
+    assert ask.get("missing") == ["owner"] and ask.get("question") == cg._ask_question("blocked", ["owner"]), ask
+    assert any(e.get("type") == "confirmation_rejected" for e in events), events
+    print("ok  rejected confirmation keeps node parked and re-surfaces a bare ask")
+
+
+def test_confirmation_correction_is_free_text_answer():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo); st.create("prior-correct", "g", org="")
+        prior_queue = [_leaf("blocked", ["a.py", "b.py"])]; prior_queue[0]["status"] = "blocked_hitl"
+        st.update("prior-correct", status="blocked_hitl", queue=prior_queue,
+                  asks=[{"node_id": "blocked", "missing": [], "kind": "confirm",
+                         "original_missing": ["owner"], "candidates": [{"field": "owner", "value": "Owner: X"}],
+                         "question": "confirm?", "structured": {}, "status": "open"}])
+        st.steer("prior-correct", "Owner: Platform instead.", target="blocked")
+        seen = []
+        def refine(g, ctx, carrier):
+            seen.append((g, ctx))
+            if ctx.get("parent") == "blocked":
+                assert "Owner: Platform instead." in g or "Owner: Platform instead." in str(ctx), (g, ctx)
+                assert "Owner: X" not in g, (g, ctx)
+            return _ok_refine(g, ctx, carrier)
+        def split(g, ctx, carrier):
+            return [_leaf("blocked.child", ["a.py"])] if ctx.get("parent") else [_leaf("wrong", ["x.py"])]
+        def run_leaf(r, t):
+            return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+                if t["id"] == "blocked" else "converged"
+        cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=refine,
+                    goal_id="goal-corrected", resume_from="prior-correct")
+        rec = goal_store.GoalStore(repo).read("goal-corrected") or {}
+    ask = (rec.get("asks") or [])[0]
+    assert ask.get("resolved") == "corrected" and ask.get("answer") == "Owner: Platform instead.", rec
+    assert any(ctx.get("parent") == "blocked" for _, ctx in seen), seen
+    print("ok  non-affirmative correction flows as free-text answer and records resolved=corrected")
+
+
+def test_disambiguation_reply_threads_selected_candidate_value():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo); st.create("prior-disambig", "g", org="")
+        prior_queue = [_leaf("blocked", ["a.py", "b.py"])]; prior_queue[0]["status"] = "blocked_hitl"
+        c1 = {"field": "owner", "value": "Owner: Platform QA.", "source_ref": "docs/decisions/ADR-1001.md"}
+        c2 = {"field": "owner", "value": "Owner: Release Engineering.", "source_ref": "docs/decisions/ADR-1002.md"}
+        st.update("prior-disambig", status="blocked_hitl", queue=prior_queue,
+                  asks=[{"node_id": "blocked", "missing": ["owner"], "kind": "disambiguate",
+                         "original_missing": ["owner"], "candidates": [c1, c2],
+                         "conflicts": [{"field": "owner", "candidates": [c1, c2]}],
+                         "question": "which?", "structured": {}, "status": "open"}])
+        st.steer("prior-disambig", "Use ADR-1002", target="blocked")
+        seen = []
+        def refine(g, ctx, carrier):
+            seen.append((g, ctx))
+            if ctx.get("parent") == "blocked":
+                assert "Owner: Release Engineering." in g or "Owner: Release Engineering." in str(ctx), (g, ctx)
+                assert "Owner: Platform QA." not in g, (g, ctx)
+            return _ok_refine(g, ctx, carrier)
+        def split(g, ctx, carrier):
+            return [_leaf("blocked.child", ["a.py"])] if ctx.get("parent") else [_leaf("wrong", ["x.py"])]
+        def run_leaf(r, t):
+            return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+                if t["id"] == "blocked" else "converged"
+        cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=refine,
+                    goal_id="goal-disambiguated", resume_from="prior-disambig")
+        rec = goal_store.GoalStore(repo).read("goal-disambiguated") or {}
+    ask = (rec.get("asks") or [])[0]
+    assert ask.get("resolved") == "confirmed" and ask.get("answer") == "Owner: Release Engineering.", rec
+    assert any(ctx.get("parent") == "blocked" for _, ctx in seen), seen
+    print("ok  disambiguation reply selects a listed candidate and flows through the normal answer path")
+
+
+def test_ask_search_github_failure_degrades_to_empty_candidates():
+    real_infer = cg.ask_search._infer_repo_query
+    real_run = cg.ask_search.run_gh
+    try:
+        events = []
+        cg.ask_search._infer_repo_query = lambda repo: "repo:owner/repo"
+        cg.ask_search.run_gh = lambda args, timeout=30.0: (_raise(cg.ask_search.GhError("boom")))
+        out = cg.ask_search.search_candidates("/repo", "_goal", ["owner"], {}, "g", emit=events.append)
+        assert out == {"candidates": [], "conflicts": []}, out
+        assert any(e.get("type") == "ask_search_tier_failed" for e in events), events
+    finally:
+        cg.ask_search._infer_repo_query = real_infer
+        cg.ask_search.run_gh = real_run
+    print("ok  GitHub search failure is fail-soft and degrades to no candidates")
+
+
+def test_ask_search_disabled_is_pure_bare_without_calling_search():
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    old = os.environ.get("AOB_ASK_SEARCH")
+    os.environ["AOB_ASK_SEARCH"] = "0"
+    real = cg.ask_search.search_candidates
+    try:
+        cg.ask_search.search_candidates = lambda *a, **k: (_raise(AssertionError("search should be disabled")))
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "r"); os.mkdir(repo)
+            git(repo, "init", "-b", "main")
+            insufficient = lambda g, c, k: {"sufficient": False, "structured": {}, "missing": ["owner"]}
+            cg.run_goal(repo, "vague", run_leaf=lambda r, t: "converged",
+                        split=lambda g, c, k: [_leaf("a", ["x.py"])], refine=insufficient,
+                        goal_id="goal-disabled")
+            rec = goal_store.GoalStore(repo).read("goal-disabled") or {}
+        assert (rec.get("open_asks") or [])[0] == cg._make_ask("_goal", ["owner"], {}), rec
+    finally:
+        cg.ask_search.search_candidates = real
+        if old is None:
+            os.environ.pop("AOB_ASK_SEARCH", None)
+        else:
+            os.environ["AOB_ASK_SEARCH"] = old
+    print("ok  AOB_ASK_SEARCH=0 keeps the pure bare-ask path and does not invoke search")
+
+
 def test_linion_resplit_budget_bounds_nameable_loop():
     # Even when refine says each leaf is well-defined/nameable, Linon rejection re-splits are explicitly bounded
     # by a counter, not only by depth.
