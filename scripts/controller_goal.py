@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os  # noqa: E402
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
+import goal_refiner  # noqa: E402 — ADR-0016 D1b intake sufficiency gate (raw goal -> candidate structured goal)
 import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the consumer)
 import scaffold_primitive  # noqa: E402 — ADR-0008 deterministic, LLM-free scaffold skeleton
 import splitter  # noqa: E402
@@ -391,7 +392,7 @@ def _scope_under_base(task, base) -> bool:
 
 
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
-             context=None, carrier=None, budget=None, emit=None) -> list:
+             refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
 
     run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
@@ -431,6 +432,21 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             # the state EXPRESSES the per-Queue git scattering: the Queue itself (the recursive split tree)
             # plus each leaf's OWN commit — git scatters one worktree/commit per leaf, not just the wip tip.
             store.update(goal_id, status=status, queue=final_plan, leaf_commits=leaf_commits)
+        # ADR-0016 D7: the WHY is verified at the COMPOSING layer. A goal whose leaves are all "done" has NOT
+        # been checked against its OWN outcome — per-leaf conformance proves only leaf-obeys-contract. The
+        # executable goal-level acceptance run is forward work; until it is wired, emit the goal-acceptance
+        # obligation as SHADOW / needs-info — surface that the composed outcome is unverified against the WHY,
+        # NEVER fabricate a green (D5). Only when a structured WHY exists and names a falsifiable acceptance.
+        sg = (context or {}).get("structured_goal") if isinstance(context, dict) else None
+        if done and isinstance(sg, dict) and (sg.get("negative_control") or sg.get("success_condition")):
+            acc = {"type": "goal_acceptance", "verified": False, "status": "needs_info",
+                   "outcome": sg.get("outcome"), "success_condition": sg.get("success_condition"),
+                   "negative_control": sg.get("negative_control"), "owner": sg.get("owner"),
+                   "note": "composed outcome NOT checked against the goal WHY — D7 goal-level acceptance is "
+                           "shadow/forward-work; the leaves proved only leaf-obeys-contract"}
+            emit(acc)
+            if store is not None:
+                store.update(goal_id, goal_acceptance=acc)
         # rich log: the org flows its TERMINAL state (outcome + the wip commit) into its own Stream, so the
         # state is reconstructible from the log too — the log is the best resource for grasping state.
         emit({"type": "goal_finished", "status": status, "wip": wip})
@@ -456,6 +472,25 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         prior_sid = ((store.read(resume_from) or {}).get("sessions") or {}).get("_goal:splitter")
         if prior_sid:
             top_carrier = codex_carrier(repo, resume_session=prior_sid)
+    # ADR-0016 D1b — INTAKE SUFFICIENCY GATE: refine raw -> candidate structured goal BEFORE decomposing.
+    # A goal proceeds only when a falsifiable acceptance can be NAMED (outcome / success_condition /
+    # negative_control / owner). If it cannot, the engine emits the ASK and HOLDs — it does NOT guess the ends
+    # (D5). Runs on the real path, or whenever a caller injects `refine`. When a caller injects only `split`
+    # (the existing test path), the gate is skipped so injected plans run unchanged. NOTE: on resume_from the
+    # prior work was already loaded into the worktree above — a HOLD here means "not decomposed/built", not
+    # "no worktree state".
+    active_refine = refine if refine is not None else (goal_refiner.refine if split is splitter.split else None)
+    if active_refine is not None:
+        refine_carrier = top_carrier if refine is not None else codex_carrier(repo)
+        verdict = active_refine(goal, context or {}, refine_carrier)
+        if not verdict.get("sufficient"):
+            missing = verdict.get("missing", [])
+            emit({"type": "goal_underdetermined", "goal": goal, "missing": missing})
+            if store is not None:                       # the org records the ASK as its terminal state
+                store.update(goal_id, status="needs_info", missing=missing,
+                             structured_goal=verdict.get("structured"))
+            return []                                    # HOLD: do not decompose (D1b)
+        context = {**(context or {}), "structured_goal": verdict.get("structured")}
     plan = split(goal, context or {}, top_carrier)
     if store is not None and getattr(top_carrier, "captured", None):   # record the splitter session for a later RESUME
         sid = top_carrier.captured.get("session_id")
@@ -597,9 +632,19 @@ def main(argv=None) -> int:
                    "state into the worktree before building, so it resumes its own prior work (org behavior)")
     p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")
     a = p.parse_args(argv)
-    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget)
+    events = []                                        # capture the stream so the EXIT CODE can tell HOLD apart
+    emitter = stream_emit(a.repo)
+    def _emit(e):
+        emitter(e)                                     # keep the default rich logging
+        events.append(e)
+    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget, emit=_emit)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
-    return 0 if all(frontier.node_status(t) == "done" for t in plan) else 1
+    # exit codes: 2 = HELD at intake (underdetermined — the engine needs more info, ADR-0016 D1b, NOT a build);
+    # 1 = built but not all done (or no plan); 0 = a real, non-empty, fully-done plan. A held goal must NOT
+    # report success (an empty plan is `all([])==True` — that is why the non-empty check is explicit).
+    if any(e.get("type") == "goal_underdetermined" for e in events):
+        return 2
+    return 0 if plan and all(frontier.node_status(t) == "done" for t in plan) else 1
 
 
 if __name__ == "__main__":
