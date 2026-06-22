@@ -42,6 +42,7 @@ def _shared_state_repo(repo) -> str:
 
 FLOOR_MAX_DEPTH = 3
 MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
+LINON_RESPLIT_CAP = 2  # Linon rejections may refine granularity only this many times per branch
 
 
 def stream_emit(repo):
@@ -295,20 +296,14 @@ def _ancestry(plan, leaf_id, path=()):
     return set()
 
 
-def _apply_steering(store, goal_id, leaf, plan):
+def _apply_steering(store, goal_id, leaf, plan, steering_goal_ids=None):
     """Fold STEERING into THIS leaf's objective at dispatch — WITHOUT a kill + re-fire. A note applies when
     its target is "goal" (every leaf — the degenerate whole-Queue case) OR a node on this leaf's ancestry
     path (the leaf itself, or a BRANCH above it so a branch-targeted steer reaches its whole subtree).
     Node-targeting is the point: goal-level alone is just the Queue. Returns a COPY (never mutates the
     plan / the split source), or the leaf UNCHANGED when nothing applies. Standing guidance — re-evaluated
     for each new leaf at its own dispatch (re-split children inherit a branch's steer)."""
-    if store is None or not goal_id:
-        return leaf
-    notes = store.read_steering(goal_id)
-    if not notes:
-        return leaf
-    reach = _ancestry(plan, leaf.get("id")) or {leaf.get("id")}
-    notes = [n for n in notes if n.get("target", "goal") == "goal" or n.get("target") in reach]
+    notes = _steering_notes_for(store, steering_goal_ids or [goal_id], leaf, plan)
     if not notes:
         return leaf
     block = "\n".join(f"- {n['text']}" for n in notes)
@@ -316,6 +311,111 @@ def _apply_steering(store, goal_id, leaf, plan):
     steered["objective"] = ((leaf.get("objective") or "")
                             + "\n\n[STEERING added mid-run — additional guidance you MUST follow]:\n" + block)
     return steered
+
+
+def _read_steering(store, goal_ids) -> list[dict]:
+    """Read steering from one or more goal sidecars, preserving order and avoiding duplicate goal ids."""
+    if store is None:
+        return []
+    notes: list[dict] = []
+    seen = set()
+    for gid in goal_ids or []:
+        if not gid or gid in seen:
+            continue
+        seen.add(gid)
+        notes.extend(store.read_steering(gid))
+    return notes
+
+
+def _steering_notes_for(store, goal_ids, leaf, plan) -> list[dict]:
+    """Steering notes that reach a leaf by goal-wide or ancestry-targeted routing."""
+    notes = _read_steering(store, goal_ids)
+    if not notes:
+        return []
+    reach = _ancestry(plan, leaf.get("id")) or {leaf.get("id")}
+    return [n for n in notes if n.get("target", "goal") == "goal" or n.get("target") in reach]
+
+
+def _steer_refine(goal_text: str, context: dict, notes: list[dict]) -> tuple[str, dict]:
+    """Thread answered steering into a refine call, not only into leaf dispatch."""
+    if not notes:
+        return goal_text, context
+    block = "\n".join(f"- {n['text']}" for n in notes)
+    steered_goal = ((goal_text or "")
+                    + "\n\n[STEERING / ANSWER supplied for this refinement]:\n" + block)
+    return steered_goal, {**(context or {}), "steering_answers": notes}
+
+
+def _ask_question(node_id: str, missing: list) -> str:
+    fields = ", ".join(str(m) for m in (missing or [])) or "the missing acceptance detail"
+    return f"Please provide {fields} for `{node_id}` so the work can be checked without guessing."
+
+
+def _make_ask(node_id: str, missing: list, structured: dict | None) -> dict:
+    return {"node_id": node_id, "missing": list(missing or []), "question": _ask_question(node_id, missing),
+            "structured": structured or {}, "status": "open"}
+
+
+def _upsert_open_ask(asks: list[dict], ask: dict) -> list[dict]:
+    out = [dict(a) for a in asks if not (a.get("node_id") == ask.get("node_id") and a.get("status") == "open")]
+    out.append(dict(ask))
+    return out
+
+
+def _blocked_ids(tasks: list) -> set[str]:
+    out: set[str] = set()
+    for task in tasks or []:
+        if task.get("children"):
+            out.update(_blocked_ids(task["children"]))
+        elif task.get("status") == "blocked_hitl":
+            out.add(task.get("id"))
+    return out
+
+
+def _any_status(tasks: list, status: str) -> bool:
+    for task in tasks or []:
+        if task.get("children"):
+            if _any_status(task["children"], status):
+                return True
+        elif task.get("status") == status:
+            return True
+    return False
+
+
+def _reactivate_answered(tasks: list, answer_targets: set[str]) -> tuple[list, list[str]]:
+    """Restore a parked frontier and flip only answered blocked nodes back to pending."""
+    out = []
+    reactivated = []
+    for task in tasks or []:
+        copied = dict(task)
+        if isinstance(copied.get("scope"), list):
+            copied["scope"] = list(copied["scope"])
+        if isinstance(copied.get("depends_on"), list):
+            copied["depends_on"] = list(copied["depends_on"])
+        if copied.get("children"):
+            copied["children"], child_ids = _reactivate_answered(copied["children"], answer_targets)
+            reactivated.extend(child_ids)
+        elif copied.get("status") == "blocked_hitl" and copied.get("id") in answer_targets:
+            copied["status"] = "pending"
+            reactivated.append(copied.get("id"))
+        out.append(copied)
+    return out, reactivated
+
+
+def _mark_answered_asks(asks: list[dict], notes: list[dict], reactivated: set[str]) -> list[dict]:
+    answer_by_target = {}
+    for note in notes:
+        target = note.get("target")
+        if target in reactivated:
+            answer_by_target[target] = note.get("text", "")
+    out = []
+    for ask in asks or []:
+        copied = dict(ask)
+        if copied.get("node_id") in reactivated and copied.get("status") == "open":
+            copied["status"] = "answered"
+            copied["answer"] = answer_by_target.get(copied.get("node_id"), "")
+        out.append(copied)
+    return out
 
 
 def _failure_sig(res):
@@ -423,6 +523,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already
     # shared. `emit` is threaded in so every state OPERATION (create/load/save/update) also lands in the log.
     store = goal_store.GoalStore(_shared_state_repo(repo), emit=emit) if goal_id else None
+    prior_record = store.read(resume_from) if store is not None and resume_from else None
     if store is not None:
         store.create(goal_id, goal, org="", resumed_from=resume_from)   # received goal is now the ORG's
         if resume_from and store.load(resume_from, repo):   # Load(prior id): the worktree BECOMES that state
@@ -437,17 +538,24 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     "instruction": "These files ALREADY EXIST, cherry-picked from resumed prior work. Build "
                                    "the goal ON them: extend or patch the existing files; do NOT recreate "
                                    "equivalent content under new names. Plan only the remaining work."}}
-    leaf_commits: dict = {}                             # leaf_id -> its own commit sha (git scatters per leaf)
+    steering_goal_ids = [goal_id] + ([resume_from] if resume_from and resume_from != goal_id else [])
+    asks: list[dict] = [dict(a) for a in ((prior_record or {}).get("asks") or []) if isinstance(a, dict)]
+    leaf_commits: dict = dict((prior_record or {}).get("leaf_commits") or {})  # leaf_id -> its own commit sha
 
     def _finalize(final_plan):
-        done = all(frontier.node_status(t) == "done" for t in final_plan)
-        status = "done" if done else "failed"
+        done = bool(final_plan) and all(frontier.node_status(t) == "done" for t in final_plan)
+        blocked = _any_status(final_plan, "blocked_hitl")
+        status = "done" if done else ("blocked_hitl" if blocked else "failed")
         wip = None
         if store is not None:                          # OPERATE the org's state: record its build + outcome
             wip = store.save_wip(goal_id, repo)
             # the state EXPRESSES the per-Queue git scattering: the Queue itself (the recursive split tree)
             # plus each leaf's OWN commit — git scatters one worktree/commit per leaf, not just the wip tip.
-            store.update(goal_id, status=status, queue=final_plan, leaf_commits=leaf_commits)
+            update = {"status": status, "queue": final_plan, "leaf_commits": leaf_commits,
+                      "asks": asks, "open_asks": [a for a in asks if a.get("status") == "open"]}
+            if status == "blocked_hitl":
+                update["result"] = "partial" if _any_status(final_plan, "done") else "blocked_hitl"
+            store.update(goal_id, **update)
         # ADR-0016 D7: the WHY is verified at the COMPOSING layer. A goal whose leaves are all "done" has NOT
         # been checked against its OWN outcome — per-leaf conformance proves only leaf-obeys-contract. The
         # executable goal-level acceptance run is forward work; until it is wired, emit the goal-acceptance
@@ -498,20 +606,42 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     active_refine = refine if refine is not None else (goal_refiner.refine if split is splitter.split else None)
     if active_refine is not None:
         refine_carrier = top_carrier if refine is not None else codex_carrier(repo)
-        verdict = active_refine(goal, context or {}, refine_carrier)
+        goal_notes = [n for n in _read_steering(store, steering_goal_ids)
+                      if n.get("target", "goal") in ("goal", "_goal")]
+        refine_goal, refine_context = _steer_refine(goal, context or {}, goal_notes)
+        verdict = active_refine(refine_goal, refine_context, refine_carrier)
         if not verdict.get("sufficient"):
             missing = verdict.get("missing", [])
             emit({"type": "goal_underdetermined", "goal": goal, "missing": missing})
+            ask = _make_ask("_goal", missing, verdict.get("structured"))
+            asks[:] = _upsert_open_ask(asks, ask)
             if store is not None:                       # the org records the ASK as its terminal state
                 store.update(goal_id, status="needs_info", missing=missing,
-                             structured_goal=verdict.get("structured"))
+                             structured_goal=verdict.get("structured"), asks=asks, open_asks=[ask])
             return []                                    # HOLD: do not decompose (D1b)
         context = {**(context or {}), "structured_goal": verdict.get("structured")}
-    plan = split(goal, context or {}, top_carrier)
-    if store is not None and getattr(top_carrier, "captured", None):   # record the splitter session for a later RESUME
-        sid = top_carrier.captured.get("session_id")
-        if sid:
-            store.record_session(goal_id, "_goal", "splitter", sid)
+    plan = None
+    if prior_record and prior_record.get("queue"):
+        notes = _read_steering(store, steering_goal_ids)
+        blocked_prior = _blocked_ids(prior_record["queue"])
+        answer_targets = {n.get("target") for n in notes if n.get("target") in blocked_prior}
+        if answer_targets:
+            plan, reactivated = _reactivate_answered(prior_record["queue"], answer_targets)
+            asks[:] = _mark_answered_asks(asks, notes, set(reactivated))
+            emit({"type": "blocked_hitl_resumed", "goal_id": goal_id, "resume_from": resume_from,
+                  "reactivated": reactivated})
+            if store is not None:
+                store.update(goal_id, queue=plan, asks=asks, open_asks=[a for a in asks if a.get("status") == "open"])
+        elif blocked_prior:
+            plan = prior_record["queue"]
+            emit({"type": "blocked_hitl_waiting", "goal_id": goal_id, "resume_from": resume_from,
+                  "blocked": sorted(blocked_prior)})
+    if plan is None:
+        plan = split(goal, context or {}, top_carrier)
+        if store is not None and getattr(top_carrier, "captured", None):   # record the splitter session for a later RESUME
+            sid = top_carrier.captured.get("session_id")
+            if sid:
+                store.record_session(goal_id, "_goal", "splitter", sid)
     errs = frontier.validate_plan(plan)
     if errs:
         emit({"type": "split_invalid", "goal": goal, "errors": errs})
@@ -533,7 +663,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             emit({"type": "leaf_start", "id": leaf["id"], "goal_id": goal_id})   # goal_id attributes the node
             # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
             # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
-            exec_leaf = _apply_steering(store, goal_id, leaf, plan)
+            exec_leaf = _apply_steering(store, goal_id, leaf, plan, steering_goal_ids)
             if exec_leaf is not leaf:
                 emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
             # ADR-0008 Phase 2: a GREENFIELD scaffold leaf seeds a deterministic skeleton (acceptance-gated,
@@ -595,6 +725,28 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             depth = _depth_of(plan, leaf["id"]) or 0
             findings = res.get("findings")
             ss = leaf.get("_self_steer", 0)                  # self-steers already spent on this branch
+            # a Linon rejection is a BAD REFERENCE: re-split, carrying its findings as retry CONTEXT so the
+            # children do not repeat the rejected approach. A self-steer re-split additionally asks for a FINER
+            # decomposition that resolves the findings (the org's own new information, earning a fresh budget).
+            child_ctx = {**(context or {}), "parent": leaf["id"]}
+            if findings:
+                child_ctx["prior_rejected_findings"] = findings
+            if active_refine is not None:
+                refine_carrier = carrier if refine is not None else codex_carrier(repo)
+                notes = _steering_notes_for(store, steering_goal_ids, leaf, plan)
+                refine_goal, refine_context = _steer_refine(leaf["objective"], child_ctx, notes)
+                verdict = active_refine(refine_goal, refine_context, refine_carrier)
+                if not verdict.get("sufficient"):
+                    missing = verdict.get("missing", [])
+                    ask = _make_ask(leaf["id"], missing, verdict.get("structured"))
+                    asks[:] = _upsert_open_ask(asks, ask)
+                    plan = frontier.advance(plan, leaf["id"], "blocked_hitl")
+                    if store is not None:
+                        store.update(goal_id, asks=asks, open_asks=[a for a in asks if a.get("status") == "open"])
+                    emit({"type": "leaf_underdetermined", "id": leaf["id"], "goal_id": goal_id,
+                          "missing": missing, "structured": verdict.get("structured"),
+                          "detail": "leaf is underdetermined; send back for definition rather than splitting"})
+                    continue
             # at the floor with a severe finding and self-steer budget left, the org STEERS ITSELF: it floors
             # honestly UNLESS it can still push a finer decomposition that the (severity-weighted) counter
             # permits (ADR-0008 addendum — budget follows information; no human in the loop).
@@ -603,17 +755,17 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 emit({"type": "leaf_failed_floor", "id": leaf["id"], "depth": depth, "self_steers": ss})
                 continue
             self_steering = at_floor(leaf, depth)            # past the floor only because self-steer permits it
-            # a Linon rejection is a BAD REFERENCE: re-split, carrying its findings as retry CONTEXT so the
-            # children do not repeat the rejected approach. A self-steer re-split additionally asks for a FINER
-            # decomposition that resolves the findings (the org's own new information, earning a fresh budget).
-            child_ctx = {**(context or {}), "parent": leaf["id"]}
-            if findings:
-                child_ctx["prior_rejected_findings"] = findings
             if self_steering:
                 child_ctx["self_steer"] = {"round": ss + 1, "instruction":
                     "This node FLOORED on the findings above. Produce a FINER decomposition whose sub-tasks "
                     "each resolve a specific part of those findings — smaller and more targeted than before — "
                     "rather than repeating the rejected approach."}
+            linon_resplits = int(leaf.get("_linon_resplits") or 0)
+            if (res.get("reason") == "linon" or findings) and linon_resplits >= LINON_RESPLIT_CAP:
+                plan = frontier.advance(plan, leaf["id"], "failed")
+                emit({"type": "leaf_failed_resplit_budget", "id": leaf["id"], "resplits": linon_resplits,
+                      "cap": LINON_RESPLIT_CAP, "goal_id": goal_id})
+                continue
             children = split(leaf["objective"], child_ctx, carrier)
             if not children or frontier.validate_plan(children):
                 plan = frontier.advance(plan, leaf["id"], "failed")   # dry split (incl. a dry self-steer) -> floor
@@ -628,6 +780,9 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     c["_self_steer"] = ss + 1
                 emit({"type": "self_steer", "id": leaf["id"], "round": ss + 1, "n": len(children),
                       "depth": depth, "goal_id": goal_id})
+            if res.get("reason") == "linon" or findings:
+                for c in children:
+                    c["_linon_resplits"] = linon_resplits + 1
             plan = _set_children(plan, leaf["id"], children)            # the leaf becomes an internal node
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})
@@ -655,10 +810,12 @@ def main(argv=None) -> int:
         events.append(e)
     plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget, emit=_emit)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
-    # exit codes: 2 = HELD at intake (underdetermined — the engine needs more info, ADR-0016 D1b, NOT a build);
+    # exit codes: 2 = HELD/sent back as underdetermined — the engine needs more info (ADR-0016 D1b), NOT a build;
     # 1 = built but not all done (or no plan); 0 = a real, non-empty, fully-done plan. A held goal must NOT
     # report success (an empty plan is `all([])==True` — that is why the non-empty check is explicit).
     if any(e.get("type") == "goal_underdetermined" for e in events):
+        return 2
+    if any(e.get("type") == "goal_finished" and e.get("status") == "blocked_hitl" for e in events):
         return 2
     return 0 if plan and all(frontier.node_status(t) == "done" for t in plan) else 1
 

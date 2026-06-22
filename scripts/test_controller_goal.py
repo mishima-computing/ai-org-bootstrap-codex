@@ -516,6 +516,214 @@ def test_intake_gate_records_needs_info_in_store():
     print("ok  underdetermined goal_id run records status=needs_info (the org records the ASK)")
 
 
+def test_leaf_underdetermined_parks_and_siblings_keep_running():
+    # A failed, underdetermined leaf becomes blocked_hitl, not failed; independent siblings still run, and the
+    # ASK is durable/plural in the goal record. This fails if the old scalar needs_info + failed path returns.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    def refine(g, ctx, carrier):
+        if ctx.get("parent") == "blocked":
+            return {"sufficient": False, "structured": {"outcome": ""}, "missing": ["owner"]}
+        return _ok_refine(g, ctx, carrier)
+    split = lambda g, c, k: [_leaf("blocked", ["a.py", "b.py"]), _leaf("sibling", ["c.py"])]
+    def run_leaf(r, t):
+        return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+            if t["id"] == "blocked" else "converged"
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        events = []
+        plan = cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=refine,
+                           goal_id="goal-leaf-ask", emit=events.append)
+        rec = goal_store.GoalStore(repo).read("goal-leaf-ask") or {}
+    st = _statuses(plan)
+    assert st["blocked"] == "blocked_hitl" and st["sibling"] == "done", st
+    assert not any(e.get("type") == "leaf_split" for e in events), events
+    assert any(e.get("type") == "goal_finished" and e.get("status") == "blocked_hitl" for e in events), events
+    assert not any(e.get("type") == "goal_finished" and e.get("status") == "failed" for e in events), events
+    asks = rec.get("asks") or []
+    assert asks and asks[0]["node_id"] == "blocked" and asks[0]["status"] == "open", rec
+    print("ok  underdetermined leaf parks as blocked_hitl; sibling still runs; ASK is durable")
+
+
+def test_blocked_hitl_outranks_failed_and_drives_main_exit_2():
+    # REGRESSION: old finalization chose failed before blocked_hitl. With one hard failed leaf and one parked
+    # open ASK, that old order persisted status=failed, omitted result, and made main() exit 1.
+    import json, os, subprocess, tempfile, goal_store
+
+    def git(r, *a):
+        subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
+
+    def make_repo(root, name):
+        repo = os.path.join(root, name)
+        os.mkdir(repo)
+        git(repo, "init", "-b", "main")
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "base")
+        return repo
+
+    def mixed_split(_goal, _ctx, _carrier):
+        return [_leaf("hard_failed", ["failed.py"]), _leaf("needs_owner", ["ask.py"])]
+
+    def mixed_run_leaf(_repo, task):
+        return {"outcome": "failed", "reason": "linon"} if task["id"] == "needs_owner" else "failed"
+
+    def mixed_refine(_goal, ctx, _carrier):
+        if ctx.get("parent") == "needs_owner":
+            return {"sufficient": False, "structured": {"outcome": "o"}, "missing": ["owner"]}
+        return _ok_refine(_goal, ctx, _carrier)
+
+    old_stream = os.environ.pop("STREAM_LOG", None)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(d, "run")
+            events = []
+            plan = cg.run_goal(repo, "g", run_leaf=mixed_run_leaf, split=mixed_split, refine=mixed_refine,
+                               goal_id="mixed-precedence", emit=events.append)
+            rec = goal_store.GoalStore(repo).read("mixed-precedence") or {}
+            assert _statuses(plan) == {"hard_failed": "failed", "needs_owner": "blocked_hitl"}, _statuses(plan)
+            assert rec.get("status") == "blocked_hitl", rec
+            assert rec.get("result"), rec
+            assert any(a.get("node_id") == "needs_owner" and a.get("status") == "open"
+                       for a in rec.get("open_asks") or []), rec
+            assert any(e.get("type") == "goal_finished" and e.get("status") == "blocked_hitl"
+                       for e in events), events
+
+            os.environ.pop("STREAM_LOG", None)
+            repo_for_main = make_repo(d, "main")
+            real_codex = cg.codex_carrier
+            real_default_run_leaf = cg.default_run_leaf
+
+            def fake_codex(_repo, *, model=None, resume_session=None):
+                def carrier(prompt):
+                    if "Decompose the goal into a child task DAG" in prompt:
+                        return json.dumps([
+                            {"id": "hard_failed", "objective": "do hard_failed",
+                             "scope": ["failed.py"], "depends_on": []},
+                            {"id": "needs_owner", "objective": "do needs_owner",
+                             "scope": ["ask.py"], "depends_on": []},
+                        ])
+                    if "parent': 'needs_owner'" in prompt or '"parent": "needs_owner"' in prompt:
+                        return json.dumps({"outcome": "o", "success_condition": "s",
+                                           "negative_control": "n", "owner": "", "intent": "i"})
+                    return json.dumps({"outcome": "o", "success_condition": "s",
+                                       "negative_control": "n", "owner": "w", "intent": "i"})
+                carrier.captured = {}
+                return carrier
+
+            cg.codex_carrier = fake_codex
+            cg.default_run_leaf = mixed_run_leaf
+            try:
+                code = cg.main(["--repo", repo_for_main, "--goal", "g", "--goal-id", "mixed-main"])
+            finally:
+                cg.default_run_leaf = real_default_run_leaf
+                cg.codex_carrier = real_codex
+            assert code == 2, f"main() must return exit 2 when an open ask outranks a failed sibling, got {code}"
+    finally:
+        if old_stream is None:
+            os.environ.pop("STREAM_LOG", None)
+        else:
+            os.environ["STREAM_LOG"] = old_stream
+    print("ok  blocked_hitl outranks failed, stores result, and main exits 2")
+
+
+def test_at_floor_underdetermined_leaf_is_asked_not_failed():
+    # The sufficiency check must run BEFORE the floor decision. An atomic/minimal underdetermined leaf is asked
+    # and parked, not leaf_failed_floor/failed.
+    def refine(g, ctx, carrier):
+        if ctx.get("parent") == "atom":
+            return {"sufficient": False, "structured": {}, "missing": ["negative_control"]}
+        return _ok_refine(g, ctx, carrier)
+    split = lambda g, c, k: [_leaf("atom", ["only.py"])]
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=lambda r, t: {"outcome": "failed", "reason": "linon"},
+                       split=split, refine=refine, emit=events.append)
+    assert _statuses(plan) == {"atom": "blocked_hitl"}, _statuses(plan)
+    assert any(e.get("type") == "leaf_underdetermined" for e in events), events
+    assert not any(e.get("type") == "leaf_failed_floor" for e in events), events
+    print("ok  at-floor underdetermined leaf is ASKED/parked before floor failure can fire")
+
+
+def test_answer_reactivates_parked_node_and_reaches_refine():
+    # Resume must restore the parked frontier, re-activate only the answered node, and thread the answer into
+    # the node's refine call. A fresh top split would leave `top_split_called` true and fail this test.
+    import tempfile, os, subprocess, goal_store
+    def git(r, *a): subprocess.run(["git", "-C", str(r), *a], capture_output=True)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "r"); os.mkdir(repo)
+        git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t")
+        open(os.path.join(repo, "seed.txt"), "w").write("x"); git(repo, "add", "-A"); git(repo, "commit", "-m", "base")
+        st = goal_store.GoalStore(repo)
+        st.create("goal-prior", "g", org="")
+        prior_queue = [_leaf("blocked", ["a.py", "b.py"])]
+        prior_queue[0]["status"] = "blocked_hitl"
+        st.update("goal-prior", status="blocked_hitl", queue=prior_queue,
+                  asks=[{"node_id": "blocked", "missing": ["owner"], "question": "owner?",
+                         "structured": {}, "status": "open"}])
+        st.steer("goal-prior", "Answer: QA owns this; acceptance rejects missing audit output.", target="blocked")
+        top_split_called = {"v": False}
+        refine_calls = []
+        def refine(g, ctx, carrier):
+            refine_calls.append((g, ctx))
+            if ctx.get("parent") == "blocked":
+                assert "QA owns this" in g or "QA owns this" in str(ctx), (g, ctx)
+            return _ok_refine(g, ctx, carrier)
+        def split(g, ctx, carrier):
+            if not ctx.get("parent"):
+                top_split_called["v"] = True
+                return [_leaf("wrong-top", ["wrong.py"])]
+            return [_leaf("blocked.child", ["a.py"])]
+        def run_leaf(r, t):
+            return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+                if t["id"] == "blocked" else "converged"
+        events = []
+        plan = cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=refine,
+                           goal_id="goal-resumed", resume_from="goal-prior", emit=events.append)
+        rec = goal_store.GoalStore(repo).read("goal-resumed") or {}
+    assert not top_split_called["v"], "answered blocked frontier should be restored, not top-split fresh"
+    assert any(e.get("type") == "blocked_hitl_resumed" and e.get("reactivated") == ["blocked"] for e in events), events
+    assert any(ctx.get("parent") == "blocked" for _, ctx in refine_calls), refine_calls
+    assert _statuses(plan).get("blocked.child") == "done", _statuses(plan)
+    assert (rec.get("asks") or [{}])[0].get("status") == "answered", rec
+    print("ok  supplied answer un-parks the node and is delivered into that node's refine")
+
+
+def test_linion_resplit_budget_bounds_nameable_loop():
+    # Even when refine says each leaf is well-defined/nameable, Linon rejection re-splits are explicitly bounded
+    # by a counter, not only by depth.
+    def split(g, ctx, carrier):
+        parent = ctx.get("parent")
+        return [_leaf("root" if not parent else parent + ".next", ["a.py", "b.py"])]
+    run_leaf = lambda r, t: {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]}
+    events = []
+    cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+    splits = [e for e in events if e.get("type") == "leaf_split"]
+    budget = [e for e in events if e.get("type") == "leaf_failed_resplit_budget"]
+    assert len(splits) == cg.LINON_RESPLIT_CAP, (splits, events)
+    assert budget and budget[0]["resplits"] == cg.LINON_RESPLIT_CAP, events
+    print("ok  Linon re-split loop is bounded by explicit budget even when refine is sufficient")
+
+
+def test_well_defined_linion_failure_still_resplits_normally():
+    # NEGATIVE CONTROL: the new budget must not suppress the normal first Linon re-split for a sufficient leaf.
+    calls = {"n": 0}
+    def split(g, ctx, carrier):
+        calls["n"] += 1
+        return [_leaf("big", ["a.py", "b.py"])] if not ctx.get("parent") else [_leaf("big.child", ["a.py"])]
+    def run_leaf(r, t):
+        return {"outcome": "failed", "reason": "linon", "findings": [{"severity": "major"}]} \
+            if t["id"] == "big" else "converged"
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+    assert any(e.get("type") == "leaf_split" and e.get("id") == "big" for e in events), events
+    assert _statuses(plan).get("big.child") == "done", _statuses(plan)
+    print("ok  well-defined Linon failure still performs the normal re-split")
+
+
 def test_goal_acceptance_shadow_on_done():
     # ADR-0016 D7: a done goal carrying a structured WHY emits a SHADOW goal_acceptance (verified=False,
     # needs_info) — the composed outcome was NOT checked against the WHY. NEGATIVE CONTROL: pre-D7 run_goal

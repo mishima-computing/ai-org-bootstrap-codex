@@ -226,7 +226,7 @@ def _advance_siblings(tasks, task_id, status, fields, found):
 
 def advance(tasks, task_id, status, **fields):
     """Return a new plan with one task advanced to a valid status."""
-    if status not in ("pending", "running", "done", "failed"):
+    if status not in ("pending", "running", "done", "failed", "blocked_hitl"):
         raise ValueError(f"invalid status {status!r}")
 
     advanced, found = _advance_siblings(tasks, task_id, status, fields, False)
