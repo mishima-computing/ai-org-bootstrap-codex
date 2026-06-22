@@ -12,6 +12,24 @@ Private Codex-native operating kit for repo work under `mishima-computing`. Not 
 pack — the Codex-only build of AI Org Bootstrap: role contracts, Codex adapters, schema-gated handoffs,
 deterministic validation, and one merge-gate path.
 
+## Usage
+
+Use the canonical procedure in [bootstrap/codex-bootstrap.md](bootstrap/codex-bootstrap.md) when starting a
+run. At the human boundary, confirm the objective, target repo, target branch readiness, and non-goals first;
+write the goal as an observable outcome with acceptance boundaries, not as a manually decomposed task list.
+
+```sh
+python3 scripts/controller_goal.py --repo <repo> --goal "..."
+```
+
+Optional run controls are `--budget`, `--goal-id`, and `--resume-from`. Use a goal id when you want a stable
+handle for deliberate resume or steering across runs.
+
+Observe progress through `STREAM_LOG` or its default path, `.agent-runs/stream.jsonl`. The stream is runtime
+history for watching and auditing a run; it is not committed output. Review the produced PR outputs before
+validation, delivery, or merge; complete the checks requested by the run, then merge only through
+`aob merge-gate` or `scripts/merge-gate.py`.
+
 It is now a **complete autonomous builder**: a GOAL goes in, PRs come out. Three layers stack, each a
 deterministic harness wrapped around a semantic (LLM) core:
 
