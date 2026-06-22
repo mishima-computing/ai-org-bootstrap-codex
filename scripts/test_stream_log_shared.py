@@ -100,7 +100,7 @@ def test_bind_makes_leaf_worktree_append_inherit_shared_stream():
 
 
 def test_preset_stream_log_routes_stream_and_goalstore():
-    """A pre-set STREAM_LOG (the cockpit shared-log case) wins: it is respected, and BOTH the stream events AND
+    """A pre-set STREAM_LOG (a host pointing N goals at one shared log) wins: it is respected, and BOTH the stream events AND
     the GoalStore record land under ITS root (!= the passed repo), not the repo. Discriminating: the STREAM_LOG
     root differs from `repo`, so the _shared_state_repo coupling can't be masked by the fallback `return str(repo)`."""
     os.environ.pop("STREAM_LOG", None)

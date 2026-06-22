@@ -413,7 +413,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     # the child runs with cwd in a temp worktree, so a relative value would resolve under /tmp.
     # INVARIANT: this sets PROCESS-GLOBAL env, and only when unset, assuming ONE repo per process (production
     # spawns a controller_goal subprocess per goal — server.py). A long-lived process running goals for
-    # DIFFERENT repos must set STREAM_LOG itself per goal; an external pre-set (a cockpit pointing N goals at
+    # DIFFERENT repos must set STREAM_LOG itself per goal; an external pre-set (a host pointing N goals at
     # one shared log, ADR-0007) is intentionally respected. It also fixes the GoalStore root (derived from
     # STREAM_LOG) to this repo. Tests that call run_goal repeatedly pop STREAM_LOG between cases.
     if not os.environ.get("STREAM_LOG"):
