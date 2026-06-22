@@ -222,6 +222,13 @@ def _is_terminal_event(line: str) -> bool:
     return _codex_event_type(line) in TERMINAL_EVENT_TYPES
 
 
+def _buffer_is_terminal_event(buf: bytes) -> bool:
+    """Accept codex's final JSON event even when it is NOT newline-terminated (codex can block on stdin
+    before flushing the trailing newline, leaving turn.completed stranded in the partial buffer)."""
+    s = buf.decode("utf-8", "replace").strip()
+    return bool(s) and _is_terminal_event(s)
+
+
 def _terminal_output_ready(output_file: Path | None) -> bool:
     """A write role gets no -o file (turn.completed alone is terminal); a producer needs a non-empty -o."""
     if output_file is None:
@@ -322,9 +329,19 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
                                 killed = True
                                 _kill_process_group(pgid)
                                 break
+                        if not terminal_completed and _buffer_is_terminal_event(stdout_line_buffer) and \
+                                _terminal_output_ready(output_file):
+                            # codex's final turn.completed can arrive WITHOUT a trailing newline before it
+                            # blocks on stdin — catch it in the partial buffer too, not only on full lines.
+                            terminal_completed = True
+                            killed = True
+                            _kill_process_group(pgid)
                     else:
                         stderr_chunks.append(chunk)
-                    last_output = time.monotonic()
+                    # the stdin-wait marker is a BLOCK, not progress — it must NOT reset the no-output watchdog,
+                    # or a carrier that emits it then goes silent escapes the 300s backstop forever.
+                    if key.data == "stdout" or STDIN_HANG_MARKER not in chunk.decode("utf-8", "replace"):
+                        last_output = time.monotonic()
                     if terminal_completed:
                         break
                 else:
@@ -595,6 +612,10 @@ def self_test() -> int:
         fails.append("_is_terminal_event must accept msg.type task_complete")
     if _is_terminal_event('{"type":"item.completed"}') or _is_terminal_event("not json"):
         fails.append("_is_terminal_event must reject non-terminal / non-JSON lines")
+    if not _buffer_is_terminal_event(b'{"type":"turn.completed"}'):
+        fails.append("_buffer_is_terminal_event must accept a turn.completed WITHOUT a trailing newline")
+    if _buffer_is_terminal_event(b'{"type":"item.completed"}'):
+        fails.append("_buffer_is_terminal_event must reject a non-terminal partial buffer")
     if not _terminal_output_ready(None):
         fails.append("_terminal_output_ready(None) must be True (write roles have no -o file)")
     import tempfile as _tf

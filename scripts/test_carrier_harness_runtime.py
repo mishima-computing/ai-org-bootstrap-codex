@@ -15,7 +15,7 @@ _HERE = Path(__file__).resolve().parent
 
 
 def test_clean_run_captures_output_and_exit_code():
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", "import sys; print('hi'); sys.exit(3)"], _HERE,
         timeout=30.0, no_output_timeout=10.0)
     assert "hi" in out, out
@@ -26,7 +26,7 @@ def test_clean_run_captures_output_and_exit_code():
 
 def test_no_output_timeout_kills_a_silent_carrier():
     start = time.monotonic()
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", "import time; time.sleep(30)"], _HERE,
         timeout=30.0, no_output_timeout=1.0)
     elapsed = time.monotonic() - start
@@ -56,7 +56,7 @@ def test_does_not_hang_and_reaps_a_grandchild_that_holds_the_pipe():
         "os._exit(0)\n"                   # the carrier (parent) exits right away
     )
     start = time.monotonic()
-    out, err, code, timed_out, frozen, killed = ch._stream_carrier_process(
+    out, err, code, timed_out, frozen, killed, _terminal = ch._stream_carrier_process(
         [sys.executable, "-c", script], _HERE, timeout=60.0, no_output_timeout=30.0)
     elapsed = time.monotonic() - start
     assert "hello" in out, out
