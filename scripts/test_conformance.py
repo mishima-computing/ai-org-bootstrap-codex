@@ -824,6 +824,45 @@ def test_acceptance_bundle_withheld_from_implementer_only():
     print("ok  acceptance bundle withheld from implementer only (spec kept, goldens hidden, gate intact)")
 
 
+def test_acceptance_bundle_withholds_rpc_oracle_but_keeps_shape_specs():
+    # ADR-0018: withholding is principle-based. CLI/HTTP examples remain hidden; RPC call methods/params are
+    # visible build spec, while expected result/error assertions are hidden. Batch/JSON shape stays visible.
+    contract = {
+        "role_id": "aufheben-designer",
+        "acceptance_criteria": ["does X"],
+        "deliverable_kind": "rpc_service",
+        "conformance": {
+            "cli": {"entrypoint": {"invocation": "tool"},
+                    "examples": [{"invocation": "--secret", "expected_stdout_contains": ["CLI_GOLDEN"]}]},
+            "http_service": {"base_url": "http://x",
+                             "examples": [{"method": "GET", "path": "/secret",
+                                           "expected_body_contains": ["HTTP_GOLDEN"]}]},
+            "rpc_service": {"transport": "json_rpc_http", "base_url": "http://x",
+                            "calls": [{"method": "svc.Get", "params": {"id": 7},
+                                       "expected_result_contains": ["RPC_GOLDEN"]},
+                                      {"method": "svc.Bad", "params": {},
+                                       "expected_error_code": -32601}]},
+            "batch_job": {"run": {"command": "python3 job.py"}, "expected_status": 3,
+                          "produced_artifacts": ["out/report.json"]},
+            "json": {"files": [{"path": "out/report.json", "required_paths": ["$.items[0].id"]}]},
+        },
+    }
+    impl = cp._withhold_acceptance_bundle("implementer", {"aufheben-designer": contract})
+    conf = impl["aufheben-designer"]["conformance"]
+
+    assert conf["cli"]["examples"] == [] and conf["cli"]["_examples_withheld"] == 1
+    assert conf["http_service"]["examples"] == [] and conf["http_service"]["_examples_withheld"] == 1
+    calls = conf["rpc_service"]["calls"]
+    assert calls[0]["method"] == "svc.Get" and calls[0]["params"] == {"id": 7}
+    assert calls[1]["method"] == "svc.Bad" and calls[1]["params"] == {}
+    assert "expected_result_contains" not in calls[0] and "expected_error_code" not in calls[1]
+    assert conf["rpc_service"]["_calls_oracle_withheld"] == 2
+    assert conf["batch_job"]["produced_artifacts"] == ["out/report.json"]
+    assert conf["json"]["files"][0]["required_paths"] == ["$.items[0].id"]
+    assert contract["conformance"]["rpc_service"]["calls"][0]["expected_result_contains"] == ["RPC_GOLDEN"]
+    print("ok  ADR-0018 withholding: RPC oracle hidden, RPC method/params + batch/json spec kept")
+
+
 def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
     # P0 (closed loop): linon is CLEAN, but a block-mode conformance gate still FAILS on the current artifact.
     # _closed_loop_findings re-runs the gates and must keep findings non-empty (so the repair loop stays open
