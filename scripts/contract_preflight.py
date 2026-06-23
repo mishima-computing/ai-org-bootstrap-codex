@@ -19,6 +19,7 @@ import fnmatch
 # Deliverable kinds that declare an executable interface (so a conformance profile is owed). "none" is the
 # explicit no-interface declaration and is deliberately NOT in this set.
 _INTERFACE_KINDS = ("cli", "library", "http_service", "rpc_service", "batch_job", "json")
+_SERVICE_KINDS = ("http_service", "rpc_service")
 
 
 def _is_substantive_profile(profile) -> bool:
@@ -30,6 +31,48 @@ def _is_substantive_profile(profile) -> bool:
 def _finding(check: str, severity: str, detail: str, **extra) -> dict:
     return {"source": "contract-preflight", "check": check, "severity": severity,
             "passed": False, "detail": detail, **extra}
+
+
+def _http_has_e2e_example(profile) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    start = profile.get("start")
+    if not isinstance(start, dict) or not start.get("command") or not profile.get("base_url"):
+        return False
+    for ex in profile.get("examples") or []:
+        if not isinstance(ex, dict):
+            continue
+        body = ex.get("expected_body_contains")
+        if ex.get("method") and ex.get("path") is not None and isinstance(ex.get("expected_status"), int) \
+                and isinstance(body, list) and any(isinstance(x, str) and x for x in body):
+            return True
+    return False
+
+
+def _rpc_has_e2e_example(profile) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    start = profile.get("start")
+    if not isinstance(start, dict) or not start.get("command") or not profile.get("base_url") \
+            or not profile.get("transport"):
+        return False
+    for call in profile.get("calls") or []:
+        if not isinstance(call, dict) or not call.get("method"):
+            continue
+        result = call.get("expected_result_contains")
+        if isinstance(result, list) and any(isinstance(x, str) and x for x in result):
+            return True
+        if isinstance(call.get("expected_error_code"), int):
+            return True
+    return False
+
+
+def _has_production_boundary_e2e(kind: str, profile) -> bool:
+    if kind == "http_service":
+        return _http_has_e2e_example(profile)
+    if kind == "rpc_service":
+        return _rpc_has_e2e_example(profile)
+    return False
 
 
 def _declared_status_codes(profile: dict) -> set:
@@ -139,5 +182,23 @@ def preflight(contract: dict) -> dict:
         elif kind == "cli":
             findings += _cli_findings(profile)
             checks += 4 + len(profile.get("examples") or [])
+
+    # Service production-boundary obligation, keyed STRICTLY off the DECLARED deliverable_kind. A contract that
+    # declares http_service/rpc_service owes a runnable end-to-end probe — launch command, externally
+    # observable endpoint/call, and expected body/result — so conformance boots the REAL artifact instead of a
+    # stub. The obligation is NEVER inferred from contract text: text inference is FP-prone and has no place in
+    # a blocking gate. Anti-dodge (declaring `library`/`none` to escape the probe) is handled structurally —
+    # deliverable_kind is declared truthfully and conformance boots the real artifact — not by a classifier.
+    if kind in _SERVICE_KINDS:
+        checks += 1
+        service_profile = (contract.get("conformance") or {}).get(kind)
+        if not _has_production_boundary_e2e(kind, service_profile):
+            findings.append(_finding(
+                "production_boundary_e2e", "major",
+                f"deliverable_kind '{kind}' declares a production/integration boundary but does not provide a "
+                f"runnable conformance.{kind} end-to-end example with launch command, externally observable "
+                f"endpoint/call, and expected body/result — encode the probe so conformance boots the real "
+                f"artifact",
+                kind=kind))
 
     return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": checks}

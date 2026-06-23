@@ -607,15 +607,44 @@ def test_schema_rpc_profile_requires_start_base_transport_calls():
             "fallback_plan": "f", "handoff_to_implementer": "h"}
     ok = {**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
         "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
-        "calls": [{"method": "ping"}]}}}
+        "calls": [{"method": "ping", "expected_result_contains": ["pong"]}]}}}
     assert v.is_valid(ok), list(v.iter_errors(ok))
     incomplete = {**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
         "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http"}}}  # no calls
     assert not v.is_valid(incomplete), "rpc profile requires calls"
+    no_result = {**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
+        "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+        "calls": [{"method": "ping"}]}}}
+    assert not v.is_valid(no_result), "rpc profile requires at least one call with expected result/error"
     assert not v.is_valid({**base, "deliverable_kind": "rpc_service", "conformance": {"rpc_service": {
-        "start": {"command": "s"}, "base_url": "x", "transport": "smoke-signals", "calls": [{"method": "m"}]}}}), \
+        "start": {"command": "s"}, "base_url": "x", "transport": "smoke-signals",
+        "calls": [{"method": "m", "expected_result_contains": ["ok"]}]}}}), \
         "transport is constrained to the supported set"
-    print("ok  schema: rpc profile requires start/base_url/transport/calls; transport is an enum")
+    print("ok  schema: rpc profile requires start/base_url/transport/calls/result; transport is an enum")
+
+
+def test_schema_http_profile_requires_production_boundary_body_probe():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h"}
+    ok = {**base, "deliverable_kind": "http_service", "conformance": {"http_service": {
+        "start": {"command": "serve"}, "base_url": "http://x", "readiness_timeout_seconds": 3,
+        "examples": [{"method": "GET", "path": "/health", "expected_status": 200,
+                      "expected_body_contains": ["ok"]}]}}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    status_only = {**base, "deliverable_kind": "http_service", "conformance": {"http_service": {
+        "start": {"command": "serve"}, "base_url": "http://x", "readiness_timeout_seconds": 3,
+        "examples": [{"method": "GET", "path": "/health", "expected_status": 200}]}}}
+    assert not v.is_valid(status_only), "http_service profile requires at least one expected body probe"
+    print("ok  schema: http_service requires launch+endpoint+status/body production-boundary probe")
 
 
 def test_dispatch_routes_every_kind_to_a_real_checker():
@@ -874,6 +903,86 @@ def _eventually_closed(url: str) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _run_http_wiring_probe(wired: bool) -> dict:
+    port = _free_local_port()
+    with tempfile.TemporaryDirectory(prefix="conf-http-wire-") as tmp:
+        tmpdir = Path(tmp)
+        dep = tmpdir / "dependency.txt"
+        dep.write_text("real-wire", encoding="utf-8")
+        mode = "wired" if wired else "stub"
+
+        if port is None:
+            ready_file = tmpdir / "ready"
+            script = r"""
+import pathlib
+import sys
+import time
+
+pathlib.Path(sys.argv[1]).write_text("ready")
+while True:
+    time.sleep(60)
+"""
+            profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} "
+                                             f"{shlex.quote(str(ready_file))}"},
+                       "base_url": "http://service.local", "readiness_timeout_seconds": 3,
+                       "examples": [{"method": "GET", "path": "/items", "expected_status": 200,
+                                     "expected_body_contains": ["real-wire"]}]}
+
+            def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+                if not ready_file.exists():
+                    raise conf.urllib.error.URLError("not ready")
+                body = dep.read_bytes() if wired else b"stub-wire"
+                return conf.HttpResponse(200, body)
+
+            return conf.run_http_service_conformance(
+                _http_contract(profile), conf.subprocess_runner(timeout=2.0), http_request=req)
+
+        script = r"""
+import http.server
+import pathlib
+import socketserver
+import sys
+
+dep = pathlib.Path(sys.argv[2])
+mode = sys.argv[3]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        body = dep.read_bytes() if mode == "wired" else b"stub-wire"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", int(sys.argv[1])), Handler) as server:
+    server.serve_forever()
+"""
+        base_url = f"http://127.0.0.1:{port}"
+        profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} {port} "
+                                        f"{shlex.quote(str(dep))} {mode}"},
+                   "base_url": base_url, "readiness_timeout_seconds": 3,
+                   "examples": [{"method": "GET", "path": "/items", "expected_status": 200,
+                                 "expected_body_contains": ["real-wire"]}]}
+        rep = conf.run_http_service_conformance(_http_contract(profile), conf.subprocess_runner(timeout=2.0))
+        assert _eventually_closed(base_url), "real launched wiring-control service must be stopped"
+        return rep
+
+
+def test_http_service_production_boundary_probe_red_on_stub_green_on_real_wiring():
+    red = _run_http_wiring_probe(wired=False)
+    assert red["applicable"] and red["passed"] is False, red
+    assert any(f["check"] == "body_contains" and f.get("expected") == "real-wire" for f in red["findings"]), red
+
+    green = _run_http_wiring_probe(wired=True)
+    assert green["applicable"] and green["passed"] and green["findings"] == [], green
+    print("ok  http_service production-boundary probe: stubbed path RED; real wiring GREEN (D2 control)")
 
 
 def test_http_service_real_subprocess_runner_launches_and_stops_service():
