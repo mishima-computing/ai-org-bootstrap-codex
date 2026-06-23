@@ -821,6 +821,11 @@ _DETERMINISTIC_IMPL_SOURCES = {
     # an artifact defect ("the change broke previously-working code" — a green suite is a fact), so it pins
     # repair to the implementer and lets gate-behind skip the expensive Linon reviewer on it.
     "regression",
+    # static-check: the kind-agnostic static-analysis gate. An analyzer (py_compile / pyflakes / ruff / tsc) that
+    # exits non-zero is purely an artifact defect (a hallucination/inconsistency — undefined name, unresolved
+    # import, syntax error; the exit code is a fact), so it pins repair to the implementer and lets gate-behind
+    # skip the expensive Linon reviewer on it.
+    "static-check",
 }
 
 
