@@ -708,6 +708,77 @@ def _scope_under_base(task, base) -> bool:
     return all((lambda p: p == base or p.startswith(base + "/"))(str(s).strip().strip("/")) for s in scope)
 
 
+def _goal_worktree_enabled() -> bool:
+    """Goal-level worktree isolation is ON by default. A caller that already manages its own isolation
+    (e.g. the cockpit, which isolates per RUN before it ever spawns controller_goal) opts OUT via
+    AI_ORG_GOAL_WORKTREE=off/0/false/no — then run_goal runs on `--repo` directly, the old behavior."""
+    return os.environ.get("AI_ORG_GOAL_WORKTREE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _isolate_goal_repo(repo, branch):
+    """Create a git worktree of `repo` on a fresh `branch` off `repo`'s current HEAD, so the WHOLE goal
+    (its leaves, wip, commits) runs against the worktree and `repo`'s main working tree never moves during
+    the run — closing the pollution bug where a manual launch's goal-level wip/commits landed on `repo`'s
+    main AND an uncommitted hand-edit in `repo` got swept into the goal's commits. Mirrors the cockpit's
+    per-run `_isolate_run_repo`. Returns the worktree path, or None to FALL BACK to running on `repo`
+    directly (not a git repo, or `worktree add` failed) — fail-safe, never crashes."""
+    try:
+        if not (Path(repo) / ".git").exists():
+            return None
+        if subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).returncode != 0:
+            return None                                        # no commits yet -> nothing to branch off
+        wt = tempfile.mkdtemp(prefix="goal-wt-")
+        add = subprocess.run(["git", "-C", str(repo), "worktree", "add", wt, "-b", branch, "HEAD"],
+                             capture_output=True, text=True)
+        if add.returncode != 0:                                # branch may already exist (a resumed id) ->
+            shutil.rmtree(wt, ignore_errors=True)              # reuse it instead of failing to isolate
+            wt = tempfile.mkdtemp(prefix="goal-wt-")
+            add = subprocess.run(["git", "-C", str(repo), "worktree", "add", wt, branch],
+                                 capture_output=True, text=True)
+            if add.returncode != 0:
+                shutil.rmtree(wt, ignore_errors=True)
+                return None
+        return wt
+    except Exception:                                          # noqa: BLE001 — isolation is fail-safe
+        return None
+
+
+def _merge_goal_to_main(repo, branch, base_head, main_branch):
+    """Merge the goal `branch` into `repo`'s local `main_branch` after a GREEN goal, so the work reaches the
+    tree a consumer renders (the cockpit town renders LOCAL main). Fast-forward when main has not moved off
+    `base_head`; otherwise a clean merge commit. If the merge does NOT apply cleanly (main moved under us),
+    ABORT it and leave main untouched + the branch intact — main is never corrupted. Returns True iff main
+    now includes the goal's work."""
+    def g(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+    branch_head = g("rev-parse", "--verify", "--quiet", branch).stdout.strip()
+    if not branch_head:
+        return False
+    if branch_head == base_head:
+        return True                                            # goal produced no commits -> main already has it
+    git_ops.ensure_identity(repo)
+    main_head = g("rev-parse", "--verify", "--quiet", main_branch).stdout.strip()
+    if main_head == base_head:                                 # main has not moved -> fast-forward
+        if g("merge", "--ff-only", branch).returncode == 0:
+            return True
+    r = g("merge", "--no-ff", "--no-edit", "-m", f"merge: goal {branch} into {main_branch}", branch)
+    if r.returncode == 0:
+        return True
+    g("merge", "--abort")                                      # conflict -> never corrupt main
+    return False
+
+
+def _cleanup_goal_worktree(repo, worktree, branch, *, delete_branch) -> None:
+    """Remove the goal worktree (and, on success, its now-merged branch). Worktree first — a branch checked
+    out in a worktree cannot be deleted. Fail-soft: cleanup never breaks the goal's reported outcome."""
+    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+                   capture_output=True)
+    shutil.rmtree(worktree, ignore_errors=True)
+    if delete_branch and branch:
+        subprocess.run(["git", "-C", str(repo), "branch", "-D", branch], capture_output=True)
+
+
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
              refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
@@ -734,6 +805,31 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     run_leaf = run_leaf or default_run_leaf
     if default_leaf_path or split is splitter.split:
         check_launch_preconditions(repo, emit=emit)
+    # GOAL WORKTREE (default ON): run the WHOLE goal in an isolated git worktree of `--repo` on a fresh
+    # `goal/<id>` branch off main HEAD, so `--repo`'s main working tree never moves during the run — the
+    # goal's wip/commits land on the branch (not main), and an uncommitted hand-edit in `--repo` cannot be
+    # swept into the goal's commits (it isn't in the worktree). The shared STREAM_LOG / GoalStore stay
+    # pinned at `--repo` (above), so streaming + durable state are unaffected. On GREEN the branch is merged
+    # back into `--repo`'s local main (the town renders local main). A caller that isolates per-run itself
+    # (the cockpit) opts out; a non-git repo or a failed `worktree add` falls back to running on `--repo`
+    # directly — exactly as the cockpit's helper falls back. main stays clean on every non-green outcome.
+    orig_repo = str(repo)
+    iso_wt = None
+    goal_branch = None
+    orig_head = None
+    orig_branch_name = None
+    if _goal_worktree_enabled():
+        goal_branch = "goal/" + (str(goal_id) if goal_id else ("anon-" + uuid.uuid4().hex[:8]))
+        iso_wt = _isolate_goal_repo(orig_repo, goal_branch)
+        if iso_wt is not None:
+            _g = lambda *a: subprocess.run(["git", "-C", orig_repo, *a], capture_output=True, text=True)  # noqa: E731
+            orig_head = _g("rev-parse", "HEAD").stdout.strip()
+            orig_branch_name = _g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
+            emit({"type": "goal_worktree", "repo": orig_repo, "worktree": iso_wt,
+                  "branch": goal_branch, "base": orig_head})
+            repo = iso_wt                                       # run the entire goal against the worktree
+        else:
+            goal_branch = None                                 # fall back to running on --repo directly
     # the org's state STORE is durable + SHARED (so a consumer can READ current state, DB-style): write it where
     # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already
     # shared. `emit` is threaded in so every state OPERATION (create/load/save/update) also lands in the log.
@@ -789,6 +885,23 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         # rich log: the org flows its TERMINAL state (outcome + the wip commit) into its own Stream, so the
         # state is reconstructible from the log too — the log is the best resource for grasping state.
         emit({"type": "goal_finished", "status": status, "wip": wip})
+        # GOAL WORKTREE outcome: on GREEN merge the goal branch into `--repo`'s local main (so the work
+        # reaches the tree a consumer renders) and remove the now-merged worktree+branch. On a clean merge
+        # FAILURE (main moved under us) leave both intact and main untouched. On any non-green outcome leave
+        # the worktree+branch for inspection — main stays clean either way.
+        if iso_wt is not None:
+            if status == "done":
+                if _merge_goal_to_main(orig_repo, goal_branch, orig_head, orig_branch_name):
+                    _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
+                    emit({"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name})
+                else:
+                    emit({"type": "goal_merge_conflict", "branch": goal_branch, "into": orig_branch_name,
+                          "worktree": iso_wt, "detail": "local main moved under the run and the goal branch "
+                          "did not merge cleanly; branch + worktree left intact, main untouched"})
+            else:
+                emit({"type": "goal_worktree_retained", "branch": goal_branch, "worktree": iso_wt,
+                      "status": status, "detail": "non-green outcome — worktree+branch left for inspection, "
+                      "main untouched"})
         return final_plan
 
     # #48: the goal's DECLARED deliverable boundary ("inside X/ ONLY") steers the splitter to scope the plan
@@ -834,6 +947,8 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             if store is not None:                       # the org records the ASK as its terminal state
                 store.update(goal_id, status="needs_info", missing=missing,
                              structured_goal=verdict.get("structured"), asks=asks, open_asks=[ask])
+            if iso_wt is not None:                       # HOLD built nothing -> drop the empty goal worktree
+                _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
             return []                                    # HOLD: do not decompose (D1b)
         context = {**(context or {}), "structured_goal": verdict.get("structured")}
     plan = None
