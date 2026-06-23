@@ -513,6 +513,40 @@ that history also recorded. A "don't, and why it doesn't pay" list is as much of
   focus-of-control deadlock and diverge; the shared stream is read by roles under an explicit scheduler (the
   frontier), not a free-for-all.
 
+## Why not just use the carrier's built-in commands?
+
+The carrier (the coding agent this engine drives) ships its own commands — a goal mode, a code-review pass, an
+execution-rules policy, a skills system. A fair question: why build an executable contract, deterministic gates, an
+adversarial reviewer, and a decomposition loop instead of leaning on those? Each is a real feature, but each sits at
+the wrong layer for build *quality*, and the official documentation makes no quality claim for any of them
+(investigated against the carrier CLI v0.137 and its docs, 2026).
+
+- **Goal mode** (a thread objective + token budget + status). Resource governance and long-run orchestration, not a
+  code-quality lever: the *same* model run longer and more persistently, stopping on a budget or on evidence rather
+  than on a hunch. It governs ONE carrier session; this engine's goal orchestrates *many* (a DAG of leaves, each gated)
+  — a layer above. The documented gains are "can run longer / won't overrun budget / pause-resume," never "more
+  correct per step."
+- **The built-in code review** (a separate reviewer pass with a correctness verdict). A genuinely useful, decorrelated
+  second opinion — but an LLM reviewer in the same noisy class as this engine's adversary (an independent 13-model ×
+  50-PR benchmark put the best review models near F1 ≈ 0.5, about half the comments false positives). A second
+  same-class reviewer enlarges the *union* of catches but also the rejection rate and the triage noise; it does not
+  make the *implementer's* output better. Caught-defect certainty comes from the deterministic, ~0-false-positive
+  gates, which no LLM reviewer can match.
+- **The execution-rules policy** (`prefix_rule` allow/forbidden). A deterministic authorization gate — but over *shell
+  commands*, not the model's editing or reasoning. "Only edit these files" and "never leak the withheld value" are
+  behaviours, not commands; they cannot be expressed as a rule. The one constraint that maps cleanly is file-write
+  scope — enforced by the sandbox's writable roots, which is exactly this engine's deterministic-gate philosophy
+  applied earlier, inside the carrier. Semantic constraints stay with the gates and the reviewer.
+- **The skills system** (a curated, routed prompt prime). This engine *does* use it (the cassette layer), but the
+  evidence is sober: skills are weak for software engineering and self-generated skills can hurt, so they pay only
+  curated, deterministically routed, and paired with the gate that hard-enforces the same thing — a prime, never the
+  guarantee.
+
+The throughline: the command surface offers governance, convenience, and one more noisy reviewer — but no channel that
+makes the *same* model obey a behavioural or semantic instruction more reliably. Quality lives in the mechanism (an
+executable contract, ~0-FP gates, a withheld oracle, composed-goal acceptance, directed decomposition), not in a
+richer way to ask the model nicely.
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
