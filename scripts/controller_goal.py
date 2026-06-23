@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os  # noqa: E402
 import ask_search  # noqa: E402 — bounded search + provenance kernel for underdetermined asks
+import conformance  # noqa: E402 — ADR-0016 D7 goal-level acceptance gate (reuses its service-boot helpers)
 import controller_run  # noqa: E402 — org_root(repo): shared workspace-vs-engine install resolution
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
@@ -779,6 +780,17 @@ def _cleanup_goal_worktree(repo, worktree, branch, *, delete_branch) -> None:
         subprocess.run(["git", "-C", str(repo), "branch", "-D", branch], capture_output=True)
 
 
+def _goal_acceptance_profile(context):
+    """The EXECUTABLE goal `acceptance_profile` (ADR-0016 D7) — the goal contract the OWNER authored/confirmed
+    at INTAKE, carried verbatim through `context`. It is NOT derived from the natural-language
+    success_condition (compiling NL into a probe at the end would re-introduce the LLM-label-trust the
+    goal-level hole came from). Returns the profile dict, or None when absent (= today's shadow behavior)."""
+    if not isinstance(context, dict):
+        return None
+    profile = context.get("acceptance_profile")
+    return profile if isinstance(profile, dict) and profile else None
+
+
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
              refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
     """Decompose `goal` and build it.
@@ -857,6 +869,47 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         done = bool(final_plan) and all(frontier.node_status(t) == "done" for t in final_plan)
         blocked = _any_status(final_plan, "blocked_hitl")
         status = "done" if done else ("blocked_hitl" if blocked else "failed")
+        # ADR-0016 D7 — GOAL-LEVEL ACCEPTANCE GATE (the COMPOSING-layer WHY check, the goal-level analogue of
+        # the per-leaf real-wiring gate). Per-leaf conformance proved only leaf-obeys-contract; a goal whose
+        # leaves are all `done` has NOT been checked against its OWN outcome. When the owner authored an
+        # EXECUTABLE acceptance_profile at INTAKE, BOOT the COMPOSED goal artifact (this worktree — AFTER all
+        # leaves merged, BEFORE merge-to-main) and probe it against the profile, INDEPENDENT of any leaf's
+        # deliverable_kind, under the SAME rlimit sandbox + guaranteed process teardown as the per-leaf gate.
+        # PASS -> verified:true + durable evidence -> proceed to merge. FAIL -> verified:false; flip status to
+        # `failed` so it does NOT merge to main (the composed artifact does not satisfy the goal WHY). No
+        # profile -> keep today's SHADOW behavior EXACTLY (verified:false/needs_info, still merges) — no
+        # regression. The determinism lives in the intake-fixed profile, NOT in compiling the NL
+        # success_condition into a probe at the end (that re-introduces the LLM-label-trust the hole came from).
+        sg = (context or {}).get("structured_goal") if isinstance(context, dict) else None
+        profile = _goal_acceptance_profile(context)
+        goal_acc = None
+        if done and profile is not None:
+            result = conformance.run_goal_acceptance(profile, repo)
+            verified = bool(result.get("verified"))
+            goal_acc = {"type": "goal_acceptance", "verified": verified,
+                        "status": "verified" if verified else "failed_acceptance",
+                        "outcome": (sg or {}).get("outcome"),
+                        "success_condition": (sg or {}).get("success_condition"),
+                        "negative_control": (sg or {}).get("negative_control"),
+                        "owner": (sg or {}).get("owner"),
+                        "evidence": result.get("evidence"), "findings": result.get("findings"),
+                        "probes_run": result.get("probes_run"),
+                        "note": ("composed goal artifact booted and satisfied the executable acceptance profile"
+                                 if verified else
+                                 "composed goal artifact does NOT satisfy the goal WHY — the acceptance probe "
+                                 "failed; NOT merged to main")}
+            if not verified:
+                status = "failed"          # the composed artifact failed acceptance -> do NOT merge to main
+                done = False
+        elif done and isinstance(sg, dict) and (sg.get("negative_control") or sg.get("success_condition")):
+            # SHADOW (no executable profile authored): surface that the composed outcome is unverified against
+            # the WHY, NEVER fabricate a green (D5). Unchanged pre-gate behavior — the goal still merges.
+            goal_acc = {"type": "goal_acceptance", "verified": False, "status": "needs_info",
+                        "outcome": sg.get("outcome"), "success_condition": sg.get("success_condition"),
+                        "negative_control": sg.get("negative_control"), "owner": sg.get("owner"),
+                        "note": "composed outcome NOT checked against the goal WHY — no executable "
+                                "acceptance_profile was authored at intake; the leaves proved only "
+                                "leaf-obeys-contract"}
         wip = None
         if store is not None:                          # OPERATE the org's state: record its build + outcome
             wip = store.save_wip(goal_id, repo)
@@ -866,22 +919,11 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                       "asks": asks, "open_asks": [a for a in asks if a.get("status") == "open"]}
             if status == "blocked_hitl":
                 update["result"] = "partial" if _any_status(final_plan, "done") else "blocked_hitl"
+            if goal_acc is not None:
+                update["goal_acceptance"] = goal_acc
             store.update(goal_id, **update)
-        # ADR-0016 D7: the WHY is verified at the COMPOSING layer. A goal whose leaves are all "done" has NOT
-        # been checked against its OWN outcome — per-leaf conformance proves only leaf-obeys-contract. The
-        # executable goal-level acceptance run is forward work; until it is wired, emit the goal-acceptance
-        # obligation as SHADOW / needs-info — surface that the composed outcome is unverified against the WHY,
-        # NEVER fabricate a green (D5). Only when a structured WHY exists and names a falsifiable acceptance.
-        sg = (context or {}).get("structured_goal") if isinstance(context, dict) else None
-        if done and isinstance(sg, dict) and (sg.get("negative_control") or sg.get("success_condition")):
-            acc = {"type": "goal_acceptance", "verified": False, "status": "needs_info",
-                   "outcome": sg.get("outcome"), "success_condition": sg.get("success_condition"),
-                   "negative_control": sg.get("negative_control"), "owner": sg.get("owner"),
-                   "note": "composed outcome NOT checked against the goal WHY — D7 goal-level acceptance is "
-                           "shadow/forward-work; the leaves proved only leaf-obeys-contract"}
-            emit(acc)
-            if store is not None:
-                store.update(goal_id, goal_acceptance=acc)
+        if goal_acc is not None:
+            emit(goal_acc)
         # rich log: the org flows its TERMINAL state (outcome + the wip commit) into its own Stream, so the
         # state is reconstructible from the log too — the log is the best resource for grasping state.
         emit({"type": "goal_finished", "status": status, "wip": wip})
@@ -1146,14 +1188,22 @@ def main(argv=None) -> int:
     p.add_argument("--resume-from", default=None, help="a prior goal_id (or sha/ref): the org LOADS that "
                    "state into the worktree before building, so it resumes its own prior work (org behavior)")
     p.add_argument("--budget", type=int, default=None, help="cap on total leaf runs (autonomous bound)")
+    p.add_argument("--acceptance-profile", default=None, help="path to a JSON file holding the OWNER-authored "
+                   "executable goal acceptance_profile (ADR-0016 D7): {start:{command,base_url?,ready_path?,"
+                   "timeout?}, probes:[{request,expect}], negative_control?}. Fixed at intake; absent = the "
+                   "goal-level acceptance stays shadow (no goal-level probe).")
     a = p.parse_args(argv)
+    context = None
+    if a.acceptance_profile:                           # the OWNER submits the executable acceptance contract
+        context = {"acceptance_profile": json.loads(Path(a.acceptance_profile).read_text(encoding="utf-8"))}
     events = []                                        # capture the stream so the EXIT CODE can tell HOLD apart
     emitter = stream_emit(a.repo)
     def _emit(e):
         emitter(e)                                     # keep the default rich logging
         events.append(e)
     try:
-        plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget, emit=_emit)
+        plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget,
+                        context=context, emit=_emit)
     except LaunchPreconditionError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1165,6 +1215,11 @@ def main(argv=None) -> int:
         return 2
     if any(e.get("type") == "goal_finished" and e.get("status") == "blocked_hitl" for e in events):
         return 2
+    # A goal whose composed artifact FAILED goal-level acceptance is reported `goal_finished: failed` and is NOT
+    # merged to main (~:902/929). Its leaves can all be `done`, so the all-leaves-done check below would wrongly
+    # return 0 — an orchestrator/CI would treat an acceptance-blocked goal as success. Surface the failure.
+    if any(e.get("type") == "goal_finished" and e.get("status") == "failed" for e in events):
+        return 1
     return 0 if plan and all(frontier.node_status(t) == "done" for t in plan) else 1
 
 
