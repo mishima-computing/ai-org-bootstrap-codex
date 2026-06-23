@@ -156,6 +156,82 @@ def test_default_run_leaf_surfaces_a_crash_not_silently():
     print("ok  default_run_leaf surfaces a crash (leaf_crash + reason=crash), never swallows it")
 
 
+def test_launch_precondition_fails_before_split_when_registry_missing():
+    # A direct launch with the default leaf runner needs the org registry. If AI_ORG_ROOT is missing on a
+    # cross-repo run, fail BEFORE the splitter/codex path starts, with a distinct precondition event.
+    import os
+    import tempfile
+    old_org = os.environ.pop("AI_ORG_ROOT", None)
+    try:
+        with tempfile.TemporaryDirectory() as repo:
+            split_called = {"v": False}
+            events = []
+
+            def split(_goal, _ctx, _carrier):
+                split_called["v"] = True
+                return [_leaf("late", ["x.py"])]
+
+            try:
+                cg.run_goal(repo, "g", split=split, emit=events.append)
+                raise AssertionError("missing registry must abort launch")
+            except cg.LaunchPreconditionError as exc:
+                msg = str(exc)
+            assert "AI Org precondition failed: runtime registry not found at" in msg, msg
+            assert "Set AI_ORG_ROOT to the engine install" in msg, msg
+            assert "registry/runtime-registry.yaml in --repo itself" in msg, msg
+            assert split_called["v"] is False, "precondition must fire before split/codex is attempted"
+            ev = [e for e in events if e.get("type") == "precondition_failed"]
+            assert ev and ev[0].get("runtime_registry", "").endswith("registry/runtime-registry.yaml"), events
+    finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
+    print("ok  missing runtime registry fails launch before split with an actionable precondition event")
+
+
+def test_launch_precondition_passes_with_ai_org_root_before_split():
+    # Negative control for cross-repo builds: the build repo has no registry, but AI_ORG_ROOT points at the
+    # engine install, so the cheap precondition passes and run_goal reaches the split normally.
+    import os
+    import tempfile
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
+    try:
+        with tempfile.TemporaryDirectory() as repo:
+            split_called = {"v": False}
+
+            def split(_goal, _ctx, _carrier):
+                split_called["v"] = True
+                return []
+
+            plan = cg.run_goal(repo, "g", split=split, emit=lambda _e: None)
+            assert plan == [], plan
+            assert split_called["v"] is True, "valid AI_ORG_ROOT should allow the launch to reach split"
+    finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
+    print("ok  AI_ORG_ROOT pointing at the engine makes the launch precondition pass before split")
+
+
+def test_launch_precondition_passes_self_hosted_without_ai_org_root():
+    # Self-hosted remains valid: when --repo is the engine repo and AI_ORG_ROOT is unset, org_root(repo)==repo
+    # and the local registry satisfies the launch precondition.
+    import os
+    old_org = os.environ.pop("AI_ORG_ROOT", None)
+    try:
+        path = cg.check_launch_preconditions(Path(__file__).resolve().parent.parent)
+        assert path.name == "runtime-registry.yaml" and path.is_file(), path
+    finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
+    print("ok  self-hosted launch precondition passes without AI_ORG_ROOT")
+
+
 def _raise(exc):
     raise exc
 
@@ -483,6 +559,8 @@ def test_splitter_session_resumes_on_resume():
         c = lambda prompt: '[{"id":"a","objective":"do a","scope":["mocks/a.py"],"depends_on":[]}]'
         c.captured = {"session_id": "splitsid-0"}
         return c
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
     cg.codex_carrier = fake
     try:
         with tempfile.TemporaryDirectory() as d:
@@ -500,6 +578,10 @@ def test_splitter_session_resumes_on_resume():
             assert "splitsid-0" in seen["resume"], ("the resumed top split RESUMES the prior splitter session",
                                                     seen["resume"])
     finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
         cg.codex_carrier = real
     print("ok  splitter session recorded on initial split, RESUMED on resume (planning memory kept)")
 
@@ -621,6 +703,8 @@ def test_blocked_hitl_outranks_failed_and_drives_main_exit_2():
         return _ok_refine(_goal, ctx, _carrier)
 
     old_stream = os.environ.pop("STREAM_LOG", None)
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
     try:
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(d, "run")
@@ -667,6 +751,10 @@ def test_blocked_hitl_outranks_failed_and_drives_main_exit_2():
                 cg.codex_carrier = real_codex
             assert code == 2, f"main() must return exit 2 when an open ask outranks a failed sibling, got {code}"
     finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
         if old_stream is None:
             os.environ.pop("STREAM_LOG", None)
         else:
@@ -1150,6 +1238,8 @@ def test_intake_gate_auto_binds_real_refiner_and_holds():
     # in production. Here a real carrier returns "{}" (nothing nameable) -> the real kernel HOLDs.
     import splitter
     real = cg.codex_carrier
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
     def fake(repo, *, model=None, resume_session=None):
         c = lambda prompt: "{}"
         c.captured = {}
@@ -1163,6 +1253,10 @@ def test_intake_gate_auto_binds_real_refiner_and_holds():
         assert any(e["type"] == "goal_underdetermined" for e in events), events
         assert not any(e["type"] == "goal_split" for e in events), "real path HELD before decomposition"
     finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
         cg.codex_carrier = real
     print("ok  default-split path auto-binds the REAL refiner and HOLDs an empty intake (production path pinned)")
 
@@ -1172,6 +1266,8 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
     # prompt and a task array for the splitter prompt -> the real refiner passes and the real splitter runs.
     import json, splitter
     real = cg.codex_carrier
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
     def fake(repo, *, model=None, resume_session=None):
         def c(prompt):
             if "Decompose the goal" in prompt:          # the SPLITTER prompt (splitter._build_prompt)
@@ -1188,6 +1284,10 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
         assert any(e["type"] == "goal_split" for e in events), ("sufficient intake proceeds to split", events)
         assert _statuses(plan) == {"a": "done"}, plan
     finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
         cg.codex_carrier = real
     print("ok  default-split path: sufficient intake auto-refines then decomposes (production proceed path)")
 
@@ -1199,12 +1299,18 @@ def test_main_returns_exit_2_on_intake_hold():
     import tempfile
     real = goal_refiner.refine
     goal_refiner.refine = lambda goal, ctx, carrier: {"sufficient": False, "missing": ["owner"], "structured": {}}
+    old_org = os.environ.get("AI_ORG_ROOT")
+    os.environ["AI_ORG_ROOT"] = str(Path(__file__).resolve().parent.parent)
     repo = tempfile.mkdtemp()
     subprocess.run(["git", "init", "-q", repo], check=True)
     try:
         code = cg.main(["--repo", repo, "--goal", "make it nice", "--goal-id", "hold1"])
         assert code == 2, f"main() must return exit 2 on an intake HOLD (goal_underdetermined), got {code}"
     finally:
+        if old_org is None:
+            os.environ.pop("AI_ORG_ROOT", None)
+        else:
+            os.environ["AI_ORG_ROOT"] = old_org
         goal_refiner.refine = real
     print("ok  main() returns exit 2 on an intake HOLD (underdetermined goal)")
 

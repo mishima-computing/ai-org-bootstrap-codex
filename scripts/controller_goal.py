@@ -22,12 +22,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import os  # noqa: E402
 import ask_search  # noqa: E402 — bounded search + provenance kernel for underdetermined asks
+import controller_run  # noqa: E402 — org_root(repo): shared workspace-vs-engine install resolution
 import frontier  # noqa: E402
 import git_ops  # noqa: E402 — the per-leaf-commit git-state procedures (guards live there, once)
 import goal_refiner  # noqa: E402 — ADR-0016 D1b intake sufficiency gate (raw goal -> candidate structured goal)
 import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the consumer)
 import scaffold_primitive  # noqa: E402 — ADR-0008 deterministic, LLM-free scaffold skeleton
 import splitter  # noqa: E402
+from ai_org_bootstrap.registry import load_runtime_registry  # noqa: E402
 
 
 def _shared_state_repo(repo) -> str:
@@ -44,6 +46,49 @@ def _shared_state_repo(repo) -> str:
 FLOOR_MAX_DEPTH = 3
 MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
 LINON_RESPLIT_CAP = 2  # Linon rejections may refine granularity only this many times per branch
+
+
+class LaunchPreconditionError(RuntimeError):
+    """A controller launch is misconfigured before any split/leaf work can validly start."""
+
+
+def _precondition_message(cause: str) -> str:
+    return ("AI Org precondition failed: "
+            f"{cause}. Set AI_ORG_ROOT to the engine install (the cockpit's default_goal_runner does this); "
+            "a self-hosted run needs registry/runtime-registry.yaml in --repo itself.")
+
+
+def check_launch_preconditions(repo, emit=None) -> Path:
+    """Verify the org runtime registry is present and non-empty before expensive split/leaf work starts.
+
+    This uses the same org-root resolver and registry loader as the runtime path. Emitting is fail-soft, but
+    the precondition failure itself always raises so a missing AI_ORG_ROOT cannot become a late leaf crash.
+    """
+    repo_path = Path(repo).resolve()
+    org = controller_run.org_root(repo_path)
+    registry_path = org / "registry" / "runtime-registry.yaml"
+    cause = None
+    entries = []
+    if not registry_path.is_file():
+        cause = f"runtime registry not found at {registry_path}"
+    else:
+        try:
+            entries = load_runtime_registry(registry_path)
+        except Exception as exc:                           # noqa: BLE001 - surface parser/path failures verbatim
+            cause = f"runtime registry could not be loaded at {registry_path}: {type(exc).__name__}: {exc}"
+        else:
+            if len(entries) < 1:
+                cause = f"runtime registry has no role entries at {registry_path}"
+    if cause is None:
+        return registry_path
+    message = _precondition_message(cause)
+    if callable(emit):
+        try:
+            emit({"type": "precondition_failed", "repo": str(repo_path), "org_root": str(org),
+                  "runtime_registry": str(registry_path), "cause": cause, "message": message})
+        except Exception:                                  # noqa: BLE001 - telemetry must not mask the loud raise
+            pass
+    raise LaunchPreconditionError(message)
 
 
 def stream_emit(repo):
@@ -673,7 +718,6 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     progress (ADR-0009). When `goal_id` is given, the ORG OWNS this goal's state — the received goal
     becomes the org's at receipt: it records the goal, commits its build (wip) and its outcome, in its own
     GoalStore. A consumer only READS that state. Returns the final task tree."""
-    run_leaf = run_leaf or default_run_leaf
     # Bind STREAM_LOG to the SHARED stream (ABSOLUTE) so the leaf dialectic — which runs in-process with
     # repo=<temp worktree> — appends to the shared log, not an ephemeral worktree-local one that is destroyed
     # with the worktree (the deep dialectic was both invisible to consumers AND lost). Absolute is required:
@@ -686,6 +730,10 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     if not os.environ.get("STREAM_LOG"):
         os.environ["STREAM_LOG"] = str(Path(repo).resolve() / ".agent-runs" / "stream.jsonl")
     emit = emit or stream_emit(repo)
+    default_leaf_path = run_leaf is None or run_leaf is default_run_leaf
+    run_leaf = run_leaf or default_run_leaf
+    if default_leaf_path or split is splitter.split:
+        check_launch_preconditions(repo, emit=emit)
     # the org's state STORE is durable + SHARED (so a consumer can READ current state, DB-style): write it where
     # STREAM_LOG points (the shared .agent-runs), not the ephemeral goal worktree. git refs are already
     # shared. `emit` is threaded in so every state OPERATION (create/load/save/update) also lands in the log.
@@ -989,7 +1037,11 @@ def main(argv=None) -> int:
     def _emit(e):
         emitter(e)                                     # keep the default rich logging
         events.append(e)
-    plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget, emit=_emit)
+    try:
+        plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget, emit=_emit)
+    except LaunchPreconditionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(json.dumps(plan, ensure_ascii=False, indent=2))
     # exit codes: 2 = HELD/sent back as underdetermined — the engine needs more info (ADR-0016 D1b), NOT a build;
     # 1 = built but not all done (or no plan); 0 = a real, non-empty, fully-done plan. A held goal must NOT
