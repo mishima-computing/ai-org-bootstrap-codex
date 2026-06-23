@@ -119,6 +119,58 @@ class BuildMapTest(unittest.TestCase):
             self.assertNotIn("malformed record must fail", absent_prompt)
 
 
+class ForwardScopePressureTest(unittest.TestCase):
+    """R3: scope pressure is explicit and self-checked before the violation (controller_scope stays the gate)."""
+
+    def _section(self, repo, contract):
+        bm = implement_host.build_map_for(
+            repo, raw_prompt(contract=contract), write_scope=contract.get("files_allowed_to_change"),
+        )
+        return implement_host.format_build_section(bm)
+
+    def test_tight_allow_and_deny_render_donottouch_and_self_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            contract = impl_contract(
+                files_allowed_to_change=["src/alpha.py"],
+                files_not_allowed_to_change=["tests/**", "docs/**"],
+            )
+            section = self._section(repo, contract)
+            # (a) explicit DO-NOT-TOUCH list naming the denied paths + the pre-finish self-check.
+            self.assertIn("DO-NOT-TOUCH", section)
+            self.assertIn("- tests/**", section)
+            self.assertIn("- docs/**", section)
+            self.assertIn("- src/alpha.py", section)  # allow-list surfaced explicitly too
+            self.assertIn("PRE-FINISH SELF-CHECK", section)
+            self.assertIn("STOP and report that aufheben must widen", section)
+
+    def test_no_deny_entries_emit_no_donottouch_noise(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            contract = impl_contract(
+                files_allowed_to_change=["src/*.py"], files_not_allowed_to_change=[],
+            )
+            section = self._section(repo, contract)
+            # (b) no spurious/empty DO-NOT-TOUCH block when nothing is denied.
+            self.assertNotIn("DO-NOT-TOUCH", section)
+            self.assertIn("ALLOWED to change", section)  # allow-list still rendered
+            self.assertIn("PRE-FINISH SELF-CHECK", section)  # self-check is allow-list-based, not deny-only
+
+    def test_why_line_and_build_map_json_unchanged_in_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            contract = impl_contract(files_not_allowed_to_change=["docs/**"])
+            bm = implement_host.build_map_for(
+                repo, raw_prompt(contract=contract), write_scope=contract.get("files_allowed_to_change"),
+                goal_context={"structured_goal": {"negative_control": "old alpha rejected",
+                                                  "success_condition": "new alpha passes"}},
+            )
+            section = implement_host.format_build_section(bm)
+            # (c) WHY line and the build_map JSON dump remain present and unchanged in shape.
+            self.assertIn("WHY:present", section)
+            self.assertIn("```json\n" + json.dumps(bm, indent=2, ensure_ascii=False) + "\n```", section)
+
+
 class AdvisoryScopeTest(unittest.TestCase):
     def test_prelocalized_set_does_not_narrow_write_scope(self):
         with tempfile.TemporaryDirectory() as d:
