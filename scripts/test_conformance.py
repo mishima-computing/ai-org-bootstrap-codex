@@ -31,7 +31,7 @@ SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
 def fake_runner(table):
     """A runner that returns a canned RunResult per command. Unknown commands surface as a loud failure so a
     test never silently passes against a command it did not stub."""
-    def _run(cmd, *, cwd=None, stdin=None):
+    def _run(cmd, *, cwd=None, stdin=None, timeout=None):
         if cmd not in table:
             raise AssertionError(f"fake_runner: unstubbed command {cmd!r} (stubbed: {sorted(table)})")
         return table[cmd]
@@ -1274,7 +1274,26 @@ def test_forbidden_pattern_straggler_blocks_with_file_line():
     assert f["pattern"] == "_scaffold_seed_commit" and f["count"] == 1, f
     assert f["hits"] == ["demo.py:2"], f                      # snake_case ref caught (no token-regex blind spot)
     assert "renamed to _seed_commit" in f["detail"], f
-    print("ok  forbidden-pattern: a rename straggler blocks with pattern + file:line hit")
+    # FIX 2 / acceptance (a): the BLOCKING finding carries an ACTIONABLE fix_hint naming the pattern, the
+    # remove/rename action, and the captured hit location(s) — not a vague "X failed".
+    fh = f["fix_hint"]
+    assert fh and "_scaffold_seed_commit" in fh, f
+    assert ("remove" in fh.lower() or "rename" in fh.lower()), f
+    assert "demo.py:2" in fh, f                                # references the actual hit location
+    assert "renamed to _seed_commit" in fh, f                  # carries the reason when declared
+    print("ok  forbidden-pattern: a rename straggler blocks with pattern + file:line hit + actionable fix_hint")
+
+
+def test_forbidden_pattern_fix_hint_counts_unshown_hits():
+    # the hit evidence is capped (_FORBIDDEN_MAX_HITS_REPORTED), so the fix_hint must still say HOW MANY total
+    # occurrences remain — "(and N more)" — so the implementer does not stop after fixing only the shown few.
+    body = "TODO\n" * 8                                        # 8 occurrences, only ~5 hits captured
+    with _ws({"a.py": body}) as d:
+        rep = conf.run_conformance(_fp_contract([{"pattern": "TODO"}]), fake_runner({}), cwd=d)
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["count"] == 8 and len(f["hits"]) == conf._FORBIDDEN_MAX_HITS_REPORTED, f
+    assert "8 occurrence" in f["fix_hint"] and "more)" in f["fix_hint"], f
+    print("ok  forbidden-pattern: fix_hint counts total occurrences incl. unshown hits")
 
 
 def test_forbidden_pattern_clean_tree_passes():
@@ -1379,6 +1398,178 @@ def test_schema_forbidden_patterns_is_optional_and_shaped():
         "max_occurrences must be >= 0"
     assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "junk": 1}]}), "no extra props"
     print("ok  schema: forbidden_patterns is optional and shape-constrained")
+
+
+# --- regression-suite gate (ADR-0009 / ADR-0016): the cheap, kind-agnostic "did the change break working code" gate ---
+
+def _rs_contract(suite, kind="none"):
+    """A contract carrying regression_suite. kind='none' proves the gate is kind-agnostic — it fires even where
+    no per-kind conformance profile exists."""
+    return {"role_id": "aufheben-designer", "deliverable_kind": kind, "regression_suite": suite}
+
+
+def test_regression_suite_failure_blocks_with_exit_code_and_tail():
+    # (a) the pre-existing suite now fails (exit 1) -> a BLOCKING `regression` finding with exit code + output tail.
+    cmd = "python3 -m pytest -q"
+    runner = fake_runner({cmd: R(1, "collected 3 items\n", "FAILED tests/test_core.py::test_add - assert 3 == 4\n")})
+    rep = conf.run_conformance(_rs_contract({"command": cmd, "reason": "core suite must stay green"}), runner)
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    assert f["severity"] == "major" and not f["passed"], f
+    assert f["check"] == "regression_suite" and f["command"] == cmd and f["exit_code"] == 1, f
+    assert "FAILED tests/test_core.py::test_add" in f["output_tail"], f      # failing test name captured
+    assert "core suite must stay green" in f["detail"], f
+    # FIX 2 / acceptance (b): the BLOCKING finding carries an ACTIONABLE fix_hint naming the failing command,
+    # the exit code, the "do not modify the tests" guardrail, and the parsed failing test name.
+    fh = f["fix_hint"]
+    assert fh and cmd in fh, f
+    assert "do not modify the tests" in fh.lower(), f
+    assert "exit 1" in fh, f                                   # the exit code is on the hint, not only the detail
+    assert "tests/test_core.py::test_add" in fh, f            # failing test name parsed out of the output
+    print("ok  regression: a failing pre-existing suite blocks with exit code + failing-test tail + fix_hint")
+
+
+def test_regression_fix_hint_present_even_when_tests_unparseable():
+    # acceptance (d): when the failing test names can't be parsed, the fix_hint is STILL emitted (command +
+    # exit code + the no-edit-tests guardrail are mechanically known) — concrete, never vague filler, never
+    # omitted just because the test names were not extractable.
+    cmd = "make check"
+    rep = conf.run_regression_suite(_rs_contract({"command": cmd}),
+                                    fake_runner({cmd: R(2, "build noise with no test ids\n", "boom\n")}))
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    fh = f["fix_hint"]
+    assert fh and cmd in fh and "exit 2" in fh and "do not modify the tests" in fh.lower(), f
+    assert "Failing:" not in fh, f                             # no fabricated test names when none parsed
+    print("ok  regression: fix_hint emitted (command + exit + guardrail) even when test names unparseable")
+
+
+def test_regression_suite_passing_command_is_clean_pass():
+    # (b) the suite still passes (exit 0) -> no finding, the gate passes.
+    cmd = "python3 scripts/test_foo.py"
+    rep = conf.run_conformance(_rs_contract({"command": cmd}), fake_runner({cmd: R(0, "5 passed\n", "")}))
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    print("ok  regression: a passing suite (exit 0) passes with no finding")
+
+
+def test_regression_suite_absent_is_noop():
+    # (c) no regression_suite declared -> not applicable, no finding, no false positive (runner never invoked).
+    rep = conf.run_conformance({"role_id": "aufheben-designer", "deliverable_kind": "none"}, fake_runner({}))
+    assert rep["applicable"] is False and rep["passed"] and rep["findings"] == [], rep
+    # an empty / command-less suite is likewise a vacuous pass, not a fabricated finding.
+    for empty in ({}, {"command": ""}, {"command": "   "}, {"reason": "no command"}):
+        r = conf.run_regression_suite({"regression_suite": empty}, fake_runner({}))
+        assert r["applicable"] is False and r["passed"] and r["findings"] == [], (empty, r)
+    print("ok  regression: absent / command-less -> no-op, runner never run, no false positive")
+
+
+def test_regression_suite_garbled_runner_output_does_not_crash():
+    # (d) a garbled / partial runner result (None fields, missing returncode, non-string output) must still
+    # produce a finding without crashing the gate.
+    cmd = "make test"
+
+    class _Garbled:                                            # a result missing returncode, with odd output types
+        stdout = None
+        stderr = 12345
+
+    for bad in (_Garbled(), None, R(2, None, None)):
+        r = conf.run_regression_suite(_rs_contract({"command": cmd}), lambda c, *, cwd=None, timeout=None, _b=bad: _b)
+        f = next(f for f in r["findings"] if f["source"] == "regression")
+        assert not r["passed"] and isinstance(f["output_tail"], str), (bad, r)   # never raises, tail is a string
+    print("ok  regression: garbled / partial runner output yields a finding, never crashes")
+
+
+def test_regression_suite_timeout_passed_to_runner():
+    # (e) the declared timeout_seconds is passed through to the runner; absent -> the default budget is used.
+    cmd = "python3 -m pytest -q"
+    seen = {}
+
+    def spy(c, *, cwd=None, timeout=None):
+        seen["cmd"], seen["timeout"] = c, timeout
+        return R(0, "", "")
+
+    conf.run_regression_suite(_rs_contract({"command": cmd, "timeout_seconds": 45}), spy)
+    assert seen["cmd"] == cmd and seen["timeout"] == 45, seen
+    seen.clear()
+    conf.run_regression_suite(_rs_contract({"command": cmd}), spy)
+    assert seen["timeout"] == conf._REGRESSION_DEFAULT_TIMEOUT_SECONDS, seen
+    # and the failing finding records the budget it ran under.
+    rep = conf.run_regression_suite(_rs_contract({"command": cmd, "timeout_seconds": 45}),
+                                    lambda c, *, cwd=None, timeout=None: R(1, "", "boom"))
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    assert f["timeout_seconds"] == 45, f
+    print("ok  regression: timeout_seconds is passed to the runner (and recorded on the finding)")
+
+
+def test_subprocess_runner_honors_per_call_timeout_override():
+    # the production runner accepts a per-call timeout override (so a regression_suite's budget is real, not
+    # only the baked-in default) while staying backward compatible with timeout-less callers.
+    run = conf.subprocess_runner(timeout=30)
+    fast = run("printf ok", cwd=None)                          # no override -> default budget, runs fine
+    assert fast.returncode == 0 and "ok" in fast.stdout, fast
+    slow = run("sleep 2", timeout=1)                           # override below the sleep -> times out (124)
+    assert slow.returncode == 124 and "timeout after 1" in slow.stderr, slow
+    print("ok  regression: subprocess_runner honors a per-call timeout override")
+
+
+def test_regression_suite_folds_alongside_cli_checker():
+    # the gate is kind-agnostic: it rides ALONGSIDE a per-kind (cli) checker. A clean CLI run with a broken
+    # regression suite still blocks, and checks_run sums both gates.
+    cmd = "python3 -m pytest -q"
+    contract = {"role_id": "aufheben-designer", "deliverable_kind": "cli",
+                "conformance": {"cli": {"entrypoint": {"invocation": "echo hi"},
+                                        "examples": [{"invocation": "", "expected_status": 0}]}},
+                "regression_suite": {"command": cmd}}
+    rep = conf.run_conformance(contract, fake_runner({"echo hi": R(0, "", ""), cmd: R(1, "", "FAILED\n")}))
+    sources = {f["source"] for f in rep["findings"]}
+    assert not rep["passed"] and "regression" in sources, rep
+    assert rep["checks_run"] >= 2, rep                         # cli examples + 1 regression suite
+    print("ok  regression: folds alongside the per-kind (cli) checker")
+
+
+def test_regression_is_a_deterministic_impl_source():
+    # the source must be a BLOCKING deterministic implementation source, so gate-behind routes a regression to
+    # the implementer ONLY and skips the expensive Linon reviewer.
+    assert "regression" in cp._DETERMINISTIC_IMPL_SOURCES
+    findings = [{"source": "regression", "passed": False}]
+    assert cp._repair_roles_for(findings, ["aufheben-designer", "implementer"]) == ["implementer"], \
+        "a pure regression defect must route to the implementer only"
+    print("ok  regression: recognized as a deterministic impl source (implementer-only repair)")
+
+
+def test_other_gate_findings_omit_fix_hint_no_vague_filler():
+    # acceptance (d): fix_hint is ADDITIVE and only on gates whose fix is mechanically known. A gate whose
+    # remediation is NOT known (e.g. a cli exit-status mismatch — the implementer must reason about WHY) emits
+    # NO fix_hint key rather than vague filler.
+    profile = {"entrypoint": {"invocation": "mytool"},
+               "examples": [{"invocation": "--bad", "expected_status": 0}]}
+    rep = conf.run_cli_conformance(_cli_contract(profile), fake_runner({"mytool --bad": R(3, "", "nope")}))
+    f = next(f for f in rep["findings"] if f["check"] == "exit_status")
+    assert "fix_hint" not in f, f                              # absent, not present-but-empty
+    print("ok  fix_hint: omitted (not vague filler) on gates whose remediation is not mechanically known")
+
+
+def test_schema_regression_suite_is_optional_and_shaped():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h", "deliverable_kind": "none"}
+    assert v.is_valid(base), list(v.iter_errors(base))         # optional: absent still validates
+    ok = {**base, "regression_suite": {"command": "python3 -m pytest -q", "timeout_seconds": 120,
+                                       "reason": "core suite must stay green"}}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert not v.is_valid({**base, "regression_suite": {"reason": "no command"}}), "command is required"
+    assert not v.is_valid({**base, "regression_suite": {"command": ""}}), "command must be non-empty"
+    assert not v.is_valid({**base, "regression_suite": {"command": "x", "timeout_seconds": 0}}), \
+        "timeout_seconds must be >= 1"
+    assert not v.is_valid({**base, "regression_suite": {"command": "x", "junk": 1}}), "no extra props"
+    print("ok  schema: regression_suite is optional and shape-constrained")
 
 
 if __name__ == "__main__":

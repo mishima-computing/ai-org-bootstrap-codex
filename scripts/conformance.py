@@ -957,9 +957,20 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
                 detail += f" — {reason}"
             if hits:
                 detail += "; e.g. " + ", ".join(hits)
+            # ACTIONABLE fix_hint (ADR-0016): a "dumb" implementer told only "X failed" repeats the mistake on
+            # repair, so the BLOCKING finding carries a concrete WHAT+WHERE remediation — the hit locations are
+            # already captured, so the fix is mechanically known (never vague filler).
+            fix_hint = f"Remove or rename all {count} occurrence(s) of `{raw}` in the produced tree"
+            if hits:
+                shown = ", ".join(hits)
+                more = "" if count <= len(hits) else f" (and {count - len(hits)} more)"
+                fix_hint += f" at {shown}{more}"
+            fix_hint += "."
+            if reason:
+                fix_hint += f" {reason}."
             findings.append(_forbidden_finding(
                 "forbidden_pattern", "major", False, detail,
-                pattern=raw, count=count, max_occurrences=max_occ, hits=hits))
+                pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint))
     return findings
 
 
@@ -976,6 +987,118 @@ def run_forbidden_patterns(contract: dict, *, cwd: Optional[str] = None) -> dict
         "passed": all(f["passed"] for f in findings),
         "findings": findings,
         "checks_run": len(patterns),
+    }
+
+
+# Regression-suite gate (ADR-0009 / ADR-0016): the cheapest catch for the BIGGEST modification-defect class —
+# "the change broke previously-working code" (SWE-CI: ~73.6% of modification-task failures). The contract names
+# a PRE-EXISTING repo test command that must still pass (exit 0) after the change; the gate re-runs it through
+# the conformance runner. A green suite is a FACT (~0-FP — it either passes or it doesn't), so this moves a
+# deterministically-catchable regression off the expensive semantic reviewer (Linon). Like forbidden_patterns
+# it is KIND-AGNOSTIC and folds into run_conformance alongside the kind-specific checker.
+_REGRESSION_DEFAULT_TIMEOUT_SECONDS = 300
+_REGRESSION_TAIL_CHARS = 1200          # bound the captured failure output so a chatty suite cannot flood the finding
+
+
+def _regression_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
+    f = {"source": "regression", "check": check, "severity": severity, "passed": passed, "detail": detail}
+    f.update(extra)
+    return f
+
+
+# Failing-test extraction for the actionable fix_hint: pytest (`FAILED path::test` / `path::test FAILED`) and
+# unittest (`FAIL: test (Case)` / `ERROR: ...`) are the common forms. Best-effort and bounded — naming the
+# broken test makes the remediation concrete; an unparseable suite simply omits the names, never guesses.
+_FAILING_TEST_RE = re.compile(
+    r"FAILED\s+(\S+::\S+|\S+)"          # pytest:   FAILED tests/x.py::test_a
+    r"|(\S+::\S+)\s+FAILED"             # pytest:   tests/x.py::test_a FAILED
+    r"|(?:FAIL|ERROR):\s+(\S+)"         # unittest: FAIL: test_a (mod.Case)
+)
+_FAILING_TESTS_REPORTED = 5
+
+
+def _parse_failing_tests(stdout, stderr) -> list:
+    """Pull up to a few failing test identifiers out of the suite's output for the fix_hint. Defensive:
+    coerces non-string output and never raises (a garbled result yields []), preserving first-seen order."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for val in (stdout, stderr):
+        try:
+            text = val if isinstance(val, str) else ("" if val is None else str(val))
+        except Exception:
+            continue
+        for m in _FAILING_TEST_RE.finditer(text):
+            name = next((g for g in m.groups() if g), None)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+                if len(names) >= _FAILING_TESTS_REPORTED:
+                    return names
+    return names
+
+
+def _regression_output_tail(stdout, stderr, limit: int = _REGRESSION_TAIL_CHARS) -> str:
+    """Build a bounded tail from the suite's output (the failing test names usually live here). Defensive on
+    purpose: coerces non-string / None / missing output and never raises, so a garbled runner result yields an
+    empty tail rather than crashing the gate (acceptance (d))."""
+    parts: list[str] = []
+    for label, val in (("stdout", stdout), ("stderr", stderr)):
+        try:
+            text = val if isinstance(val, str) else ("" if val is None else str(val))
+            text = _normalize(text)
+        except Exception:
+            text = ""
+        if text:
+            parts.append(f"{label}: {text[-limit:]}")
+    return " | ".join(parts)
+
+
+def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """The kind-agnostic regression-suite gate. Applicable only when the contract declares a `regression_suite`
+    with a non-empty `command` — otherwise a vacuous pass (no finding, no false positive). Runs the declared
+    pre-existing test command THROUGH the runner (the box boundary) against the produced artifact; a non-zero
+    exit emits ONE BLOCKING `regression` finding capturing the command, exit code, declared timeout, and an
+    output tail. The `timeout_seconds` budget is passed to the runner so a hung suite cannot stall the gate."""
+    suite = contract.get("regression_suite")
+    if not isinstance(suite, dict):
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    command = suite.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    timeout = suite.get("timeout_seconds", _REGRESSION_DEFAULT_TIMEOUT_SECONDS)
+    res = runner(command, cwd=cwd, timeout=timeout)
+    returncode = getattr(res, "returncode", None)              # garbled result -> None != 0 -> blocks, never crashes
+    stdout = getattr(res, "stdout", "")
+    stderr = getattr(res, "stderr", "")
+
+    findings: list[dict] = []
+    if returncode != 0:
+        tail = _regression_output_tail(stdout, stderr)
+        detail = f"regression suite `{command}`: expected exit 0, got {returncode} — the change broke previously-working code"
+        reason = suite.get("reason")
+        if reason:
+            detail += f" — {reason}"
+        if tail:
+            detail += f"; output tail: {tail}"
+        # ACTIONABLE fix_hint (ADR-0016): tell the implementer exactly WHAT broke and WHAT NOT to do, so a
+        # repair does not just re-run the same logic or (worse) edit the tests to pass. The command + exit code
+        # are mechanically known; the failing test name(s) are added when parseable from the output.
+        failing = _parse_failing_tests(stdout, stderr)
+        fix_hint = (f"Your change broke the pre-existing suite `{command}` (exit {returncode}). "
+                    "Inspect the failing output below; revert or correct the logic affecting it — "
+                    "do not modify the tests to pass.")
+        if failing:
+            fix_hint += " Failing: " + ", ".join(failing) + "."
+        findings.append(_regression_finding(
+            "regression_suite", "major", False, detail,
+            command=command, exit_code=returncode, timeout_seconds=timeout, output_tail=tail,
+            fix_hint=fix_hint))
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": 1,
     }
 
 
@@ -999,11 +1122,13 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
     This is the single entry point the pipeline calls, so adding a real checker later is a one-line wiring in
     `_SLOT_CHECKERS` (or the `cli` branch), not a change to the gate's call site.
 
-    The kind-agnostic forbidden-pattern gate (ADR-0016 D7) ALWAYS folds in afterward when the contract declares
-    `forbidden_patterns` — so an incomplete rename's stragglers block on ANY deliverable_kind (including `none`),
-    not just CLI."""
+    The kind-agnostic gates ALWAYS fold in afterward when their fields are declared, so they block on ANY
+    deliverable_kind (including `none`), not just CLI: the forbidden-pattern gate (ADR-0016 D7) when the
+    contract declares `forbidden_patterns` (an incomplete rename's stragglers), and the regression-suite gate
+    when it declares `regression_suite` (the change broke previously-working code — SWE-CI's biggest class)."""
     base = _dispatch_kind_conformance(contract, runner, cwd=cwd, http_request=http_request)
-    return _merge_reports(base, run_forbidden_patterns(contract, cwd=cwd))
+    base = _merge_reports(base, run_forbidden_patterns(contract, cwd=cwd))
+    return _merge_reports(base, run_regression_suite(contract, runner, cwd=cwd))
 
 
 def _dispatch_kind_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
@@ -1195,12 +1320,20 @@ def subprocess_runner(timeout: float = 60.0, *, mem_bytes: int = 512 * 1024 * 10
     the box's cgroups; this protects the gate even outside the box (e.g. the local single-host simulation)."""
     import subprocess
 
-    preexec = _rlimit_preexec(mem_bytes, int(timeout) + 1, fsize_bytes) if os.name == "posix" else None
+    default_timeout = timeout
+    default_preexec = _rlimit_preexec(mem_bytes, int(default_timeout) + 1, fsize_bytes) if os.name == "posix" else None
 
-    def _run(cmd: str, *, cwd: Optional[str] = None, stdin: Optional[str] = None) -> RunResult:
+    def _run(cmd: str, *, cwd: Optional[str] = None, stdin: Optional[str] = None,
+             timeout: Optional[float] = None) -> RunResult:
+        # A per-call `timeout` override (e.g. a regression_suite's `timeout_seconds`) wins over the baked-in
+        # default; the CPU rlimit is recomputed to match so the override is actually honored, not just the
+        # wall-clock. None -> the runner's default budget (backward compatible with existing callers).
+        effective = default_timeout if timeout is None else timeout
+        preexec = default_preexec if timeout is None else (
+            _rlimit_preexec(mem_bytes, int(effective) + 1, fsize_bytes) if os.name == "posix" else None)
         try:
             proc = subprocess.run(
-                cmd, shell=True, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=timeout,
+                cmd, shell=True, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=effective,
                 preexec_fn=preexec,
             )
             return RunResult(proc.returncode, _cap_output(proc.stdout, max_output),
@@ -1209,6 +1342,6 @@ def subprocess_runner(timeout: float = 60.0, *, mem_bytes: int = 512 * 1024 * 10
             out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             return RunResult(124, _cap_output(out, max_output),
-                             _cap_output(err, max_output) + f"\n<conformance: timeout after {timeout}s>")
+                             _cap_output(err, max_output) + f"\n<conformance: timeout after {effective}s>")
 
     return _run
