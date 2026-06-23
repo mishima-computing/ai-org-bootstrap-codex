@@ -1315,6 +1315,197 @@ def test_main_returns_exit_2_on_intake_hold():
     print("ok  main() returns exit 2 on an intake HOLD (underdetermined goal)")
 
 
+# ---------------------------------------------------------------------------------------------------
+# GOAL WORKTREE (default ON): a DIRECT controller_goal launch runs the goal in an ISOLATED worktree of
+# --repo so --repo's main never moves DURING the run; a GREEN goal is merged back into local main. Each
+# test uses a temp git repo + a stubbed/fast run_leaf (no real dialectic), per the falsifiable acceptance.
+# ---------------------------------------------------------------------------------------------------
+
+def _wt_repo(d, name="r"):
+    import os, subprocess
+    repo = os.path.join(d, name); os.mkdir(repo)
+    def git(*a): return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+    git("init", "-b", "main"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    open(os.path.join(repo, "seed.txt"), "w").write("seed\n"); git("add", "-A"); git("commit", "-m", "base")
+    return repo, git
+
+
+def _rev(git, ref="HEAD"):
+    return git("rev-parse", ref).stdout.strip()
+
+
+def test_goal_worktree_main_unchanged_during_run_commits_on_branch():
+    # ACCEPTANCE (a): with isolation ON (default), main HEAD does NOT move DURING the run — the goal's
+    # commits land on goal/<id>, not main. The leaf runs in an ISOLATED worktree, not --repo itself.
+    import tempfile, os, subprocess
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+        seen = {}
+
+        def run_leaf(r, t):
+            seen["isolated"] = os.path.realpath(r) != os.path.realpath(repo)   # runs in a worktree, not --repo
+            seen["main_during"] = _rev(git, "main")                            # main HEAD WHILE the leaf runs
+            open(os.path.join(r, "feat.py"), "w").write("feature\n")
+            subprocess.run(["git", "-C", r, "add", "-A"], capture_output=True)
+            subprocess.run(["git", "-C", r, "commit", "-m", "leaf"], capture_output=True)
+            seen["branch_after_commit"] = _rev(git, "goal/acc-a")             # the goal branch tip
+            seen["main_after_commit"] = _rev(git, "main")                     # main STILL the base
+            return {"outcome": "converged", "commit": None}
+
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="acc-a")
+        assert seen["isolated"], "the goal must run in an isolated worktree, not --repo directly"
+        assert seen["main_during"] == base, ("main HEAD moved during the run", seen["main_during"], base)
+        assert seen["branch_after_commit"] and seen["branch_after_commit"] != base, \
+            ("the goal's commit must land on goal/<id>", seen)
+        assert seen["main_after_commit"] == base, ("main must stay at base DURING the run", seen)
+    print("ok  (a) isolation ON: main unchanged during the run; goal commits land on goal/<id>")
+
+
+def test_goal_worktree_green_merges_into_local_main():
+    # ACCEPTANCE (b): on a GREEN goal the result is merged into LOCAL main afterward — main HEAD advances to
+    # include the goal's work (the town renders local main, so it must reach it) and the worktree is removed.
+    import tempfile, os, subprocess
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+
+        def run_leaf(r, t):
+            open(os.path.join(r, "feat.py"), "w").write("feature\n")
+            subprocess.run(["git", "-C", r, "add", "-A"], capture_output=True)
+            subprocess.run(["git", "-C", r, "commit", "-m", "leaf"], capture_output=True)
+            return {"outcome": "converged", "commit": None}
+
+        events = []
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="acc-b", emit=events.append)
+        assert _rev(git, "main") != base, "main HEAD must advance to include the goal's work after a green goal"
+        assert os.path.isfile(os.path.join(repo, "feat.py")), "the goal's file must be on local main's tree"
+        tracked = git("ls-files", "feat.py").stdout.strip()
+        assert tracked == "feat.py", ("the goal's file must be committed on main", tracked)
+        assert any(e.get("type") == "goal_merged" for e in events), "a green goal emits goal_merged"
+        # the worktree is removed and the merged branch deleted on success
+        wts = subprocess.run(["git", "-C", repo, "worktree", "list"], capture_output=True, text=True).stdout
+        assert "goal-wt-" not in wts, ("the goal worktree must be removed on success", wts)
+        assert git("rev-parse", "--verify", "--quiet", "goal/acc-b").returncode != 0, "merged branch deleted"
+    print("ok  (b) green goal merges into local main (HEAD advances) and the worktree is cleaned up")
+
+
+def test_goal_worktree_does_not_sweep_uncommitted_repo_edits():
+    # ACCEPTANCE (c): an uncommitted file sitting in --repo's working tree is NOT swept into the goal's
+    # commits (the pollution bug). The goal runs off a CLEAN HEAD in the worktree, so the stray work is
+    # invisible to it; after the green merge, the stray file is still UNTRACKED and in no commit.
+    import tempfile, os, subprocess
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        # a stray UNTRACKED file + an uncommitted edit to a TRACKED file, both sitting in --repo's tree
+        open(os.path.join(repo, "dirty.txt"), "w").write("hand-edited, never committed\n")
+        open(os.path.join(repo, "seed.txt"), "w").write("seed\nlocal uncommitted edit\n")
+        split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+
+        def run_leaf(r, t):
+            assert not os.path.exists(os.path.join(r, "dirty.txt")), "the stray file leaked into the worktree"
+            assert "uncommitted" not in open(os.path.join(r, "seed.txt")).read(), "the stray edit leaked in"
+            open(os.path.join(r, "feat.py"), "w").write("feature\n")
+            subprocess.run(["git", "-C", r, "add", "-A"], capture_output=True)
+            subprocess.run(["git", "-C", r, "commit", "-m", "leaf"], capture_output=True)
+            return {"outcome": "converged", "commit": None}
+
+        cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="acc-c")
+        # the stray file is in NO commit anywhere, and is still an untracked working-tree file
+        assert git("ls-files", "dirty.txt").stdout.strip() == "", "the stray file was swept into a commit"
+        all_blobs = git("log", "--all", "--name-only", "--format=").stdout
+        assert "dirty.txt" not in all_blobs, ("the stray file must be in no commit", all_blobs)
+        assert os.path.isfile(os.path.join(repo, "dirty.txt")), "the stray file must remain in the tree"
+        # the uncommitted tracked edit also never reached a commit (HEAD seed.txt has no local edit)
+        assert "uncommitted" not in git("show", "HEAD:seed.txt").stdout, "the stray edit was committed"
+    print("ok  (c) uncommitted --repo edits are NOT swept into the goal's commits (pollution bug fixed)")
+
+
+def test_goal_worktree_opt_out_runs_on_repo_directly():
+    # ACCEPTANCE (d): AI_ORG_GOAL_WORKTREE=off restores the OLD behavior — the goal runs on --repo directly
+    # (for callers that manage isolation themselves, e.g. the cockpit).
+    import tempfile, os, subprocess
+    old = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+            seen = {}
+
+            def run_leaf(r, t):
+                seen["on_repo"] = os.path.realpath(r) == os.path.realpath(repo)   # runs on --repo, no worktree
+                return {"outcome": "converged", "commit": None}
+
+            events = []
+            cg.run_goal(repo, "build it", run_leaf=run_leaf, split=split, goal_id="acc-d", emit=events.append)
+            assert seen.get("on_repo"), "opt-out must run the goal on --repo directly (no worktree)"
+            assert not any(e.get("type") == "goal_worktree" for e in events), "opt-out emits no goal_worktree"
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old
+    print("ok  (d) AI_ORG_GOAL_WORKTREE=off restores running on --repo directly")
+
+
+def test_goal_worktree_falls_back_when_isolation_impossible():
+    # ACCEPTANCE (e): a non-git --repo, or a failing `worktree add`, falls back to a direct run — no crash.
+    import tempfile, os, subprocess
+    # (1) _isolate_goal_repo returns None for a non-git dir and for a repo with no commits (unborn HEAD ->
+    #     `worktree add` cannot branch off it): both real failure-to-isolate paths.
+    with tempfile.TemporaryDirectory() as d:
+        nongit = os.path.join(d, "plain"); os.mkdir(nongit)
+        assert cg._isolate_goal_repo(nongit, "goal/x") is None, "non-git -> fall back (None)"
+        empty = os.path.join(d, "empty"); os.mkdir(empty)
+        subprocess.run(["git", "-C", empty, "init", "-q", "-b", "main"], capture_output=True)
+        assert cg._isolate_goal_repo(empty, "goal/x") is None, "unborn HEAD (worktree add fails) -> None"
+    # (2) run_goal on a non-git --repo must NOT crash and must run the leaf on --repo directly.
+    with tempfile.TemporaryDirectory() as d:
+        nongit = os.path.join(d, "plain"); os.mkdir(nongit)
+        split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+        seen = {}
+
+        def run_leaf(r, t):
+            seen["r"] = os.path.realpath(r)
+            return {"outcome": "converged", "commit": None}
+
+        events = []
+        plan = cg.run_goal(nongit, "build it", run_leaf=run_leaf, split=split, emit=events.append)
+        assert seen.get("r") == os.path.realpath(nongit), "fallback must run the leaf on --repo directly"
+        assert not any(e.get("type") == "goal_worktree" for e in events), "no worktree was created"
+        assert plan, "the goal still ran to a plan (no crash)"
+    print("ok  (e) non-git / failed worktree-add falls back to a direct run (no crash)")
+
+
+def test_merge_goal_to_main_leaves_main_clean_on_conflict():
+    # POINT 2 (conflict guard): if local main moved under the run to a CONFLICTING state, the merge does not
+    # corrupt main — it aborts and main keeps its own HEAD, branch left intact for inspection.
+    import tempfile, os, subprocess
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        # a goal branch edits feat.py off base
+        wt = os.path.join(d, "wt")
+        git("worktree", "add", "-q", wt, "-b", "goal/conf", "HEAD")
+        open(os.path.join(wt, "feat.py"), "w").write("branch version\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "branch feat"], capture_output=True)
+        # main moves to a CONFLICTING version of the same file
+        open(os.path.join(repo, "feat.py"), "w").write("main version\n")
+        git("add", "-A"); git("commit", "-m", "main feat")
+        main_before = _rev(git, "main")
+        ok = cg._merge_goal_to_main(repo, "goal/conf", base, "main")
+        assert ok is False, "a conflicting merge must report failure, not pretend success"
+        assert _rev(git, "main") == main_before, "main must keep its own HEAD (uncorrupted) on conflict"
+        assert git("rev-parse", "--verify", "--quiet", "goal/conf").returncode == 0, "branch left intact"
+        # no merge is left in-progress (MERGE_HEAD absent)
+        assert git("rev-parse", "--verify", "--quiet", "MERGE_HEAD").returncode != 0, "merge aborted cleanly"
+    print("ok  (point 2) a conflicting merge aborts -> main stays clean, branch retained")
+
+
 if __name__ == "__main__":
     import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
