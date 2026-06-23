@@ -401,6 +401,150 @@ class ControllerPipelineTests(unittest.TestCase):
                  "aufheben-designer", "implementer", "linon"],
             )
 
+    # ---- gate-behind: skip the expensive Linon reviewer when a cheap deterministic gate already blocks ----
+    @staticmethod
+    def _blocking_conf_report():
+        """A `block`-mode conformance failure — folds into the convergence findings, so it BLOCKS this
+        iteration (its source is deterministic-impl, so repair routes to the implementer)."""
+        return {"applicable": True, "passed": False, "checks_run": 1,
+                "findings": [{"source": "cli-conformance", "check": "probe", "passed": False,
+                              "severity": "major", "detail": "end-to-end probe failed"}]}
+
+    @staticmethod
+    def _stream_events(stream_path):
+        return [json.loads(line) for line in Path(stream_path).read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def _linon_carrier_calls(self):
+        return [call for call in self.calls if call[0] == "linon"]
+
+    def test_blocking_cheap_gate_skips_linon_entirely_first_pass(self):
+        # ACCEPTANCE 1: a blocking cheap-gate finding -> NO *-linon stage, a linon_skipped record, no fabricated
+        # stefan/linon pass in required_ok, and the loop continues (not converged).
+        with tempfile.TemporaryDirectory() as td:
+            stream = Path(td) / "stream.jsonl"
+            with mock.patch.dict(os.environ, {"STREAM_LOG": str(stream)}), \
+                 mock.patch.object(pipeline, "_shadow_conformance",
+                                   lambda repo, results, run_id, runner=None: self._blocking_conf_report()):
+                result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test",
+                                               cache=False, max_repair_iterations=1)
+            events = self._stream_events(stream)
+
+        stages = result["manifest"]["stages"]
+        self.assertNotIn("linon", [stage["role"] for stage in stages])
+        self.assertFalse(any(stage["run_id"].endswith("-linon") for stage in stages))
+        self.assertEqual(self._linon_carrier_calls(), [])           # no carrier call -> no tokens, no wall-clock
+        self.assertNotIn("linon", result["required_ok"])            # NOT fabricated (ADR-0016 D5)
+        self.assertNotIn("stefan", result["required_ok"])
+        skips = [e for e in events if e.get("type") == "linon_skipped"]
+        self.assertTrue(skips)
+        self.assertEqual(skips[0]["source"], "linon")
+        self.assertEqual(skips[0]["iteration"], 0)
+        self.assertIn("conformance", skips[0]["reason"])            # the cheap gate that blocked
+        self.assertFalse(result["converged"])                       # findings non-empty -> loop continues
+        self.assertGreaterEqual(result["linon_findings_count"], 1)
+
+    def test_clean_cheap_gates_run_full_linon_unchanged(self):
+        # ACCEPTANCE 2: a gate-CLEAN iteration runs the FULL linon stage, byte-for-byte the same invocation as
+        # before gate-behind (same scope/inputs/run-id), and its verdict is recorded.
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+
+        linon_calls = self._linon_carrier_calls()
+        self.assertEqual(len(linon_calls), 1)
+        role, payload, run_id, cache, _contract = linon_calls[0]
+        self.assertEqual(run_id, "pipe-test-linon")                 # same stage run-id
+        self.assertFalse(cache)
+        # linon saw the implementer's diff (the terminal-write verifier inputs) — unchanged scope
+        self.assertEqual(payload["inputs"]["implementer"]["diff_artifact"]["sha256"], "diff-sha-implementer")
+        self.assertTrue(result["required_ok"]["linon"])             # verdict recorded
+        self.assertIn("pipe-test-linon", [stage["run_id"] for stage in result["manifest"]["stages"]])
+        self.assertTrue(result["converged"])
+
+    def test_converged_only_via_gate_clean_iteration_that_ran_linon(self):
+        # ACCEPTANCE 3 (verdict-safety): the ONLY path to required_ok["linon"]==True / converged is a gate-clean
+        # iteration that ACTUALLY ran linon. Here iteration 0 is clean and linon passes (stage_ok) but FINDS a
+        # defect -> repair; the repair trips a cheap gate every iteration -> linon is SKIPPED -> the iter-0 linon
+        # pass MUST NOT survive as a stale green. Proves no green is ever declared on a skipped-linon iteration.
+        def _run(repo, contract, run_id, *, cache=True, **_):
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": f"impl-{len([c for c in self.calls if c[0] == role])}",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "required_checks": ["python -m unittest x"],
+                        "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["reach verifiers"],
+                        "deliverable_kind": "none",
+                    }
+                elif role == "linon":
+                    result = {"profile_id": "linon-review", "criterion_verdicts": [], "gaps": [],
+                              "findings": [{
+                                  "file": "scripts/controller_pipeline.py",
+                                  "line_range": {"start": 1, "end": 1}, "severity": "major",
+                                  "lens": "silent-failure", "basis": "static-read",
+                                  "claim": "linon finding", "evidence_ref": "scripts/controller_pipeline.py:1"}]}
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _run
+        conf_n = {"n": 0}
+
+        def _conf(repo, results, run_id, runner=None):           # clean on the FIRST pass, blocking thereafter
+            conf_n["n"] += 1
+            return None if conf_n["n"] == 1 else self._blocking_conf_report()
+
+        with tempfile.TemporaryDirectory() as td:
+            stream = Path(td) / "stream.jsonl"
+            with mock.patch.dict(os.environ, {"STREAM_LOG": str(stream)}), \
+                 mock.patch.object(pipeline, "_shadow_conformance", _conf):
+                result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test",
+                                               cache=False, max_repair_iterations=3)
+            events = self._stream_events(stream)
+
+        self.assertEqual(len(self._linon_carrier_calls()), 1)       # linon ran ONLY on the clean first pass
+        self.assertEqual(self._linon_carrier_calls()[0][2], "pipe-test-linon")
+        self.assertNotIn("linon", result["required_ok"])            # the stale iter-0 pass was DROPPED on skip
+        self.assertFalse(result["converged"])                       # never green on a skipped-linon iteration
+        skips = [e for e in events if e.get("type") == "linon_skipped"]
+        self.assertTrue(skips)                                      # repair iterations skipped linon
+        self.assertTrue(all(e["iteration"] >= 1 for e in skips))
+
+    def test_repair_loop_skips_linon_until_cheap_gates_pass(self):
+        # ACCEPTANCE 4: a repaired diff that STILL fails a cheap gate runs NO linon; once the gates pass, linon
+        # runs BEFORE convergence. conformance blocks the first pass + first repair, then goes clean.
+        conf_n = {"n": 0}
+
+        def _conf(repo, results, run_id, runner=None):
+            conf_n["n"] += 1
+            return self._blocking_conf_report() if conf_n["n"] <= 2 else None
+
+        with tempfile.TemporaryDirectory() as td:
+            stream = Path(td) / "stream.jsonl"
+            with mock.patch.dict(os.environ, {"STREAM_LOG": str(stream)}), \
+                 mock.patch.object(pipeline, "_shadow_conformance", _conf):
+                result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test",
+                                               cache=False, max_repair_iterations=3)
+            events = self._stream_events(stream)
+
+        # linon ran exactly once — in the FIRST repair iteration where the cheap gates finally passed.
+        linon_calls = self._linon_carrier_calls()
+        self.assertEqual(len(linon_calls), 1)
+        self.assertEqual(linon_calls[0][2], "pipe-test-repair2-linon")
+        # no linon stage exists before that iteration
+        linon_stage_ids = [s["run_id"] for s in result["manifest"]["stages"] if s["role"] == "linon"]
+        self.assertEqual(linon_stage_ids, ["pipe-test-repair2-linon"])
+        # two skips: the first pass (iter 0) and the first repair (iter 1)
+        skips = sorted(e["iteration"] for e in events if e.get("type") == "linon_skipped")
+        self.assertEqual(skips, [0, 1])
+        self.assertTrue(result["required_ok"]["linon"])
+        self.assertTrue(result["converged"])                        # clean gates + clean linon -> green
+
     def test_malformed_result_json_fails_stage_without_crashing(self):
         def _malformed_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
