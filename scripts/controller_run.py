@@ -83,13 +83,20 @@ def _inject_output_schema(repo: Path, contract: dict, schema_file: str) -> dict:
 
 
 def run(repo, contract: dict, run_id: str, *, cache=True,
-        resume_session=None) -> workflow.models.ControllerRunReport:
+        resume_session=None, goal_context=None) -> workflow.models.ControllerRunReport:
     repo = Path(repo).resolve()
     role = contract.get("role")
     info = _registry_role(repo, role)
     is_implementer = role == "implementer"
     is_producing = not info["write_scope"]  # read-only producers / verifiers emit JSON, write no files
     objective = contract.get("prompt", "")  # the RAW task, captured BEFORE role.md injection (pre-localize)
+    objective_payload = {}
+    try:
+        loaded = json.loads(objective or "")
+        objective_payload = loaded if isinstance(loaded, dict) else {}
+    except json.JSONDecodeError:
+        objective_payload = {}
+    inputs = objective_payload.get("inputs") if isinstance(objective_payload.get("inputs"), dict) else {}
 
     contract = _inject_role_instructions(repo, contract, info["role_file"])   # the carrier must SEE its role
     kwargs = {"cache_enabled": cache, "quality_gate_enabled": is_implementer,
@@ -112,6 +119,18 @@ def run(repo, contract: dict, run_id: str, *, cache=True,
             # guard-map.json artifact the injected evidence points at. Re-enable once the cache bundle
             # carries session_id + the guard-map artifact and stores only post-gate. (ADR-0014 follow-up.)
             kwargs["cache_enabled"] = False
+    if is_implementer:
+        import implement_host
+        kwargs["carrier_runner"] = implement_host.make_implement_carrier_runner(
+            repo,
+            objective=objective,
+            contract_inputs=inputs,
+            write_scope=list(contract.get("files_allowed_to_change") or []),
+            goal_context=goal_context,
+        )
+        # The build-map and WHY are runner-owned inputs, not CarrierContract fields, so they are not in the
+        # existing cache key. Do not replay a stale implementation without folding the current grounding.
+        kwargs["cache_enabled"] = False
     return workflow.run_contract(repo, contract, run_id, **kwargs)
 
 

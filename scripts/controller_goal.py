@@ -146,15 +146,32 @@ def _preserve_diff(repo, wt, task):
         return None
 
 
-def _call_leaf(run_leaf, repo, task, resume_diff=None):
-    """Call run_leaf, passing resume_diff only if it accepts it (test stubs take just (repo, task))."""
+def _call_leaf(run_leaf, repo, task, resume_diff=None, goal_context=None):
+    """Call run_leaf, passing optional execution context only if it accepts it."""
     try:
-        return run_leaf(repo, task, resume_diff=resume_diff)
+        return run_leaf(repo, task, resume_diff=resume_diff, goal_context=goal_context)
     except TypeError:
-        return run_leaf(repo, task)
+        try:
+            return run_leaf(repo, task, resume_diff=resume_diff)
+        except TypeError:
+            return run_leaf(repo, task)
 
 
-def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict:
+def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
+    """Call run_pipeline with goal_context when the implementation accepts it."""
+    import inspect
+    try:
+        sig = inspect.signature(run_pipeline)
+        if "goal_context" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            return run_pipeline(wt, objective, run_id, goal_context=goal_context)
+    except (TypeError, ValueError):
+        pass
+    return run_pipeline(wt, objective, run_id)
+
+
+def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_context=None) -> dict:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
     never collide on the shared repo (per-run isolation, ADR-0009). Returns
     {"outcome": "converged"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
@@ -186,7 +203,7 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None) -> dict
                        capture_output=True)
     try:
         try:
-            result = run_pipeline(wt, task["objective"], run_id)
+            result = _call_run_pipeline(run_pipeline, wt, task["objective"], run_id, goal_context)
         except Exception as exc:                               # noqa: BLE001 — a run_pipeline CRASH (a harness/
             # setup error, NOT carrier work): the registry/imports/worktree, e.g. AI_ORG_ROOT unset -> the
             # registry yaml missing. Surface it LOUDLY and classify it "crash"; NEVER swallow it. A swallowed
@@ -839,7 +856,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     _emit_splitter_speech(emit, leaf["id"], children)
                     continue
                 # no in-base children -> build the logic atomically on the seed (fallback)
-            outcome = run_leaf(repo, exec_leaf)
+            outcome = _call_leaf(run_leaf, repo, exec_leaf, goal_context=context)
             res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
             # A CRASH (harness/setup error, e.g. a missing registry / AI_ORG_ROOT unset) is systemic — every
             # leaf will crash the same way, so re-splitting/retrying only burns budget and ends in a quiet
@@ -859,7 +876,7 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 tries += 1
                 spent += 1
                 emit({"type": "leaf_resume", "id": leaf["id"], "attempt": tries})
-                outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"))
+                outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"), goal_context=context)
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
                 sig = _failure_sig(res)
                 if res.get("outcome") != "converged" and sig is not None and sig == prev_sig:
