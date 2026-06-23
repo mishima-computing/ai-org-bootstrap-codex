@@ -1,0 +1,13 @@
+[
+  {
+    "name": "integration",
+    "description": "Wiring a real production boundary (http/rpc/service). Use when the task exposes or calls an endpoint/service.",
+    "when": {
+      "task_types": ["integration", "wire", "endpoint"],
+      "deliverable_kinds": ["http_service", "rpc_service"],
+      "languages": []
+    },
+    "body": "Wire the production path for REAL and exercise it end-to-end. Match the contract's exact exit code / HTTP status / port / response shape. NEVER stub or mock the production boundary — a silently-stubbed path is a prod-incident pattern and fails first-pass: the conformance gate boots and probes the real artifact, so a mock will not satisfy it. Verify by running the real endpoint and observing its actual status + body; do not assert against a mock you control.",
+    "paired_gate": "real-wiring (Part A)"
+  }
+]
