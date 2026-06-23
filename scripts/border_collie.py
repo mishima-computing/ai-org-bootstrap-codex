@@ -11,6 +11,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -34,6 +35,9 @@ SCENT_DOC = "documented-absence"
 
 CHURN_THRESHOLD = 3
 SCAFFOLD_THRESHOLD = 2
+THETA0 = 0.5
+DELTA_THETA = 1.0
+TAU_MIN = 30.0
 
 _LANG_EXTS = {
     ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt", ".mjs",
@@ -47,6 +51,7 @@ class Bark:
     node: str
     scent: str
     text: str
+    strength: float = 1.0
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -57,6 +62,15 @@ class Bark:
 class Detector:
     scent: str
     scan: Callable[[list[dict], dict, Callable], list[Bark]]
+
+
+PARAMS = {
+    SCENT_SCAFFOLD: {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN},
+    SCENT_CHURN: {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN},
+    SCENT_GOLD: {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN},
+    SCENT_DUAL: {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN},
+    SCENT_DOC: {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN},
+}
 
 
 class BranchView:
@@ -197,6 +211,7 @@ def _scan_scaffold(events: list[dict], goal_record: dict, git_show_fn: Callable)
                 "This branch keeps re-splitting around a scaffold/minimal/skeleton shape without landing. "
                 "Treat the current floor as implementation work: build the smallest real slice or fail "
                 "honestly instead of re-declaring a skeleton.",
+                strength=split_count - SCAFFOLD_THRESHOLD + 1,
             ))
     return barks
 
@@ -220,6 +235,7 @@ def _scan_churn(events: list[dict], goal_record: dict, git_show_fn: Callable) ->
                 "This branch is re-splitting repeatedly without a landed leaf. If the work is "
                 "underdetermined, park it with a concrete ask; otherwise land one narrow child before "
                 "splitting again.",
+                strength=real_churn - CHURN_THRESHOLD + 1,
             ))
     return barks
 
@@ -250,6 +266,7 @@ def _scan_gold(events: list[dict], goal_record: dict, git_show_fn: Callable) -> 
         "Multiple landed leaves are revisiting the same prerequisite files while the raw goal's named "
         f"deliverable area ({', '.join(sorted(tokens))}) has not been touched. Land the deliverable slice "
         "before polishing prerequisite structure further.",
+        strength=len(involved) - 1,
     )]
 
 
@@ -257,7 +274,8 @@ def _scan_dual_language(events: list[dict], goal_record: dict, git_show_fn: Call
     goal_id = str(goal_record.get("goal_id") or "")
     view = BranchView(events, goal_id)
     known: set[str] = set()
-    barks: list[Bark] = []
+    first_bark: Bark | None = None
+    mirror_stems: set[str] = set()
     for e in view.events:
         if e.get("type") != "leaf_done" or not e.get("commit"):
             continue
@@ -265,19 +283,24 @@ def _scan_dual_language(events: list[dict], goal_record: dict, git_show_fn: Call
         existing = set(info["existing"]) | known
         for path in sorted(info["added"] or info["paths"]):
             if _mirror_language_path(path, existing):
-                barks.append(_bark(
-                    goal_id, str(e.get("id")), SCENT_DUAL,
-                    f"`{path}` mirrors an existing file stem in another language. Reuse or route through "
-                    "the existing implementation path instead of maintaining duplicated language copies.",
-                ))
-                break
+                mirror_stems.add(Path(path).stem.lower())
+                if first_bark is None:
+                    first_bark = _bark(
+                        goal_id, str(e.get("id")), SCENT_DUAL,
+                        f"`{path}` mirrors an existing file stem in another language. Reuse or route through "
+                        "the existing implementation path instead of maintaining duplicated language copies.",
+                    )
         known.update(info["paths"])
-    return barks[:1]
+    if first_bark is None:
+        return []
+    return [_with_strength(first_bark, len(mirror_stems))]
 
 
 def _scan_documented_absence(events: list[dict], goal_record: dict, git_show_fn: Callable) -> list[Bark]:
     goal_id = str(goal_record.get("goal_id") or "")
     view = BranchView(events, goal_id)
+    first_bark: Bark | None = None
+    absent_symbols: set[str] = set()
     for e in view.events:
         if e.get("type") != "leaf_done" or not e.get("commit"):
             continue
@@ -288,12 +311,16 @@ def _scan_documented_absence(events: list[dict], goal_record: dict, git_show_fn:
                     continue
                 symbol = _claimed_gate_symbol(line)
                 if symbol and not _symbol_present(symbol, info):
-                    return [_bark(
-                        goal_id, str(e.get("id")), SCENT_DOC,
-                        f"`{path}` documents a future gate `{symbol}`, but the symbol is absent from code. "
-                        "Wire the gate now or remove the claim so the run does not ship documented absence.",
-                    )]
-    return []
+                    absent_symbols.add(symbol)
+                    if first_bark is None:
+                        first_bark = _bark(
+                            goal_id, str(e.get("id")), SCENT_DOC,
+                            f"`{path}` documents a future gate `{symbol}`, but the symbol is absent from code. "
+                            "Wire the gate now or remove the claim so the run does not ship documented absence.",
+                        )
+    if first_bark is None:
+        return []
+    return [_with_strength(first_bark, len(absent_symbols))]
 
 
 CATALOG = [
@@ -322,19 +349,26 @@ def patrol_events(root: str | Path, events: list[dict], *, scents: set[str] | No
     return applied
 
 
-def apply_barks(root: str | Path, store, barks: list[Bark], *, instance: str) -> list[Bark]:
+def apply_barks(root: str | Path, store, barks: list[Bark], *, instance: str,
+                now: _dt.datetime | None = None) -> list[Bark]:
     root = normalize_root(root)
-    seen = read_bark_keys(root)
+    now = _coerce_time(now) if now is not None else _dt.datetime.now(_dt.timezone.utc)
+    history = read_bark_history(root)
     applied: list[Bark] = []
     for bark in barks:
-        if bark.key in seen:
+        unit_history = history.get(bark.key, [])
+        params = PARAMS.get(bark.scent, {"theta0": THETA0, "delta": DELTA_THETA, "tau": TAU_MIN})
+        threshold = current_threshold(unit_history, now, **params)
+        if float(bark.strength) < threshold:
             continue
-        entry = store.steer(bark.goal_id, bark.text, target=bark.node)
+        text = escalate_text(bark, unit_history, now=now)
+        applied_bark = Bark(bark.goal_id, bark.node, bark.scent, text, bark.strength)
+        entry = store.steer(bark.goal_id, text, target=bark.node)
         if entry is None:
             continue
-        append_bark(root, bark, instance=instance, seq=entry.get("seq"))
-        seen.add(bark.key)
-        applied.append(bark)
+        append_bark(root, applied_bark, instance=instance, seq=entry.get("seq"), now=now)
+        history.setdefault(bark.key, []).append((now, float(bark.strength)))
+        applied.append(applied_bark)
     return applied
 
 
@@ -380,9 +414,23 @@ def read_stream_since(root: str | Path, offset: int) -> tuple[list[dict], int]:
     return events, new_offset
 
 
-def read_bark_keys(root: str | Path) -> set[tuple[str, str, str]]:
+def current_threshold(bark_times_strengths, now, *, theta0, delta, tau) -> float:
+    theta = float(theta0)
+    prev = None
+    now = _coerce_time(now)
+    for ts, _strength in sorted(_history_entries(bark_times_strengths), key=lambda item: item[0]):
+        if prev is not None:
+            theta = _decay_threshold(theta, prev, ts, theta0=float(theta0), tau=float(tau))
+        theta += float(delta)
+        prev = ts
+    if prev is not None:
+        theta = _decay_threshold(theta, prev, now, theta0=float(theta0), tau=float(tau))
+    return theta
+
+
+def read_bark_history(root: str | Path) -> dict[tuple[str, str, str], list[tuple[_dt.datetime, float]]]:
     sidecar = normalize_root(root) / ".agent-runs" / "border_collie"
-    keys: set[tuple[str, str, str]] = set()
+    history: dict[tuple[str, str, str], list[tuple[_dt.datetime, float]]] = {}
     for path in sorted(sidecar.glob("barks.*.jsonl")) if sidecar.is_dir() else []:
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -392,20 +440,53 @@ def read_bark_keys(root: str | Path) -> set[tuple[str, str, str]]:
             goal = rec.get("goal")
             node = rec.get("node")
             scent = rec.get("scent")
-            if goal and node and scent:
-                keys.add((str(goal), str(node), str(scent)))
-    return keys
+            ts = _parse_time(rec.get("ts"))
+            if not goal or not node or not scent or ts is None:
+                continue
+            try:
+                strength = float(rec.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            history.setdefault((str(goal), str(node), str(scent)), []).append((ts, strength))
+    for entries in history.values():
+        entries.sort(key=lambda item: item[0])
+    return history
 
 
-def append_bark(root: str | Path, bark: Bark, *, instance: str, seq=None) -> Path:
+def read_bark_keys(root: str | Path) -> set[tuple[str, str, str]]:
+    return set(read_bark_history(root))
+
+
+def escalate_text(bark: Bark, history: list[tuple[_dt.datetime, float]],
+                  now: _dt.datetime | None = None) -> str:
+    if not history:
+        return bark.text
+    now = _coerce_time(now) if now is not None else _dt.datetime.now(_dt.timezone.utc)
+    previous_ts, previous_strength = sorted(history, key=lambda item: item[0])[-1]
+    alert_no = len(history) + 1
+    elapsed = _format_elapsed(now - previous_ts)
+    verb = "intensified" if float(bark.strength) > previous_strength else "still unresolved"
+    body = _strip_scent_prefix(bark.text, bark.scent)
+    return (
+        f"[{bark.scent}] ESCALATION (alert #{alert_no}, ~{elapsed} unaddressed, "
+        f"{verb} {_format_strength(previous_strength)}->{_format_strength(bark.strength)}): "
+        f"{body} This has now persisted/worsened through prior steering - park it with a concrete ask "
+        "or fail honestly; do not re-split again."
+    )
+
+
+def append_bark(root: str | Path, bark: Bark, *, instance: str, seq=None,
+                now: _dt.datetime | None = None) -> Path:
     sidecar = normalize_root(root) / ".agent-runs" / "border_collie"
     sidecar.mkdir(parents=True, exist_ok=True)
     path = sidecar / f"barks.{_partition(instance)}.jsonl"
+    now = _coerce_time(now) if now is not None else _dt.datetime.now(_dt.timezone.utc)
     rec = {
-        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ts": _format_time(now),
         "goal": bark.goal_id,
         "node": bark.node,
         "scent": bark.scent,
+        "strength": bark.strength,
         "seq": seq,
     }
     with path.open("a", encoding="utf-8") as f:
@@ -506,19 +587,107 @@ def _speech_child_ids(speech) -> list[str]:
     return [str(t.get("id")) for t in speech if isinstance(t, dict) and t.get("id")]
 
 
-def _bark(goal_id: str, node: str, scent: str, text: str) -> Bark:
-    return Bark(goal_id=str(goal_id), node=str(node), scent=scent, text=f"[{scent}] {text}")
+def _bark(goal_id: str, node: str, scent: str, text: str, *, strength: float = 1.0) -> Bark:
+    return Bark(goal_id=str(goal_id), node=str(node), scent=scent, text=f"[{scent}] {text}",
+                strength=float(strength))
+
+
+def _with_strength(bark: Bark, strength: float) -> Bark:
+    return Bark(bark.goal_id, bark.node, bark.scent, bark.text, float(strength))
 
 
 def _dedupe_barks(barks: list[Bark]) -> list[Bark]:
-    out: list[Bark] = []
-    seen: set[tuple[str, str, str]] = set()
+    out: dict[tuple[str, str, str], Bark] = {}
+    order: list[tuple[str, str, str]] = []
     for bark in barks:
-        if bark.key in seen:
+        if bark.key not in out:
+            order.append(bark.key)
+            out[bark.key] = bark
             continue
-        seen.add(bark.key)
-        out.append(bark)
-    return out
+        if float(bark.strength) > float(out[bark.key].strength):
+            out[bark.key] = bark
+    return [out[key] for key in order]
+
+
+def _history_entries(values) -> list[tuple[_dt.datetime, float]]:
+    entries: list[tuple[_dt.datetime, float]] = []
+    for item in values or []:
+        if isinstance(item, (list, tuple)) and item:
+            ts = _parse_time(item[0])
+            strength = item[1] if len(item) > 1 else 1.0
+        else:
+            ts = _parse_time(item)
+            strength = 1.0
+        if ts is None:
+            continue
+        try:
+            strength = float(strength)
+        except (TypeError, ValueError):
+            strength = 1.0
+        entries.append((ts, strength))
+    return entries
+
+
+def _decay_threshold(theta: float, previous: _dt.datetime, current: _dt.datetime, *,
+                     theta0: float, tau: float) -> float:
+    if math.isinf(tau):
+        return theta
+    if tau <= 0:
+        return theta0
+    elapsed_min = (current - previous).total_seconds() / 60.0
+    return theta0 + (theta - theta0) * math.exp(-(elapsed_min / tau))
+
+
+def _parse_time(value) -> _dt.datetime | None:
+    if isinstance(value, _dt.datetime):
+        return _coerce_time(value)
+    if not isinstance(value, str) or not value:
+        return None
+    raw = value
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        return _coerce_time(_dt.datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _coerce_time(value: _dt.datetime) -> _dt.datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_dt.timezone.utc)
+    return value.astimezone(_dt.timezone.utc)
+
+
+def _format_time(value: _dt.datetime) -> str:
+    return _coerce_time(value).isoformat().replace("+00:00", "Z")
+
+
+def _format_elapsed(delta: _dt.timedelta) -> str:
+    seconds = max(int(delta.total_seconds()), 0)
+    minutes = seconds // 60
+    if minutes < 1:
+        return f"{seconds}s"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    rem = minutes % 60
+    if rem == 0:
+        return f"{hours}h"
+    return f"{hours}h {rem}m"
+
+
+def _format_strength(value: float) -> str:
+    value = float(value)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _strip_scent_prefix(text: str, scent: str) -> str:
+    prefix = f"[{scent}] "
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 def _landed_touch_sets(events: list[dict], git_show_fn: Callable) -> list[dict]:

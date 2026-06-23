@@ -2,7 +2,9 @@
 """Replay tests for the Border Collie detector pack. Plain def test_* + __main__."""
 from __future__ import annotations
 
+import datetime as dt
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -37,6 +39,24 @@ def scents(barks):
     return [b.scent for b in barks]
 
 
+T0 = dt.datetime(2026, 6, 23, tzinfo=dt.timezone.utc)
+
+
+def mins(n):
+    return T0 + dt.timedelta(minutes=n)
+
+
+def make_store(root):
+    st = goal_store.GoalStore(str(root), emit=controller_goal.stream_emit(str(root)))
+    st.create("g1", "Build a minimal scaffold", "codex")
+    return st
+
+
+def seed_bark(root, scent=bc.SCENT_CHURN, node="nodeA", strength=1, minute=0):
+    bc.append_bark(root, bc.Bark("g1", node, scent, "seed", strength=strength),
+                   instance="seed", seq=1, now=mins(minute))
+
+
 def test_scaffold_infinite_split_targets_branch_and_healthy_land_is_silent():
     events = [
         split("g1", "minimal-scaffold"),
@@ -47,6 +67,7 @@ def test_scaffold_infinite_split_targets_branch_and_healthy_land_is_silent():
                     {bc.SCENT_SCAFFOLD})
     assert scents(barks) == [bc.SCENT_SCAFFOLD]
     assert barks[0].node == "minimal-scaffold"
+    assert barks[0].strength == 1
 
     healthy = events + [split("minimal-scaffold", "child"), {"type": "leaf_done", "goal_id": "g1",
                                                                "id": "child", "commit": None}]
@@ -63,6 +84,7 @@ def test_churn_fires_after_cap_and_landed_branch_is_silent():
     barks = bc.scan(events, goal(), git_fn({}), {bc.SCENT_CHURN})
     assert scents(barks) == [bc.SCENT_CHURN]
     assert barks[0].node == "stuck"
+    assert barks[0].strength == 1
 
     healthy = events + [split("stuck", "landed"), {"type": "leaf_done", "goal_id": "g1",
                                                     "id": "landed", "commit": "c1"}]
@@ -92,6 +114,7 @@ def test_gold_plating_uses_overlapping_touch_sets_not_semantic_ids():
     barks = bc.scan(events, goal("g1", "Add a Usage section to README.md"), git_fn(commits), {bc.SCENT_GOLD})
     assert scents(barks) == [bc.SCENT_GOLD]
     assert barks[0].node == "prereq", "nearest reconstructed branch parent should be targeted"
+    assert barks[0].strength == 1
 
     healthy = events[:3] + [
         {"type": "leaf_done", "goal_id": "g1", "id": "a", "commit": "c1"},
@@ -125,6 +148,7 @@ def test_dual_language_duplication_detects_added_mirror_and_healthy_is_silent():
     }), {bc.SCENT_DUAL})
     assert scents(barks) == [bc.SCENT_DUAL]
     assert barks[0].node == "api"
+    assert barks[0].strength == 1
 
     assert bc.scan(events, goal(), git_fn({
         "c1": {"paths": ["worker.py"], "added": ["worker.py"], "existing": ["server.js"]},
@@ -139,6 +163,7 @@ def test_documented_absence_detects_unwired_gate_and_healthy_symbol_is_silent():
     }), {bc.SCENT_DOC})
     assert scents(barks) == [bc.SCENT_DOC]
     assert barks[0].node == "docs"
+    assert barks[0].strength == 1
 
     assert bc.scan(events, goal(), git_fn({
         "c1": {"paths": ["README.md"], "contents": {"README.md": content},
@@ -146,22 +171,110 @@ def test_documented_absence_detects_unwired_gate_and_healthy_symbol_is_silent():
     }), {bc.SCENT_DOC}) == []
 
 
-def test_sidecar_dedup_fires_once_and_bark_shows_in_stream():
+def test_sidecar_habituation_quiets_immediate_repeat_and_bark_shows_in_stream():
     with tempfile.TemporaryDirectory() as root:
         root = Path(root)
         st = goal_store.GoalStore(str(root), emit=controller_goal.stream_emit(str(root)))
         st.create("g1", "Build a minimal scaffold", "codex")
         bark = bc.Bark("g1", "node", bc.SCENT_SCAFFOLD, "advisory")
 
-        first = bc.apply_barks(root, st, [bark], instance="dog-a")
-        second = bc.apply_barks(root, st, [bark], instance="dog-a")
+        first = bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(0))
+        second = bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(1))
 
         assert first == [bark]
         assert second == []
         assert len(st.read_steering("g1")) == 1
-        assert bc.read_bark_keys(root) == {("g1", "node", bc.SCENT_SCAFFOLD)}
+        history = bc.read_bark_history(root)
+        assert list(history) == [("g1", "node", bc.SCENT_SCAFFOLD)]
+        assert history[("g1", "node", bc.SCENT_SCAFFOLD)][0][1] == 1
         stream = (root / ".agent-runs" / "stream.jsonl").read_text(encoding="utf-8")
         assert '"op": "steer"' in stream and '"target": "node"' in stream
+
+
+def test_habituation_minimal_smell_barks_once_then_quiets():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        bark = bc.Bark("g1", "nodeA", bc.SCENT_CHURN, "advisory", strength=1)
+
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(0)) == [bark]
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(1)) == []
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(5)) == []
+        assert len(st.read_steering("g1")) == 1
+
+
+def test_recovered_persistent_smell_rebarks_with_escalation_text():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        seed_bark(root, minute=0)
+        bark = bc.Bark("g1", "nodeA", bc.SCENT_CHURN, "advisory", strength=1)
+
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(20)) == []
+        applied = bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(22))
+
+        assert len(applied) == 1
+        assert "ESCALATION (alert #2" in applied[0].text
+        assert "~22 min unaddressed" in applied[0].text
+        assert "still unresolved 1->1" in applied[0].text
+        assert applied[0].text != bark.text
+
+
+def test_stronger_smell_barks_through_habituation_immediately():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        seed_bark(root, minute=0, strength=1)
+        bark = bc.Bark("g1", "nodeA", bc.SCENT_CHURN, "advisory", strength=2)
+
+        applied = bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(1))
+
+        assert len(applied) == 1
+        assert "intensified 1->2" in applied[0].text
+
+
+def test_different_scent_or_node_has_independent_threshold():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        seed_bark(root, scent=bc.SCENT_CHURN, node="nodeA", minute=0)
+        barks = [
+            bc.Bark("g1", "nodeA", bc.SCENT_SCAFFOLD, "scaffold advisory", strength=1),
+            bc.Bark("g1", "nodeB", bc.SCENT_CHURN, "churn advisory", strength=1),
+        ]
+
+        applied = bc.apply_barks(root, st, barks, instance="dog-a", now=mins(1))
+
+        assert [(b.node, b.scent) for b in applied] == [
+            ("nodeA", bc.SCENT_SCAFFOLD),
+            ("nodeB", bc.SCENT_CHURN),
+        ]
+
+
+def test_potentiation_rebark_before_full_recovery_lengthens_next_quiet_window():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        seed_bark(root, minute=0)
+        bark = bc.Bark("g1", "nodeA", bc.SCENT_CHURN, "advisory", strength=1)
+
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(22))
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(44)) == []
+        assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(56))
+
+
+def test_degenerate_infinite_delta_and_tau_reproduce_once_forever_dedup():
+    with tempfile.TemporaryDirectory() as root:
+        root = Path(root)
+        st = make_store(root)
+        seed_bark(root, minute=0)
+        bark = bc.Bark("g1", "nodeA", bc.SCENT_CHURN, "advisory", strength=99)
+        old = dict(bc.PARAMS[bc.SCENT_CHURN])
+        bc.PARAMS[bc.SCENT_CHURN] = {"theta0": bc.THETA0, "delta": math.inf, "tau": math.inf}
+        try:
+            assert bc.apply_barks(root, st, [bark], instance="dog-a", now=mins(99)) == []
+        finally:
+            bc.PARAMS[bc.SCENT_CHURN] = old
 
 
 def test_pack_disjoint_scent_instances_use_disjoint_partitions_without_duplicate_keys():
