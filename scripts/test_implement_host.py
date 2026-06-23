@@ -196,6 +196,86 @@ class AdvisoryScopeTest(unittest.TestCase):
             self.assertEqual(scope.changed, ["src/missed.py"])
 
 
+class DefectLocusReLocalizationTest(unittest.TestCase):
+    """R4: a repair re-seeds pre-localization from the blocking finding's defect_locus. The locus only
+    RE-RANKS the advisory in_scope_prelocalized set; it never widens files_allowed_to_change (ADR-0006)."""
+
+    def _localized(self, bm):
+        return [x["path"] for x in bm["localization"]["in_scope_prelocalized"]]
+
+    def test_locus_promotes_named_file_to_top(self):
+        # (a) on a repair with a defect_locus naming X, in_scope_prelocalized ranks X first.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            base = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"])
+            self.assertNotEqual(self._localized(base)[0], "src/missed.py")   # not naturally top
+            repaired = implement_host.build_map_for(
+                repo, raw_prompt(), write_scope=["src/*.py"],
+                defect_locus={"file": "src/missed.py", "line_range": [1, 1]},
+            )
+            self.assertEqual(self._localized(repaired)[0], "src/missed.py")
+            self.assertEqual(repaired["localization"]["defect_locus"]["file"], "src/missed.py")
+
+    def test_low_ranked_in_scope_file_is_promoted(self):
+        # (b) a finding pointing at a currently NOT-surfaced in-scope file (src/missed.py lands in
+        # in_scope_not_prelocalized today) promotes it INTO the pre-localized set.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            base = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"])
+            self.assertIn("src/missed.py",
+                          [x["path"] for x in base["localization"]["in_scope_not_prelocalized"]])
+            repaired = implement_host.build_map_for(
+                repo, raw_prompt(), write_scope=["src/*.py"],
+                defect_locus={"file": "src/missed.py"},
+            )
+            self.assertIn("src/missed.py", self._localized(repaired))
+
+    def test_no_locus_build_map_byte_for_byte_identical(self):
+        # (c) no locus -> the build_map is unchanged from today (the localization carries no defect_locus key).
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            a = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"])
+            b = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"], defect_locus=None)
+            c = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"], defect_locus={})
+            self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(b, sort_keys=True))
+            self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(c, sort_keys=True))
+            self.assertNotIn("defect_locus", a["localization"])
+
+    def test_locus_is_advisory_does_not_widen_write_scope(self):
+        # (d) a locus naming a file OUTSIDE files_allowed_to_change does NOT make it writable: the scope
+        # is unchanged and the file stays in prelocalized_out_of_scope, never in_scope_prelocalized.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))   # tests/test_alpha.py exists but is outside the src/*.py allow-list
+            bm = implement_host.build_map_for(
+                repo, raw_prompt(), write_scope=["src/*.py"],
+                defect_locus={"file": "tests/test_alpha.py", "line_range": [1, 1]},
+            )
+            self.assertEqual(bm["scope"]["files_allowed_to_change"], ["src/*.py"])   # boundary untouched
+            self.assertNotIn("tests/test_alpha.py", self._localized(bm))
+            out_of_scope = [x["path"] for x in bm["localization"]["prelocalized_out_of_scope"]]
+            self.assertIn("tests/test_alpha.py", out_of_scope)
+
+    def test_runner_threads_locus_into_build_map(self):
+        # the carrier runner forwards defect_locus end-to-end: the prompt the implementer sees ranks the
+        # locus file first.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            carrier = StubCarrier()
+            runner = implement_host.make_implement_carrier_runner(
+                repo,
+                objective=raw_prompt(objective="update alpha feature"),
+                contract_inputs={"aufheben-designer": impl_contract()},
+                write_scope=["src/*.py"],
+                carrier=carrier,
+                defect_locus={"file": "src/missed.py"},
+            )
+            cr = runner(repo, "role prompt", "workspace-write", out_dir=repo / ".agent-runs" / "impl")
+            self.assertTrue(cr["ok"])
+            build_map = json.loads((repo / ".agent-runs" / "impl" / implement_host.BUILD_MAP_FILE).read_text())
+            self.assertEqual(
+                build_map["localization"]["in_scope_prelocalized"][0]["path"], "src/missed.py")
+
+
 class WhyThreadTest(unittest.TestCase):
     def test_run_goal_threads_structured_why_to_leaf_pipeline(self):
         with tempfile.TemporaryDirectory() as d:

@@ -620,14 +620,14 @@ def _withhold_acceptance_bundle(role: str, inputs: dict[str, dict]) -> dict[str,
 
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
                    stage_run_id: str, cache: bool, resume_session=None,
-                   goal_context=None) -> tuple[bool, dict | None, dict, dict]:
+                   goal_context=None, defect_locus=None) -> tuple[bool, dict | None, dict, dict]:
     if role == "linon" and _linon_via_codex_review_enabled():
         return _execute_linon_via_codex_review(repo, stage_run_id)
     inputs = _withhold_acceptance_bundle(role, inputs)
     contract = _contract(entry, objective, inputs, resume_session)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
-        repo, entry, contract, stage_run_id, cache, resume_session, goal_context
+        repo, entry, contract, stage_run_id, cache, resume_session, goal_context, defect_locus
     )
     finished_at = _utc_now()
     report_dict = report.to_dict()
@@ -727,6 +727,53 @@ def _is_reviewable_finding_path(path: str) -> bool:
     if base in _NONREVIEWABLE_BASENAMES:
         return False
     return not any(fnmatch.fnmatch(base, g) for g in _NONREVIEWABLE_GLOBS)
+
+
+def _finding_line_range(finding: dict) -> list | None:
+    """Extract a [start, end] line range from a finding across the shapes the gates/linon emit: a dict
+    {start, end}, a 2-element list/tuple, or a bare `line` (optionally with `end_line`). None when absent."""
+    for key in ("line_range", "range", "lines"):
+        v = finding.get(key)
+        if isinstance(v, dict) and "start" in v:
+            start = v.get("start")
+            return [start, v.get("end", start)]
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            return [v[0], v[1]]
+    line = finding.get("line")
+    if isinstance(line, int):
+        end = finding.get("end_line")
+        return [line, end if isinstance(end, int) else line]
+    return None
+
+
+def _finding_defect_locus(findings: list[dict]) -> dict | None:
+    """R4 — the failing region the implementer should re-localize around on a repair. Pick the worst (most
+    severe) blocking finding that names a reviewable deliverable file and return a {file, line_range?,
+    symbols?} locus. Advisory only: it RE-RANKS the implementer's pre-localized candidates (implement_host)
+    and never widens the write boundary — files_allowed_to_change stays the contract's (ADR-0006). None when
+    no finding names a concrete reviewable file (then the repair runs with today's first-attempt grounding)."""
+    best = None
+    best_rank = -1
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        path = f.get("file") or f.get("path")
+        if not path or not _is_reviewable_finding_path(str(path)):
+            continue
+        rank = _SEVERITY_REPAIR.get(str(f.get("severity", "")).lower(), 0)
+        if best is not None and rank <= best_rank:
+            continue
+        best, best_rank = f, rank
+    if best is None:
+        return None
+    locus: dict = {"file": str(best.get("file") or best.get("path"))}
+    rng = _finding_line_range(best)
+    if rng:
+        locus["line_range"] = rng
+    sym = best.get("symbol")
+    if isinstance(sym, str) and sym.strip():
+        locus["symbols"] = [sym.strip()]
+    return locus
 
 
 def _linon_findings(result: dict | str | None) -> list[dict]:
@@ -1073,13 +1120,13 @@ def _preserve_result(repo: Path, stage_run_id: str,
 
 
 def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
-               cache: bool, resume_session=None,
-               goal_context=None) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
+               cache: bool, resume_session=None, goal_context=None,
+               defect_locus=None) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
     result_path = repo / RESULT_FILE
     if result_path.exists():
         result_path.unlink()
     report = controller_run.run(repo, contract, run_id, cache=cache, resume_session=resume_session,
-                                goal_context=goal_context)
+                                goal_context=goal_context, defect_locus=defect_locus)
     if entry.write_scope:
         stage_ok = bool(report.ok)
         return stage_ok, None, None, None, report, []
@@ -1092,7 +1139,8 @@ def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
             "— no prose, no markdown fences, double-quoted keys, no trailing commas.")
         if result_path.exists():
             result_path.unlink()
-        report = controller_run.run(repo, reask, run_id + "-reask", cache=False, goal_context=goal_context)
+        report = controller_run.run(repo, reask, run_id + "-reask", cache=False, goal_context=goal_context,
+                                    defect_locus=defect_locus)
         stage_errors = []
         result, preserved_path, result_sha256 = _preserve_result(repo, run_id + "-reask", stage_errors)
     stage_ok = bool(report.ok) and result is not None
@@ -1385,6 +1433,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         implementer_evidence = None
         if this_repair_roles == ["implementer"]:
             implementer_evidence = _deterministic_repair_evidence(findings, results)
+        # R4: re-localize the implementer around the blocking finding's failing region. R1 gives WHAT failed
+        # (the finding evidence above); the locus gives WHERE — it re-seeds the implementer's advisory
+        # pre-localization. Advisory only: the write boundary stays files_allowed_to_change (ADR-0006).
+        repair_locus = _finding_defect_locus(findings)
         for role in this_repair_roles:
             entry = entries[role]
             if role in producer_roles:
@@ -1403,10 +1455,12 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             # RESUME the prior session for the producers/implementer ONLY (full memory, small delta);
             # aufheben/other roles stay fresh. Chained: iteration N+1 resumes iteration N's session.
             resume = sessions.get(role) if role in SESSION_REUSE_ROLES else None
+            locus = repair_locus if role == "implementer" else None   # R4: only the implementer re-localizes
             stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
                                                                   inputs, stage_run_id, cache,
                                                                   resume_session=resume,
-                                                                  goal_context=goal_context)
+                                                                  goal_context=goal_context,
+                                                                  defect_locus=locus)
             if report_dict.get("session_id"):           # chain the next repair onto this iteration's session
                 sessions[role] = report_dict["session_id"]
             summary[role] = bool(report_dict.get("ok"))
