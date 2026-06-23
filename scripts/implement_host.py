@@ -126,6 +126,34 @@ def build_map_for(repo, raw_prompt: str, *, contract_inputs: dict | None = None,
     }
 
 
+def _scope_lists(build_map: dict) -> tuple[list[str], list[str]]:
+    """Surface the contract's own allow/deny scope from the build_map (additive — restates, never invents)."""
+    scope = build_map.get("scope") or {}
+    allowed = [g for g in (scope.get("files_allowed_to_change") or []) if str(g).strip()]
+    forbidden = [g for g in (scope.get("files_not_allowed_to_change") or []) if str(g).strip()]
+    return allowed, forbidden
+
+
+def _scope_block(build_map: dict) -> str:
+    """Render the scope contract prominently at the top: allow-list, optional DO-NOT-TOUCH, self-check."""
+    allowed, forbidden = _scope_lists(build_map)
+    lines = ["## SCOPE (read first — controller_scope.enforce is the hard gate; this is your forward self-check)"]
+    if allowed:
+        lines.append("ALLOWED to change — only files matching these globs:")
+        lines.extend(f"- {g}" for g in allowed)
+    else:
+        lines.append("ALLOWED to change: no allow-list was supplied; do not assume a wider boundary.")
+    if forbidden:
+        lines.append("DO-NOT-TOUCH — the contract explicitly denies these (editing them fails scope):")
+        lines.extend(f"- {g}" for g in forbidden)
+    lines.append(
+        "PRE-FINISH SELF-CHECK: before finishing, list the files you changed and confirm each is within "
+        "files_allowed_to_change. If you need a file outside it, STOP and report that aufheben must widen "
+        "scope — do not silently expand scope."
+    )
+    return "\n".join(lines)
+
+
 def format_build_section(build_map: dict) -> str:
     why = build_map.get("why") or {}
     if why.get("status") == "present":
@@ -137,6 +165,7 @@ def format_build_section(build_map: dict) -> str:
         why_line = "WHY:absent. No structured negative_control was supplied; do not invent one."
     return "\n\n".join([
         BUILD_MAP_HEADER,
+        _scope_block(build_map),
         why_line,
         "This grounding is ADDITIVE under ADR-0006. Prefer the in-scope pre-localized files when they fit, "
         "but every file matching files_allowed_to_change remains writable. If the needed file is outside "
