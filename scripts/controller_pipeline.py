@@ -577,6 +577,11 @@ def _sanitize_deterministic_finding(finding: dict, withheld_values: list) -> dic
     sanitized = {key: finding[key] for key in allowed if key in finding}
     if "detail" in finding:
         sanitized["detail"] = _scrub_withheld_values(str(finding["detail"]), hidden_values)
+    # fix_hint is the LOAD-BEARING part of a deterministic gate finding (ADR-0016): it is the concrete WHAT+
+    # WHERE remediation the implementer needs so a repair does not repeat the same mistake. Forward it, but
+    # scrub it value-wise like detail so an actionable hint can never become a side channel for the oracle.
+    if finding.get("fix_hint"):
+        sanitized["fix_hint"] = _scrub_withheld_values(str(finding["fix_hint"]), hidden_values)
     if "example" in finding:
         sanitized["_oracle_withheld"] = True
     return sanitized
@@ -812,6 +817,10 @@ _DETERMINISTIC_IMPL_SOURCES = {
     # purely an artifact defect (grep is a fact), so it pins repair to the implementer and lets gate-behind
     # skip the expensive Linon reviewer on it.
     "forbidden-pattern",
+    # regression: the kind-agnostic regression-suite gate. A pre-existing suite that no longer passes is purely
+    # an artifact defect ("the change broke previously-working code" — a green suite is a fact), so it pins
+    # repair to the implementer and lets gate-behind skip the expensive Linon reviewer on it.
+    "regression",
 }
 
 

@@ -212,6 +212,30 @@
         "additionalProperties": false
       }
     },
+    "regression_suite": {
+      "description": "ADR-0009 / ADR-0016: a CHEAP, deterministic (~0-FP) conformance gate for the BIGGEST modification-defect class — 'the change broke previously-working code' (SWE-CI: ~73.6% of modification-task failures). Names a PRE-EXISTING repo test command that must still pass (exit 0) AFTER the change. Applicable to ANY deliverable_kind. The gate runs the command via the conformance runner against the produced artifact and emits a BLOCKING finding (source 'regression') capturing the command, exit code, and an output tail (failing test names if present) when it exits non-zero. A passing suite is a FACT — it either passes or it doesn't — so this moves a deterministically-catchable regression off the expensive semantic reviewer (Linon). Absent field = no-op (the gate never fabricates a finding it cannot ground).",
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "description": "The pre-existing repo test command that must still pass (exit 0) after the change — e.g. `python3 -m pytest -q` or `python3 scripts/test_foo.py`. Run as a shell string through the conformance runner (the box is the containment boundary, ADR-0022).",
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_seconds": {
+          "description": "Wall-clock budget for the suite, passed to the runner (default ~300). Keeps a hung or runaway suite from stalling the gate.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "description": "Why this suite must keep passing — surfaced in the finding so a reader (and the repair routing) understands the obligation.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "conformance": {
       "description": "ADR-0009: the EXECUTABLE part of the contract \u2014 what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
       "type": "object",
