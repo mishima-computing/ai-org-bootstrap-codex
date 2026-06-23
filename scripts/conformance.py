@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import time
 import urllib.error
 import urllib.parse
@@ -583,7 +584,7 @@ def _grpc_call_findings(profile: dict, cwd: Optional[str], grpc_invoker=None) ->
 
 
 def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
-                                http_request=None, grpc_invoker=None) -> dict:
+                                http_request=None, grpc_invoker=None, service_launcher=None) -> dict:
     """Black-box RPC checker (ADR-0009 #1). Boots the service and ACTUALLY INVOKES each declared call over the
     declared transport — it is not a static JSON shape check. `json_rpc_http` runs through stdlib HTTP and
     checks the JSON-RPC result/error (not the HTTP status); `grpc` invokes dynamically via a descriptor set
@@ -602,7 +603,8 @@ def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional
     checks_run = 0
     handle = None
     try:
-        handle = runner.start(profile["start"]["command"], cwd=cwd)
+        launcher = service_launcher or _launch_service
+        handle = launcher(profile["start"]["command"], cwd=cwd, profile=profile)
         checks_run += 1
         if transport == "json_rpc_http":
             readiness = _wait_for_http_readiness(profile, http_request)
@@ -614,8 +616,18 @@ def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional
         else:  # grpc
             findings += _grpc_call_findings(profile, cwd, grpc_invoker)
             checks_run += len(profile.get("calls", []))
+    except _ServiceStartError as exc:
+        result = exc.result
+        findings.append(_rpc_finding(
+            "lifecycle", "critical", False,
+            f"service start command exited before readiness (exit {result.returncode})",
+            command=exc.command, returncode=result.returncode,
+            stdout_tail=_normalize(result.stdout)[-800:],
+            stderr_tail=_normalize(result.stderr)[-800:],
+        ))
     except Exception as exc:  # noqa: BLE001 — lifecycle failure is a finding
-        findings.append(_rpc_finding("lifecycle", "critical", False, "service lifecycle setup failed",
+        findings.append(_rpc_finding("lifecycle", "critical", False,
+                                     f"service lifecycle setup failed: {exc}",
                                      error=type(exc).__name__))
     finally:
         if handle is not None:
@@ -807,7 +819,7 @@ def _http_profile_findings(profile) -> list[dict]:
 
 
 def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
-                                 http_request=None) -> dict:
+                                 http_request=None, service_launcher=None) -> dict:
     """Boot the declared HTTP service, wait for shallow readiness, then compare black-box examples."""
     profile = (contract.get("conformance") or {}).get("http_service")
     if contract.get("deliverable_kind") != "http_service":
@@ -826,8 +838,8 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
 
     handle = None
     try:
-        start = getattr(runner, "start")
-        handle = start(profile["start"]["command"], cwd=cwd)
+        launcher = service_launcher or _launch_service
+        handle = launcher(profile["start"]["command"], cwd=cwd, profile=profile)
         checks_run += 1
         readiness = _wait_for_http_readiness(profile, http_request)
         if readiness:
@@ -836,10 +848,19 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
             example_findings = _http_example_findings(profile, http_request)
             findings.extend(example_findings)
             checks_run += len(profile.get("examples", []))
+    except _ServiceStartError as exc:
+        result = exc.result
+        findings.append(_http_finding(
+            "lifecycle", "critical", False,
+            f"service start command exited before readiness (exit {result.returncode})",
+            command=exc.command, returncode=result.returncode,
+            stdout_tail=_normalize(result.stdout)[-800:],
+            stderr_tail=_normalize(result.stderr)[-800:],
+        ))
     except Exception as exc:
         findings.append(_http_finding(
             "lifecycle", "critical", False,
-            "service lifecycle setup failed",
+            f"service lifecycle setup failed: {exc}",
             error=type(exc).__name__,
         ))
     finally:
@@ -886,6 +907,135 @@ def _cap_output(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n<conformance: output truncated at {limit} bytes>"
+
+
+class _ServiceStartError(RuntimeError):
+    def __init__(self, command: str, result: RunResult):
+        super().__init__(f"service start command exited before readiness (exit {result.returncode})")
+        self.command = command
+        self.result = result
+
+
+class _ProcessOutputCapture:
+    def __init__(self, max_output: int):
+        import threading
+
+        self.max_output = max_output
+        self.stdout = ""
+        self.stderr = ""
+        self._lock = threading.Lock()
+        self._threads = []
+
+    def watch(self, stream, attr: str) -> None:
+        import threading
+
+        if stream is None:
+            return
+        thread = threading.Thread(target=self._read_stream, args=(stream, attr), daemon=True)
+        thread.start()
+        self._threads.append(thread)
+
+    def snapshot(self) -> tuple[str, str]:
+        with self._lock:
+            return self.stdout, self.stderr
+
+    def join(self, timeout: float = 0.2) -> None:
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+
+    def _read_stream(self, stream, attr: str) -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                self._append(attr, chunk)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _append(self, attr: str, chunk: str) -> None:
+        if not chunk:
+            return
+        marker = "<conformance: output truncated"
+        with self._lock:
+            current = getattr(self, attr)
+            if marker in current:
+                return
+            setattr(self, attr, _cap_output(current + chunk, self.max_output))
+
+
+class _ServiceProcessHandle:
+    def __init__(self, proc, output: _ProcessOutputCapture):
+        self.proc = proc
+        self._output = output
+
+    def result(self) -> RunResult:
+        self._output.join(timeout=0.2)
+        stdout, stderr = self._output.snapshot()
+        return RunResult(self.proc.poll(), stdout, stderr)
+
+    def stop(self, timeout: float = 3.0) -> RunResult:
+        import subprocess
+
+        if self.proc.poll() is None:
+            self._terminate()
+            try:
+                self.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._kill()
+                self.proc.wait(timeout=timeout)
+        self._output.join(timeout=0.5)
+        return self.result()
+
+    def _terminate(self) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            else:
+                self.proc.terminate()
+        except ProcessLookupError:
+            pass
+
+    def _kill(self) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+        except ProcessLookupError:
+            pass
+
+
+def _launch_service(command: str, *, cwd: Optional[str] = None, profile: Optional[dict] = None,
+                    max_output: int = 1_000_000) -> _ServiceProcessHandle:
+    """Start a declared service command as a long-lived background process.
+
+    The normal runner is intentionally run-to-completion; service conformance needs a separate lifecycle
+    helper that can keep the process alive while readiness and black-box calls execute.
+    """
+    import subprocess
+
+    profile = profile or {}
+    readiness_timeout = float(profile.get("readiness_timeout_seconds", 0) or 0)
+    probe_seconds = min(0.25, max(0.05, readiness_timeout / 10 if readiness_timeout else 0.1))
+    preexec = _rlimit_preexec(512 * 1024 * 1024, 60 * 60, 50 * 1024 * 1024) if os.name == "posix" else None
+    proc = subprocess.Popen(
+        command, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        errors="replace", preexec_fn=preexec, start_new_session=(os.name == "posix"),
+    )
+    output = _ProcessOutputCapture(max_output)
+    output.watch(proc.stdout, "stdout")
+    output.watch(proc.stderr, "stderr")
+    handle = _ServiceProcessHandle(proc, output)
+    time.sleep(probe_seconds)
+    if proc.poll() is not None:
+        raise _ServiceStartError(command, handle.result())
+    return handle
 
 
 def _rlimit_preexec(mem_bytes: int, cpu_seconds: int, fsize_bytes: int):
