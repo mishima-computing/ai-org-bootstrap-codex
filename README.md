@@ -521,23 +521,23 @@ adversarial reviewer, and a decomposition loop instead of leaning on those? Each
 the wrong layer for build *quality*, and the official documentation makes no quality claim for any of them
 (investigated against the carrier CLI v0.137 and its docs, 2026).
 
-- **Goal mode** (a thread objective + token budget + status). Resource governance and long-run orchestration, not a
+- **[Goal mode](#goal-mode)** (a thread objective + token budget + status). Resource governance and long-run orchestration, not a
   code-quality lever: the *same* model run longer and more persistently, stopping on a budget or on evidence rather
   than on a hunch. It governs ONE carrier session; this engine's goal orchestrates *many* (a DAG of leaves, each gated)
   — a layer above. The documented gains are "can run longer / won't overrun budget / pause-resume," never "more
   correct per step."
-- **The built-in code review** (a separate reviewer pass with a correctness verdict). A genuinely useful, decorrelated
+- **[The built-in code review](#code-review)** (a separate reviewer pass with a correctness verdict). A genuinely useful, decorrelated
   second opinion — but an LLM reviewer in the same noisy class as this engine's adversary (an independent 13-model ×
   50-PR benchmark put the best review models near F1 ≈ 0.5, about half the comments false positives). A second
   same-class reviewer enlarges the *union* of catches but also the rejection rate and the triage noise; it does not
   make the *implementer's* output better. Caught-defect certainty comes from the deterministic, ~0-false-positive
   gates, which no LLM reviewer can match.
-- **The execution-rules policy** (`prefix_rule` allow/forbidden). A deterministic authorization gate — but over *shell
+- **[The execution-rules policy](#execution-rules-execpolicy)** (`prefix_rule` allow/forbidden). A deterministic authorization gate — but over *shell
   commands*, not the model's editing or reasoning. "Only edit these files" and "never leak the withheld value" are
   behaviours, not commands; they cannot be expressed as a rule. The one constraint that maps cleanly is file-write
   scope — enforced by the sandbox's writable roots, which is exactly this engine's deterministic-gate philosophy
   applied earlier, inside the carrier. Semantic constraints stay with the gates and the reviewer.
-- **The skills system** (a curated, routed prompt prime). This engine *does* use it (the cassette layer), but the
+- **[The skills system](#skills)** (a curated, routed prompt prime). This engine *does* use it (the cassette layer), but the
   evidence is sober: skills are weak for software engineering and self-generated skills can hurt, so they pay only
   curated, deterministically routed, and paired with the gate that hard-enforces the same thing — a prime, never the
   guarantee.
@@ -550,7 +550,7 @@ richer way to ask the model nicely.
 The forensic backing — what each feature is at the binary/protocol/storage level (the `thread/goal/*` app-server API
 and its `goals.sqlite` schema; the embedded reviewer prompt and `overall_correctness` verdict; the Starlark
 `prefix_rule` execpolicy vs the sandbox's `writable_roots`; why file-write scope is the one constraint that maps) —
-is in [docs/carrier-command-surface.md](docs/carrier-command-surface.md).
+is in [the appendix at the foot of this README](#the-carriers-command-surface-in-detail).
 
 ## Package
 
@@ -583,7 +583,7 @@ python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py && pytho
   [ADR-0009](docs/decisions/ADR-0009-verification-boundary-executable-contract-and-acceptance-bundle.md)
   the verification boundary — executable contract + acceptance bundle (with its evidence/sources).
 - [`docs/codex-carrier-capabilities.md`](docs/codex-carrier-capabilities.md) — what the Codex carrier can and cannot do.
-- [`docs/carrier-command-surface.md`](docs/carrier-command-surface.md) — why the carrier's built-in commands (`/goal`, `/review`, `/rules`/execpolicy, `/skills`) don't replace the mechanism — a forensic, binary/protocol/storage-level map.
+- [The carrier's command surface, in detail](#the-carriers-command-surface-in-detail) — why the carrier's built-in commands (`/goal`, `/review`, `/rules`/execpolicy, `/skills`) don't replace the mechanism — a forensic, binary/protocol/storage-level map (appendix, foot of this README).
 - [`docs/evidence/`](docs/evidence/) — measured results (role timing & pipelining, cone-recall).
 
 ## Source of truth
@@ -604,3 +604,92 @@ python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py && pytho
 This repository is **Codex-only**: it must not contain non-Codex carrier directories, invocation
 procedures, adapters, or fallback instructions. The agent-facing form of this rule — and the rest of the
 operating directive — is in [AGENTS.md](AGENTS.md).
+
+## The carrier's command surface, in detail
+
+The forensic backing for *"Why not just use the carrier's built-in commands?"* above: what each feature **actually is**
+at the binary/protocol/storage level, verified against the carrier CLI **v0.137.0** on disk (2026), so the "we use the
+mechanism, not the commands" claim rests on evidence. Every internal named below was read out of the shipped binary,
+its generated protocol schema, or its on-disk state.
+
+### Goal mode
+
+There is **no `goal` CLI subcommand** (`codex --help` lists `exec/review/...`, no `goal`). "Goal" is a slash command +
+an **app-server JSON-RPC API**, surfaced by the rich clients (app / IDE / remote-control / cloud) — **not** by
+`codex exec`, the one-shot path this engine drives.
+
+- **Protocol** (from `codex app-server generate-json-schema`): methods `thread/goal/set`, `thread/goal/get`,
+  `thread/goal/clear`; notifications `thread/goal/updated`, `thread/goal/cleared`; types `ThreadGoal`,
+  `ThreadGoalStatus`; event `ThreadGoalUpdatedEvent`.
+- **Tool handlers** in the binary: `core/src/tools/handlers/goal/create_goal.rs`, `update_goal.rs`, `get_goal.rs`. A
+  **continuation loop** re-enters the model toward the goal across turns, and an embedded **`goals/budget_limit.md`**
+  template tells the model to wind down when the budget is hit.
+- **Storage**: `~/.codex/goals_1.sqlite`, table `thread_goals(thread_id PK, goal_id, objective, status CHECK IN
+  ('active','paused','blocked','usage_limited','budget_limited','complete'), token_budget, tokens_used,
+  time_used_seconds, created_at_ms, updated_at_ms)`. Migration *"thread goals"* dated 2026-06-05.
+
+Resource governance + long-horizon orchestration of **one** carrier session — objective + token/time budget + an
+evidence-gated stop; the same model, run longer. This engine's goal orchestrates **many** sessions (a DAG of leaves,
+each independently gated) — a layer *above* `thread_goal`. The status enum is about *running*
+(paused/blocked/usage_limited), never about *correctness*. The two share a shape at different altitudes.
+
+### Code review
+
+`codex review` is a first-class subcommand (`/review` in the clients): a **separate reviewer pass with its own embedded
+system prompt**, verified verbatim in the binary —
+
+> `You are acting as a reviewer for a proposed code change made by another engineer.`
+
+— and a **structured verdict schema**, also verbatim:
+
+```
+"overall_correctness": "patch is correct" | "patch is incorrect",
+"overall_explanation": "<1-3 sentence explanation justifying the overall_correctness verdict>",
+"overall_confidence_score": ...
+```
+
+Supporting types: `ReviewTarget` (`uncommittedChanges` | `baseBranch` | `commit`/`sha`), `ReviewCodeLocation`
+(`absolute_file_path`, `line_range`), `ReviewOutputEvent`, `Entered/ExitedReviewModeEvent`, and an
+`auto_review_model_override` / `review_model` so review can run on a different model than the implementer. It is the
+**same class** as this engine's adversary — an LLM reviewer; an independent 13-model × 50-PR benchmark put the best
+review models near **F1 ≈ 0.5 (about half the comments false positives)**. A second same-class reviewer enlarges the
+*union* of catches (a real decorrelated-ensemble effect) but also the rejection rate and triage noise, and never
+improves the *implementer's* output. Caught-defect *certainty* comes from the deterministic, ~0-false-positive gates.
+
+### Execution rules (execpolicy)
+
+`~/.codex/rules/*.rules` (and project `.codex/rules/`) are a **deterministic command-execution policy** in **Starlark**:
+
+```python
+prefix_rule(pattern=["git", "push"], decision="allow")
+prefix_rule(pattern=["cargo", "test"], decision="allow")
+```
+
+`decision ∈ {allow, prompt, forbidden}`, applied **most-restrictive-match** (`forbidden` > `prompt` > `allow`),
+validated by `codex execpolicy check`, amendable at runtime (`ExecPolicyAmendment`, `acceptWithExecpolicyAmendment`),
+and it also feeds network rules to the managed proxy. It gates **shell commands** — and only shell commands.
+*"Only edit these files"* and *"never emit the withheld expected value"* are **behaviours, not commands** — there is
+no `prefix_rule` that expresses them. Restating them as rules is a category error.
+
+### File-write scope
+
+Carrier file edits do **not** go through execpolicy. They run through `apply_patch`, an internal tool handler
+(`core/src/tools/handlers/apply_patch.rs`; the binary notes *"apply_patch approval is not supported in exec mode"*).
+The constraint that governs **which paths may be written** is the sandbox's `SandboxWorkspaceWrite` / `writable_roots` /
+`sandbox_workspace_write` (sandbox modes `read-only` | `workspace-write` | `danger-full-access`; `FileSystemSpecialPath`
+∈ `project_roots`/`subpath`/`tmpdir`/`slash_tmp`). So the one constraint that maps cleanly is **file-write scope**:
+narrow `writable_roots` to a leaf's `files_allowed_to_change` and out-of-scope writes are blocked **by the sandbox** —
+this engine's deterministic-gate philosophy applied earlier, inside the carrier. Semantic constraints have no sandbox
+analogue and stay with the gates + the reviewer.
+
+### Skills
+
+`~/.codex/skills/<name>/SKILL.md` (YAML frontmatter `name`/`description`/`metadata` + body), installed from a curated
+or arbitrary GitHub source via the system `skill-installer`. This engine's cassette layer is exactly this, kept honest
+by the evidence: skills are weak for software engineering and self-generated skills can hurt, so they pay only curated,
+deterministically routed, and paired with the gate that hard-enforces the same thing — a prime, never the guarantee.
+
+The surface is large (there is more than the above — a guardian assessor, multi-agent collaboration, a managed network
+proxy, memory consolidation). But for **build quality** the conclusion is uniform: the command surface offers
+governance, convenience, a second noisy reviewer, and one deterministic *write-path* gate — but **no channel that makes
+the same model obey a behavioural or semantic instruction more reliably**. Quality lives in the mechanism.
