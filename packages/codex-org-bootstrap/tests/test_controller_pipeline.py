@@ -58,6 +58,8 @@ class _Rep:
 class ControllerPipelineTests(unittest.TestCase):
     def setUp(self):
         self._orig = controller_run.run
+        self._env = mock.patch.dict(os.environ, {"STEFAN_ENABLED": ""})
+        self._env.start()
         self.calls = []
 
         def _fake_run(repo, contract, run_id, *, cache=True, **_):
@@ -86,13 +88,14 @@ class ControllerPipelineTests(unittest.TestCase):
         controller_run.run = _fake_run
 
     def tearDown(self):
+        self._env.stop()
         controller_run.run = self._orig
         result_file = ROOT / pipeline.RESULT_FILE
         if result_file.exists():
             result_file.unlink()
         shutil.rmtree(ROOT / ".agent-runs" / "controller" / "pipe-test", ignore_errors=True)
 
-    def test_registry_dag_order_fan_in_and_verifiers(self):
+    def test_registry_dag_order_fan_in_and_default_verifiers(self):
         result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
         order = [call[0] for call in self.calls]
         self.assertEqual(order, [
@@ -105,8 +108,8 @@ class ControllerPipelineTests(unittest.TestCase):
             "aufheben-designer",
             "implementer",
             "linon",
-            "stefan",
         ])
+        self.assertNotIn("stefan", order)
         self.assertTrue(all(result["summary"].values()))
         self.assertTrue(all(call[3] is False for call in self.calls))
 
@@ -120,8 +123,7 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertEqual(by_role["implementer"]["inputs"]["aufheben-designer"]["contract_id"], "impl-1")
         self.assertEqual(by_role["linon"]["inputs"]["implementer"]["diff_artifact"]["sha256"],
                          "diff-sha-implementer")
-        self.assertEqual(by_role["stefan"]["inputs"]["implementer"]["diff_artifact"]["sha256"],
-                         "diff-sha-implementer")
+        self.assertNotIn("stefan", by_role)
 
         implementer_contract = [call[4] for call in self.calls if call[0] == "implementer"][0]
         self.assertEqual(implementer_contract["files_allowed_to_change"],
@@ -137,6 +139,11 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertRegex(result["manifest"]["finished_at"], ISO8601_UTC)
 
         self.assertEqual([stage["role"] for stage in result["manifest"]["stages"]], order)
+        self.assertNotIn("stefan", [stage["role"] for stage in result["manifest"]["stages"]])
+        self.assertNotIn("stefan", result["required_ok"])
+        self.assertNotIn("stefan", result["reports"])
+        self.assertNotIn("stefan", result["results"])
+        self.assertTrue(result["converged"])
         for stage in result["manifest"]["stages"]:
             stage_run_id = f"pipe-test-{stage['role']}"
             self.assertEqual(stage["run_id"], stage_run_id)
@@ -178,6 +185,22 @@ class ControllerPipelineTests(unittest.TestCase):
         implementer_stage = [stage for stage in result["manifest"]["stages"] if stage["role"] == "implementer"][0]
         self.assertEqual(implementer_stage["artifact"]["diff_artifact"]["sha256"], "diff-sha-implementer")
 
+    def test_stefan_enabled_runs_opt_in_verifier(self):
+        with mock.patch.dict(os.environ, {"STEFAN_ENABLED": "1"}):
+            result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+
+        order = [call[0] for call in self.calls]
+        self.assertEqual(order[-2:], ["linon", "stefan"])
+        self.assertIn("stefan", result["required_ok"])
+        self.assertTrue(result["required_ok"]["stefan"])
+        self.assertIn("stefan", result["reports"])
+        self.assertIn("stefan", result["results"])
+        self.assertIn("pipe-test-stefan", [stage["run_id"] for stage in result["manifest"]["stages"]])
+
+        by_role = {role: payload for role, payload, _run_id, _cache, _contract in self.calls}
+        self.assertEqual(by_role["stefan"]["inputs"]["implementer"]["diff_artifact"]["sha256"],
+                         "diff-sha-implementer")
+
     def test_single_producer_failure_still_reaches_aufheben_implementer_and_reviewers(self):
         def _producer_failure_run(repo, contract, run_id, *, cache=True, **_):
             role = contract["role"]
@@ -205,8 +228,10 @@ class ControllerPipelineTests(unittest.TestCase):
         result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
         order = [call[0] for call in self.calls]
 
-        self.assertEqual(order[-3:], ["implementer", "linon", "stefan"])
+        self.assertEqual(order[-2:], ["implementer", "linon"])
         self.assertFalse(result["required_ok"]["aggressive-designer"])
+        self.assertNotIn("stefan", result["required_ok"])
+        self.assertNotIn("stefan", result["results"])
         self.assertNotIn("aggressive-designer", result["fatal_ok"])
         self.assertTrue(all(result["fatal_ok"].values()))
         self.assertTrue(result["converged"])
@@ -282,7 +307,6 @@ class ControllerPipelineTests(unittest.TestCase):
             "aufheben-designer",
             "implementer",
             "linon",
-            "stefan",
             "aggressive-designer",
             "conservative-designer",
             "genius",
@@ -291,7 +315,7 @@ class ControllerPipelineTests(unittest.TestCase):
             "linon",
         ])
 
-        repair_designer_payload = self.calls[10][1]
+        repair_designer_payload = self.calls[9][1]
         self.assertEqual(repair_designer_payload["inputs"]["linon"]["findings"][0]["claim"],
                          "first pass finding")
         self.assertEqual(repair_designer_payload["objective"], "wire declared org")

@@ -41,6 +41,7 @@ PROVENANCE_FILE = "provenance-manifest.json"
 # attempt so a transient submission failure is absorbed instead of failing the stage.
 WRITE_ROLE_RETRIES = 2
 AUFHEBEN_ROLE = "aufheben-designer"
+STEFAN_ROLE = "stefan"
 
 # On a REPAIR iteration these four roles RESUME their prior codex session (keeping full memory, emitting
 # only a small delta) instead of re-deriving from scratch. aufheben-designer/linon/stefan stay FRESH:
@@ -92,8 +93,29 @@ def _predecessors(entries: dict[str, RegistryEntry]) -> dict[str, list[str]]:
     return {role: sorted(upstream) for role, upstream in predecessors.items()}
 
 
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").lower() not in ("", "0", "false", "no", "off")
+
+
+def _stefan_enabled() -> bool:
+    """Control shell for Stefan: default OFF, opt in with STEFAN_ENABLED=1/true/yes/on."""
+    return _env_enabled("STEFAN_ENABLED")
+
+
+def _active_entries(entries: dict[str, RegistryEntry]) -> dict[str, RegistryEntry]:
+    if _stefan_enabled():
+        return dict(entries)
+    return {role: entry for role, entry in entries.items() if role != STEFAN_ROLE}
+
+
 def _verifier_roles(entries: dict[str, RegistryEntry]) -> list[str]:
-    return sorted(role for role, entry in entries.items() if entry.output_to is None and not entry.write_scope)
+    verifiers = [
+        role for role, entry in entries.items()
+        if entry.output_to is None and not entry.write_scope
+    ]
+    if not _stefan_enabled():
+        verifiers = [role for role in verifiers if role != STEFAN_ROLE]
+    return sorted(verifiers)
 
 
 def _topological_roles(entries: dict[str, RegistryEntry], verifiers: set[str]) -> list[str]:
@@ -981,6 +1003,21 @@ def _apply_worktree_changes(repo: Path, wt: Path, changed_files: list[str]) -> N
             dst.unlink()
 
 
+def _copy_plain_snapshot(repo: Path, dst: Path) -> None:
+    """Fallback isolation for environments where `.git/worktrees` is not writable. This is not a git
+    worktree, but it still gives each concurrent role its own files/result.json instead of racing in repo."""
+    ignore = shutil.ignore_patterns(".git", ".agent-runs", "__pycache__", ".pytest_cache")
+    for item in repo.iterdir():
+        if item.name in {".git", ".agent-runs", "__pycache__", ".pytest_cache"}:
+            continue
+        target = dst / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True, ignore=ignore)
+        elif item.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+
+
 def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
                        predecessors, results: dict, run_id: str, cache: bool, max_workers: int,
                        goal_context=None) -> dict:
@@ -1000,7 +1037,7 @@ def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
     def _one(role, wt, ok, err):
         stage_run_id = f"{run_id}-{role}"
         if not ok:
-            raise RuntimeError(f"worktree add failed for {role}: {err[-200:]}")
+            _copy_plain_snapshot(repo, wt)
         inputs = {u: results[u] for u in predecessors.get(role, []) if u in results}
         stage_ok, result, report_dict, stage = _execute_stage(wt, role, entries[role], objective,
                                                               inputs, stage_run_id, cache,
@@ -1031,9 +1068,10 @@ def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
             if stage_ok:
                 _apply_worktree_changes(repo, wt_by_role[role], report_dict.get("changed_files") or [])
     finally:
-        for (_, wt, _, _) in prepared:
-            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
-                           capture_output=True)
+        for (_, wt, ok, _) in prepared:
+            if ok:
+                subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                               capture_output=True)
             shutil.rmtree(wt, ignore_errors=True)
     return out
 
@@ -1065,7 +1103,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         # process. A direct caller passing a leaf worktree as `repo` would (mis)bind to it — direct callers must
         # pass a real repo or pre-set STREAM_LOG; a long-lived multi-repo process must set it per call.
         os.environ["STREAM_LOG"] = str(repo / ".agent-runs" / "stream.jsonl")
-    entries = _entries(repo)
+    entries = _active_entries(_entries(repo))
     predecessors = _predecessors(entries)
     verifiers = set(_verifier_roles(entries))
     ordered = _topological_roles(entries, verifiers)
