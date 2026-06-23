@@ -130,6 +130,102 @@ def test_interface_kind_without_profile_is_flagged():
     print("ok  an interface kind without a usable conformance profile -> conformance_profile major")
 
 
+def _service_contract(kind: str, profile: dict) -> dict:
+    c = _complete_cli_contract()
+    c["objective"] = f"Expose a {kind} production boundary."
+    c["acceptance_criteria"] = ["the service responds across its production boundary"]
+    c["deliverable_kind"] = kind
+    c["conformance"] = {kind: profile}
+    return c
+
+
+def _http_service_profile() -> dict:
+    return {
+        "start": {"command": "python3 app.py"},
+        "base_url": "http://127.0.0.1:8000",
+        "readiness_timeout_seconds": 3,
+        "examples": [{"method": "GET", "path": "/widgets", "expected_status": 200,
+                      "expected_body_contains": ["real-widget"]}],
+    }
+
+
+def _rpc_service_profile() -> dict:
+    return {
+        "start": {"command": "python3 rpc.py"},
+        "base_url": "http://127.0.0.1:8001/rpc",
+        "transport": "json_rpc_http",
+        "calls": [{"method": "widgets.get", "expected_result_contains": ["real-widget"]}],
+    }
+
+
+def test_http_service_without_end_to_end_example_is_flagged():
+    profile = _http_service_profile()
+    profile["examples"] = [{"method": "GET", "path": "/widgets", "expected_status": 200}]
+    rep = pf.preflight(_service_contract("http_service", profile))
+    e2e = [f for f in rep["findings"] if f["check"] == "production_boundary_e2e"]
+    assert not rep["passed"] and e2e and e2e[0]["kind"] == "http_service", rep
+    print("ok  http_service with status-only examples -> production_boundary_e2e major")
+
+
+def test_rpc_service_without_end_to_end_example_is_flagged():
+    profile = _rpc_service_profile()
+    profile["calls"] = [{"method": "widgets.get"}]
+    rep = pf.preflight(_service_contract("rpc_service", profile))
+    e2e = [f for f in rep["findings"] if f["check"] == "production_boundary_e2e"]
+    assert not rep["passed"] and e2e and e2e[0]["kind"] == "rpc_service", rep
+    print("ok  rpc_service without expected result -> production_boundary_e2e major")
+
+
+def test_declared_service_kind_with_empty_or_absent_profile_is_flagged():
+    # The obligation keys off the DECLARED deliverable_kind: a contract that declares a service kind but carries
+    # no usable conformance profile still owes the production-boundary probe. (Anti-dodge by declaring
+    # library/none instead is handled structurally — deliverable_kind is declared truthfully and conformance
+    # boots the real artifact — NOT by inferring a boundary from contract text; see the FP-safety test below.)
+    for kind, conformance in (
+        ("http_service", {"http_service": {}}),
+        ("rpc_service", None),
+    ):
+        c = _complete_cli_contract()
+        c["objective"] = f"Expose a {kind} production boundary."
+        c["acceptance_criteria"] = ["the service responds across its production boundary"]
+        c["deliverable_kind"] = kind
+        if conformance is None:
+            c.pop("conformance", None)
+        else:
+            c["conformance"] = conformance
+        rep = pf.preflight(c)
+        e2e = [f for f in rep["findings"] if f["check"] == "production_boundary_e2e"]
+        assert not rep["passed"] and e2e and e2e[0]["kind"] == kind, (kind, rep)
+    print("ok  a declared service kind with an empty/absent profile -> production_boundary_e2e major")
+
+
+def test_service_with_production_probe_passes_preflight():
+    for kind, profile in (("http_service", _http_service_profile()), ("rpc_service", _rpc_service_profile())):
+        rep = pf.preflight(_service_contract(kind, profile))
+        assert rep["applicable"] and rep["passed"], (kind, rep)
+        assert not [f for f in rep["findings"] if f["check"] == "production_boundary_e2e"], rep
+    print("ok  service profiles with launch+endpoint/call+expected body/result pass preflight")
+
+
+def test_non_service_kinds_are_not_forced_to_declare_service_probe():
+    library = _complete_cli_contract()
+    library["objective"] = "Add a reusable parser library that may call an HTTP API."
+    library["acceptance_criteria"] = ["module exposes parse_config"]
+    library["deliverable_kind"] = "library"
+    library["conformance"] = {"library": {"module": "parserlib", "exported_symbols": ["parse_config"]}}
+
+    none = _complete_cli_contract()
+    none["objective"] = "Document the GET /health behavior without changing an executable interface."
+    none["deliverable_kind"] = "none"
+    none.pop("conformance", None)
+
+    for c in (_complete_cli_contract(), library, none):
+        rep = pf.preflight(c)
+        assert rep["passed"], rep
+        assert not [f for f in rep["findings"] if f["check"] == "production_boundary_e2e"], rep
+    print("ok  cli/library/none contracts are not forced to declare service production-boundary probes")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []

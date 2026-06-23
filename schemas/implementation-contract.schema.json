@@ -533,7 +533,7 @@
       "additionalProperties": false
     },
     "http_service_profile": {
-      "description": "Black-box HTTP service contract: declared start command, readiness URL, and concrete request->response examples. The checker starts the service, waits until base_url returns any HTTP response, then compares status and capped body substrings for each example.",
+      "description": "Black-box HTTP service contract: declared start command, readiness URL, and concrete request->response examples. The checker starts the real service process, waits until base_url returns any HTTP response, then compares status and capped body substrings for each example. At least one example must be a production-boundary end-to-end probe: launch command + externally observable endpoint + expected status/body.",
       "type": "object",
       "required": [
         "start",
@@ -567,9 +567,22 @@
           "minimum": 0
         },
         "examples": {
-          "description": "Concrete golden HTTP requests. Each pins the response status; body checks are substring matches against a capped decoded response body.",
+          "description": "Concrete golden HTTP requests. Each pins the response status; at least one also pins body content so a stubbed production path cannot satisfy the service boundary by returning only a generic status.",
           "type": "array",
           "minItems": 1,
+          "contains": {
+            "type": "object",
+            "required": [
+              "expected_body_contains"
+            ],
+            "properties": {
+              "expected_body_contains": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          },
+          "minContains": 1,
           "items": {
             "type": "object",
             "required": [
@@ -604,6 +617,7 @@
               },
               "expected_body_contains": {
                 "type": "array",
+                "minItems": 1,
                 "items": {
                   "type": "string"
                 }
@@ -616,7 +630,7 @@
       "additionalProperties": false
     },
     "rpc_service_profile": {
-      "description": "Black-box RPC contract: boot the service and ACTUALLY INVOKE each declared call over the declared transport (not a static shape check). `json_rpc_http` posts JSON-RPC 2.0 over stdlib HTTP and checks the result/error (an application error rides HTTP 200, so the HTTP status alone is not the contract); `grpc` invokes dynamically via a compiled descriptor set, with grpcio imported lazily only when a grpc deliverable is checked. Buf-style backwards-compatibility diffing against a baseline is a later addition.",
+      "description": "Black-box RPC contract: boot the service and ACTUALLY INVOKE each declared call over the declared transport (not a static shape check). `json_rpc_http` posts JSON-RPC 2.0 over stdlib HTTP and checks the result/error (an application error rides HTTP 200, so the HTTP status alone is not the contract); `grpc` invokes dynamically via a compiled descriptor set, with grpcio imported lazily only when a grpc deliverable is checked. At least one call must be a production-boundary end-to-end probe: launch command + externally observable call + expected result/error. Buf-style backwards-compatibility diffing against a baseline is a later addition.",
       "type": "object",
       "required": [
         "start",
@@ -661,9 +675,31 @@
           "type": "string"
         },
         "calls": {
-          "description": "Concrete RPC calls to invoke. Each pins either an expected result (no error, with optional result substrings) or an expected error code.",
+          "description": "Concrete RPC calls to invoke. At least one pins either expected result content or an expected error code, so a declared service/integration boundary is actually exercised by conformance.",
           "type": "array",
           "minItems": 1,
+          "contains": {
+            "type": "object",
+            "anyOf": [
+              {
+                "required": [
+                  "expected_result_contains"
+                ],
+                "properties": {
+                  "expected_result_contains": {
+                    "type": "array",
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "required": [
+                  "expected_error_code"
+                ]
+              }
+            ]
+          },
+          "minContains": 1,
           "items": {
             "type": "object",
             "required": [
@@ -684,6 +720,7 @@
               "expected_result_contains": {
                 "description": "Substrings that must appear in the JSON-serialized result.",
                 "type": "array",
+                "minItems": 1,
                 "items": {
                   "type": "string"
                 }
