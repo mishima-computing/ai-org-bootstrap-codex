@@ -204,14 +204,34 @@ def _call_leaf(run_leaf, repo, task, resume_diff=None, goal_context=None):
 
 
 def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
-    """Call run_pipeline with goal_context when the implementation accepts it."""
-    import inspect
+    """Call run_pipeline with goal_context AND design-wave parallelism when the implementation accepts them.
+
+    The goal path historically called run_pipeline with the serial default (max_parallel=1), so per-leaf design
+    waves ran the independent producers (genius/conservative/aggressive + the CI writers) one at a time even
+    though the CLI defaults to 4. Those producers are read-only isolated runs whose edits merge back SERIALLY
+    after the futures complete (the controller_parallel pattern proven by test_write_role_isolation), so running
+    them concurrently is a tested-safe, waste-outside-the-LLM speedup — it does NOT touch the shared goal
+    worktree's index/HEAD (that is the frontier-leaf parallelism, which needs a merge lock and is NOT enabled
+    here). Matches the CLI default of 4; AI_ORG_MAX_PARALLEL overrides (set 1 to restore serial).
+    """
+    import inspect, os
+    try:
+        max_parallel = int(os.environ.get("AI_ORG_MAX_PARALLEL", "4"))
+    except ValueError:
+        max_parallel = 4
+    if max_parallel < 1:
+        max_parallel = 1
     try:
         sig = inspect.signature(run_pipeline)
-        if "goal_context" in sig.parameters or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-        ):
-            return run_pipeline(wt, objective, run_id, goal_context=goal_context)
+        params = sig.parameters
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs = {}
+        if "goal_context" in params or has_var_kw:
+            kwargs["goal_context"] = goal_context
+        if "max_parallel" in params or has_var_kw:
+            kwargs["max_parallel"] = max_parallel
+        if kwargs:
+            return run_pipeline(wt, objective, run_id, **kwargs)
     except (TypeError, ValueError):
         pass
     return run_pipeline(wt, objective, run_id)
