@@ -583,6 +583,7 @@ python3 scripts/test_secret_scan.py && python3 scripts/test_fuzz_cli.py && pytho
   [ADR-0009](docs/decisions/ADR-0009-verification-boundary-executable-contract-and-acceptance-bundle.md)
   the verification boundary — executable contract + acceptance bundle (with its evidence/sources).
 - [`docs/codex-carrier-capabilities.md`](docs/codex-carrier-capabilities.md) — what the Codex carrier can and cannot do.
+- [`docs/carrier-command-surface.md`](docs/carrier-command-surface.md) — why the carrier's built-in commands (`/goal`, `/review`, `/rules`/execpolicy, `/skills`) don't replace the mechanism — a forensic, binary/protocol/storage-level map.
 - [`docs/evidence/`](docs/evidence/) — measured results (role timing & pipelining, cone-recall).
 
 ## Source of truth
