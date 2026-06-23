@@ -856,26 +856,48 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
     return report
 
 
-def _closed_loop_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
-    """ADR-0009 P0 — the CLOSED-LOOP convergence findings. RE-RUN the deterministic artifact gates
-    (conformance / secret / fuzz) on the CURRENT artifact and combine with linon, so a `block`-mode gate that
-    STILL fails after a repair keeps the loop open instead of being overwritten by linon-only (the gate
-    becomes ENFORCEMENT, not just telemetry). Returns (findings, gate_ctx): `gate_ctx` carries each gate's
-    findings so the caller can FEED them to the repair agents — the implementer must see the conformance /
-    secret / fuzz failures, not only linon's. preflight is contract-bound, so the caller re-runs it on the
-    (possibly repaired) contract and passes its report in."""
+def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
+    """gate-behind — RE-RUN ONLY the CHEAP deterministic gates (conformance / preflight / secret / fuzz) on the
+    CURRENT artifact, with NO linon contribution. Returns (findings, gate_ctx, blocked_by):
+      * `findings`   — the CURRENT-ITERATION BLOCKING cheap-gate findings (empty iff every cheap gate is clean).
+                       Only `block`-mode gate FAILURES fold here, exactly as `_closed_loop_findings` folded them;
+                       shadow/advisory findings never appear, so they never skip linon.
+      * `gate_ctx`   — each gate's findings, so the caller can FEED them to the repair agents (the implementer
+                       must see WHICH conformance / secret / fuzz check failed).
+      * `blocked_by` — the gate name(s) that produced a blocking finding THIS iteration (the `linon_skipped`
+                       reason). Empty list ⟺ `findings == []` ⟺ every cheap gate is clean.
+    A non-empty `blocked_by` lets the caller SKIP the expensive linon verifier on a diff that repairs no matter
+    what linon says — saving its tokens AND its wall-clock. preflight is contract-bound, so the caller re-runs
+    it on the (possibly repaired) contract and passes its report in."""
     conf = _shadow_conformance(repo, results, run_id)
     secret = _secret_scan(repo, run_id)
     fuzz = _fuzz_cli(repo, results, run_id)
-    findings = _linon_findings(results.get("linon"))
-    findings = _apply_conformance_gate(findings, conf, CONFORMANCE_GATE_MODE)
-    findings = _apply_conformance_gate(findings, preflight_report, PREFLIGHT_MODE)
-    findings = _apply_secret_gate(findings, secret, SECRET_SCAN_MODE)
-    findings = _apply_conformance_gate(findings, fuzz, FUZZ_CLI_MODE)
+    findings: list[dict] = []
+    blocked_by: list[str] = []
+    for name, report, applier, mode in (
+        ("conformance", conf, _apply_conformance_gate, CONFORMANCE_GATE_MODE),
+        ("preflight", preflight_report, _apply_conformance_gate, PREFLIGHT_MODE),
+        ("secret", secret, _apply_secret_gate, SECRET_SCAN_MODE),
+        ("fuzz", fuzz, _apply_conformance_gate, FUZZ_CLI_MODE),
+    ):
+        before = len(findings)
+        findings = applier(findings, report, mode)
+        if len(findings) > before:                       # this gate folded a current-iteration BLOCKING finding
+            blocked_by.append(name)
     gate_ctx = {name: list((rep or {}).get("findings") or [])
                 for name, rep in (("conformance", conf), ("secret", secret),
                                   ("fuzz", fuzz), ("preflight", preflight_report))}
-    return findings, gate_ctx
+    return findings, gate_ctx, blocked_by
+
+
+def _closed_loop_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
+    """ADR-0009 P0 — the CLOSED-LOOP convergence findings: linon + the cheap deterministic gates RE-RUN on the
+    CURRENT artifact, so a `block`-mode gate that STILL fails after a repair keeps the loop open instead of
+    being overwritten by linon-only (the gate becomes ENFORCEMENT, not just telemetry). Returns
+    (findings, gate_ctx). Retained as the composite that folds linon onto the cheap gates; gate-behind drives
+    the cheap gates directly via `_cheap_gate_findings` so it can DECIDE whether to run linon at all."""
+    cheap, gate_ctx, _blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report)
+    return _linon_findings(results.get("linon")) + cheap, gate_ctx
 
 
 def _apply_secret_gate(findings: list[dict], report: dict | None, mode: str) -> list[dict]:
@@ -1181,37 +1203,44 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         if pipeline_failed:
             break
 
-    if not pipeline_failed:
-        verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
-        for role in sorted(verifiers):
-            entry = entries[role]
-            stage_run_id = f"{run_id}-{role}"
-            stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
-                                                                  verifier_inputs, stage_run_id, cache,
-                                                                  goal_context=goal_context)
-            summary[role] = bool(report_dict.get("ok"))
-            required_ok[role] = stage_ok
-            fatal_ok[role] = stage_ok
-            reports[role] = report_dict
-            if report_dict.get("session_id"):
-                sessions[role] = report_dict["session_id"]
-            stages.append(stage)
-            _store_stage_output(role, entry, stage_ok, result, report_dict, results)
-            if not stage_ok:
-                pipeline_failed = True
-                break
-
-    # ADR-0009 #1: dynamic conformance gate alongside static Linon. Dormant unless the contract declares a CLI;
-    # SHADOW (streamed, non-blocking) until effective-FP is shown ~0. Runs once over the initially-built leaf.
+    # gate-behind (ADR-0009 #1 closed loop, reordered): run the CHEAP deterministic gates BEFORE the expensive
+    # linon verifier. If a cheap gate produced a CURRENT-ITERATION BLOCKING finding, the diff repairs no matter
+    # what linon says — so SKIP linon entirely (no carrier call, no tokens, no wall-clock) and leave
+    # required_ok["linon"] UNSET (ADR-0016 D5: never fabricate a linon pass). findings is non-empty in that
+    # case, so the loop is NOT converged and proceeds to repair. When the cheap gates are CLEAN, linon runs
+    # EXACTLY as before (same invocation / scope / model) and its findings fold in. Linon is read-only, so the
+    # cheap-gate results are identical whether they run before or after it.
     initial_finished_at = _utc_now()
-    # CLOSED LOOP (ADR-0009 P0): findings = linon + the deterministic gates RE-RUN on the current artifact.
-    # In `shadow` (default) a gate contributes nothing (telemetry); in `block` it folds AND is re-checked every
-    # repair iteration below, so a still-failing gate keeps the loop open and convergence requires it clean.
     gate_ctx: dict = {}
+    findings: list[dict] = _linon_findings(results.get("linon"))
     if not pipeline_failed:
-        findings, gate_ctx = _closed_loop_findings(repo, results, run_id, preflight_report)
-    else:
-        findings = _linon_findings(results.get("linon"))
+        cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report)
+        if blocked_by:
+            _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": run_id,
+                                  "iteration": 0, "reason": blocked_by, "ts": _iso8601_utc()})
+            findings = cheap_findings
+        else:
+            verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
+            for role in sorted(verifiers):
+                entry = entries[role]
+                stage_run_id = f"{run_id}-{role}"
+                stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
+                                                                      verifier_inputs, stage_run_id, cache,
+                                                                      goal_context=goal_context)
+                summary[role] = bool(report_dict.get("ok"))
+                required_ok[role] = stage_ok
+                fatal_ok[role] = stage_ok
+                reports[role] = report_dict
+                if report_dict.get("session_id"):
+                    sessions[role] = report_dict["session_id"]
+                stages.append(stage)
+                _store_stage_output(role, entry, stage_ok, result, report_dict, results)
+                if not stage_ok:
+                    pipeline_failed = True
+                    break
+            # clean gates ⇒ findings = linon (cheap_findings is empty by construction here).
+            findings = _linon_findings(results.get("linon")) + cheap_findings
+        initial_finished_at = _utc_now()
     repair_cap = _severity_repair_cap(findings, max_repair_iterations)   # scale the budget to the worst finding
     iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
                                         list(stages), len(findings)))
@@ -1270,31 +1299,45 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
                 break
 
-        if not pipeline_failed and "linon" in entries:
-            verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles) if role in results}
-            entry = entries["linon"]
-            stage_run_id = f"{run_id}-repair{repair_iterations}-linon"
-            stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective,
-                                                                  verifier_inputs, stage_run_id, cache,
-                                                                  goal_context=goal_context)
-            summary["linon"] = bool(report_dict.get("ok"))
-            required_ok["linon"] = stage_ok
-            reports["linon"] = report_dict
-            stages.append(stage)
-            repair_stages.append(stage)
-            _store_stage_output("linon", entry, stage_ok, result, report_dict, results)
-            fatal_ok["linon"] = stage_ok
-            if not stage_ok:
-                pipeline_failed = True
-
-        # CLOSED LOOP: re-run preflight on the (possibly repaired) contract and the artifact gates on the
-        # repaired artifact, then recompute findings from linon + the gates. A block-mode gate that still
-        # fails keeps the loop open; convergence (findings == []) now requires linon clean AND every block
-        # gate clean ON THE CURRENT artifact — not a stale initial result that linon-only would overwrite.
+        # gate-behind + CLOSED LOOP: re-run preflight on the (possibly repaired) contract and the cheap gates on
+        # the repaired artifact FIRST. A repaired diff that STILL trips a cheap block gate repairs no matter what
+        # linon says, so SKIP linon again (no carrier call, no tokens, no wall-clock) and DROP any stale
+        # required_ok["linon"] from a prior iteration — a doomed iteration must never carry a fresh-looking linon
+        # pass. Only once the cheap gates pass does linon run, BEFORE convergence is recomputed. Convergence
+        # (findings == []) still requires linon clean AND every block gate clean ON THE CURRENT artifact.
         if not pipeline_failed:
             repair_run_id = f"{run_id}-repair{repair_iterations}"
             repair_preflight = _contract_preflight(repo, results, repair_run_id)
-            findings, gate_ctx = _closed_loop_findings(repo, results, repair_run_id, repair_preflight)
+            cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, repair_run_id,
+                                                                        repair_preflight)
+            if blocked_by:
+                _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": repair_run_id,
+                                      "iteration": repair_iterations, "reason": blocked_by,
+                                      "ts": _iso8601_utc()})
+                required_ok.pop("linon", None)             # never let a stale pass survive a skipped iteration
+                findings = cheap_findings
+            elif "linon" in entries:
+                verifier_inputs = {role: results[role] for role in sorted(terminal_write_roles)
+                                   if role in results}
+                entry = entries["linon"]
+                stage_run_id = f"{run_id}-repair{repair_iterations}-linon"
+                stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective,
+                                                                      verifier_inputs, stage_run_id, cache,
+                                                                      goal_context=goal_context)
+                summary["linon"] = bool(report_dict.get("ok"))
+                required_ok["linon"] = stage_ok
+                reports["linon"] = report_dict
+                stages.append(stage)
+                repair_stages.append(stage)
+                _store_stage_output("linon", entry, stage_ok, result, report_dict, results)
+                fatal_ok["linon"] = stage_ok
+                if not stage_ok:
+                    pipeline_failed = True
+                    findings = _linon_findings(results.get("linon"))
+                else:
+                    findings = _linon_findings(results.get("linon")) + cheap_findings
+            else:                                          # no linon role declared — cheap gates alone decide
+                findings = _linon_findings(results.get("linon")) + cheap_findings
         else:
             findings = _linon_findings(results.get("linon"))
         repair_finished_at = _utc_now()
