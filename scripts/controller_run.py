@@ -128,6 +128,13 @@ def run(repo, contract: dict, run_id: str, *, cache=True,
             write_scope=list(contract.get("files_allowed_to_change") or []),
             goal_context=goal_context,
             defect_locus=defect_locus,   # R4: re-seed pre-localization from the failing region on a repair
+            # SHADOW lane (the A/B-aufheben experiment): stream cassette_shadow with the LIVE deterministic
+            # pick on every launch (always observable, zero cost). The real aufheben carrier query — which
+            # spends tokens — is opt-in via AOB_CASSETTE_SHADOW=1; when off, aufheben_pick streams empty.
+            # Fire-and-forget either way: the implementer launches on the LIVE pick and never blocks on it.
+            run_id=run_id,
+            aufheben_query=(implement_host.default_aufheben_query(repo, objective)
+                            if os.environ.get("AOB_CASSETTE_SHADOW") == "1" else None),
         )
         # The build-map and WHY are runner-owned inputs, not CarrierContract fields, so they are not in the
         # existing cache key. Do not replay a stale implementation without folding the current grounding.

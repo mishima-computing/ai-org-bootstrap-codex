@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -336,6 +337,159 @@ class WhyThreadTest(unittest.TestCase):
             self.assertTrue(carrier.prompts)
             self.assertIn("only in memory", carrier.prompts[0])
             self.assertFalse((repo / ".agent-runs" / "goals").exists(), "WHY must not be read from a goal record")
+
+
+def http_contract(**overrides):
+    base = impl_contract(
+        objective="wire the orders http endpoint",
+        deliverable_kind="http_service",
+        files_allowed_to_change=["src/*.py"],
+        conformance={"http_service": {"start_cmd": "python -m src.app", "health": "/healthz", "port": 8080}},
+    )
+    base.update(overrides)
+    return base
+
+
+class CassetteCatalogTest(unittest.TestCase):
+    def test_catalog_exposes_name_and_description_not_body(self):
+        # (a) cassette_catalog() returns name+description for integration, NOT the body.
+        catalog = implement_host.cassette_catalog()
+        names = [c["name"] for c in catalog]
+        self.assertIn("integration", names)
+        entry = next(c for c in catalog if c["name"] == "integration")
+        self.assertEqual(set(entry.keys()), {"name", "description"})
+        self.assertIn("production boundary", entry["description"])
+        self.assertNotIn("NEVER stub or mock", json.dumps(catalog))   # the body is never disclosed here
+
+
+class SelectCassettesTest(unittest.TestCase):
+    def test_select_for_http_integration_objective(self):
+        # (b) select_cassettes -> ["integration"] for an http_service/integration objective.
+        picks = implement_host.select_cassettes(
+            "wire the orders http endpoint", http_contract(), ["src/app.py"])
+        self.assertEqual(picks, ["integration"])
+
+    def test_select_none_for_cli_library(self):
+        # (b) select_cassettes -> [] for cli/library.
+        picks = implement_host.select_cassettes(
+            "build a cli that prints reports",
+            impl_contract(objective="build a cli that prints reports", deliverable_kind="library"),
+            ["src/cli.py"],
+        )
+        self.assertEqual(picks, [])
+
+
+class CassetteBuildSectionTest(unittest.TestCase):
+    def test_body_appended_when_selected_absent_otherwise(self):
+        # (c) the integration body text is appended to the build-map prompt when selected, absent otherwise.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            selected = implement_host.build_map_for(
+                repo, raw_prompt(contract=http_contract(), objective="wire the orders http endpoint"),
+                write_scope=["src/*.py"],
+            )
+            section = implement_host.format_build_section(selected)
+            self.assertEqual([c["name"] for c in selected["cassettes"]], ["integration"])
+            self.assertIn("NEVER stub or mock the production boundary", section)
+            self.assertIn("PRIMING CASSETTES", section)
+
+            none = implement_host.build_map_for(repo, raw_prompt(), write_scope=["src/*.py"])  # library contract
+            none_section = implement_host.format_build_section(none)
+            self.assertEqual(none["cassettes"], [])
+            self.assertNotIn("NEVER stub or mock the production boundary", none_section)
+            self.assertNotIn("PRIMING CASSETTES", none_section)
+
+
+class CassetteShadowTest(unittest.TestCase):
+    """(d) the shadow query streams a cassette_shadow event with both picks and does NOT block/fail the
+    launch (stub that sleeps / raises)."""
+
+    def _read_shadow_events(self, log: Path, run_id: str):
+        # Filter on run_id: STREAM_LOG is process-global and resolved at write-time, so a fire-and-forget
+        # daemon thread from another test could tee into this log. Each test asserts only its own event.
+        if not log.exists():
+            return []
+        events = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+        return [e for e in events if e.get("type") == "cassette_shadow" and e.get("run_id") == run_id]
+
+    def test_shadow_streams_both_picks_and_does_not_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            log = repo / "stream.jsonl"
+            os.environ["STREAM_LOG"] = str(log)
+            try:
+                def slow_query(catalog, none_option):
+                    time.sleep(0.5)
+                    self.assertNotIn("body", json.dumps(catalog))   # aufheben sees no bodies
+                    return [{"name": "integration"}]
+
+                t0 = time.monotonic()
+                thread = implement_host.fire_cassette_shadow(
+                    repo, "wire the orders http endpoint", http_contract(), ["src/app.py"],
+                    run_id="r-shadow", aufheben_query=slow_query)
+                elapsed = time.monotonic() - t0
+                self.assertLess(elapsed, 0.4, "fire_cassette_shadow must not block on the query")
+                self.assertEqual(self._read_shadow_events(log, "r-shadow"), [])   # nothing streamed yet (still sleeping)
+                thread.join(5)
+                events = self._read_shadow_events(log, "r-shadow")
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["deterministic_pick"], ["integration"])
+                self.assertEqual(events[0]["aufheben_pick"], ["integration"])
+                self.assertEqual(events[0]["run_id"], "r-shadow")
+            finally:
+                os.environ.pop("STREAM_LOG", None)
+
+    def test_shadow_swallows_a_raising_query(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            log = repo / "stream.jsonl"
+            os.environ["STREAM_LOG"] = str(log)
+            try:
+                def boom(catalog, none_option):
+                    raise RuntimeError("aufheben query exploded")
+
+                thread = implement_host.fire_cassette_shadow(
+                    repo, "wire the orders http endpoint", http_contract(), ["src/app.py"],
+                    run_id="r-raise", aufheben_query=boom)
+                thread.join(5)
+                events = self._read_shadow_events(log, "r-raise")
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["deterministic_pick"], ["integration"])   # LIVE pick survives
+                self.assertEqual(events[0]["aufheben_pick"], [])                     # failed query -> empty
+                self.assertIn("aufheben query exploded", events[0]["error"])
+            finally:
+                os.environ.pop("STREAM_LOG", None)
+
+    def test_runner_launch_not_blocked_or_failed_by_shadow(self):
+        # The implementer launch completes promptly and successfully even when the shadow query sleeps
+        # AND raises — the carrier (LIVE lane) is never gated on the shadow.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            log = repo / "stream.jsonl"
+            os.environ["STREAM_LOG"] = str(log)
+            try:
+                def slow_then_raise(catalog, none_option):
+                    time.sleep(0.5)
+                    raise RuntimeError("late failure")
+
+                carrier = StubCarrier()
+                runner = implement_host.make_implement_carrier_runner(
+                    repo,
+                    objective=raw_prompt(contract=http_contract(), objective="wire the orders http endpoint"),
+                    contract_inputs={"aufheben-designer": http_contract()},
+                    write_scope=["src/*.py"],
+                    carrier=carrier,
+                    aufheben_query=slow_then_raise,
+                    run_id="r-runner",
+                )
+                t0 = time.monotonic()
+                cr = runner(repo, "role prompt", "workspace-write", out_dir=repo / ".agent-runs" / "impl")
+                elapsed = time.monotonic() - t0
+                self.assertTrue(cr["ok"])                       # launch succeeded
+                self.assertLess(elapsed, 0.4, "the launch must not wait on the shadow query")
+                self.assertIn("NEVER stub or mock the production boundary", carrier.prompts[0])  # LIVE primed
+            finally:
+                os.environ.pop("STREAM_LOG", None)
 
 
 if __name__ == "__main__":

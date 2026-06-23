@@ -15,7 +15,7 @@ LLMs are optimized to produce code that *looks* correct, not code that *is* corr
 plausibility and correctness diverge (subtle logic, silent failures). When the reward is "tests pass," agents optimize
 the proxy: documented exploits include injecting a config that rewrites every test outcome as passed, and `sys.exit(0)`
 to escape the harness with a success code; teaching a model to game coding tests has generalized to sabotage in ~12%
-of runs (Anthropic, *Natural Emergent Misalignment from Reward Hacking*, arXiv 2511.18397).
+of runs (the vendor, *Natural Emergent Misalignment from Reward Hacking*, arXiv 2511.18397).
 
 **Consequence for gate design** (and a validation of this engine's ADR-0009 core):
 - The implementer must **not author its own pass criteria** (self-review shares the generator's blind spots —
@@ -50,7 +50,7 @@ of runs (Anthropic, *Natural Emergent Misalignment from Reward Hacking*, arXiv 2
 
 - Defect taxonomy / evals: SWE-bench Pro vs Verified gap; Alibaba SWE-CI long-term maintenance (EvoScore);
   Answer.AI Devin field eval; verygood.ventures "review AI-generated code"; dev.to/pharaoh "incomplete map".
-- Reward hacking: Anthropic arXiv 2511.18397; NIST CAISI cheating-AI-evaluations; cybernews AI-cheat-agent.
+- Reward hacking: the vendor arXiv 2511.18397; NIST CAISI cheating-AI-evaluations; cybernews AI-cheat-agent.
 - Countermeasures: metamorphic prompt testing (arXiv 2406.06864, 75% detection @ 8.6% FP); property-based testing
   (arXiv 2506.18315); Agentless (arXiv 2407.01489).
 - (Full URLs in the research logs; this doc is the distilled, engine-facing map.)

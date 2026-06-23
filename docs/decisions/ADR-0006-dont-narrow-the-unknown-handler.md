@@ -116,6 +116,25 @@ with that purpose:
   dedup lives in the deterministic controller (which already independently confirms findings
   under NN1), never inside Linon. Statelessness is also what makes the field-narrowing
   levers cacheable **if** they are ever proven safe.
+- **The A/B-aufheben cassette mechanism is additive under this ADR (it only ever *adds* field).**
+  Cassettes are a JSON-defined priming library (`cassettes/cassettes.json`); each entry carries a
+  `when` selector, a one-line `description`, a prime `body`, and a `paired_gate`. The mechanism runs two
+  lanes, neither of which narrows anyone's field:
+  - **LIVE (what the implementer builds on).** `implement_host.select_cassettes` is a *pure deterministic
+    lookup* over the `when` fields — no model call, non-blocking. Selected `body` text is **appended** into
+    the build-map prompt (`format_build_section`); an empty pick (`[]` = NONE) primes nothing. Like the rest
+    of the build-map grounding, this is additive: it adds priming, it never narrows
+    `files_allowed_to_change` and never gates the launch.
+  - **SHADOW (the experiment, observed-only).** On implementer launch the host *fire-and-forgets* an
+    aufheben-style query in parallel — aufheben is shown only the **track list** (names + descriptions) plus
+    an explicit **NONE** option (progressive disclosure: bodies are never disclosed to the picker), and asked
+    for 0–2 names. The result streams as a `cassette_shadow` event carrying both the `deterministic_pick` and
+    the `aufheben_pick`. The launch **must not block on or fail from** the shadow: it runs on a daemon thread
+    and every error is swallowed, so the experiment can be measured against the deterministic baseline without
+    ever endangering the LIVE path. The real carrier query is opt-in (`AOB_CASSETTE_SHADOW=1`); when off, the
+    event still streams the deterministic pick at zero cost. Same discipline as the rest of this ADR: buy the
+    comparison structurally, off the critical path, and let measurement decide whether the picker beats the
+    lookup — never narrow or gate the working path on the unproven lane.
 - **This extends ADR-0005.** There we refused to dumb the *implementer* to buy speed; here
   we refuse to narrow the *verifier*'s field on assumption. Same rule from both ends: do not
   reduce an agent's capacity or field of view to save time — buy speed structurally, where

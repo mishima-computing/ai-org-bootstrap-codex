@@ -40,7 +40,7 @@ The implementer host is a Python-cored shell around the carrier. Its skill step 
 2. **Select** the matching curated skill(s) from the library by that classification (a lookup keyed on
    defect-class / task-type / `paths:` globs — not a description-match the carrier might miss).
 3. **Write** the selected `SKILL.md`(s) to the carrier's *actual* skill path before launch. Paths are **not**
-   portable: Codex reads `.agents/skills/` (and nested `AGENTS.md`), Claude Code reads only `.claude/skills/`.
+   portable: Codex reads `.agents/skills/` (and nested `AGENTS.md`), the sibling-carrier runtime reads only `.sibling/skills/`.
    Target the runtime in use; do not assume cross-tool portability.
 4. **Scope** the carrier with `--cd <subtree>` from the localizer (PreLocalization / defect-locus) — the strongest
    single reliability lever (multi-file tasks fail; small file sets succeed) and the fix for the large-repo no-op
@@ -60,8 +60,8 @@ gate (enforce) + a narrow rename skill primed only on rename tasks ("handle snak
 
 ## Sources
 
-- SKILL.md / Agent Skills: anthropic.com/engineering/equipping-agents-…; platform.claude.com agent-skills overview &
-  best-practices; agentskills.io/specification; developers.openai.com/codex/skills; Claude Code issue #31005
+- SKILL.md / Agent Skills: (vendor)/engineering/equipping-agents-…; (vendor docs) agent-skills overview &
+  best-practices; agentskills.io/specification; developers.openai.com/codex/skills; the sibling-carrier runtime issue #31005
   (`.agents/skills` portability, unanswered).
 - Skill evals: arXiv 2603.15401 (SWE-Skills-Bench), 2602.12670 (SkillsBench), 2604.04323 ("In the Wild").
 - Scope / no-op: SWE-Bench Pro multi-file (arXiv 2509.16941); Codex auto-compaction not-disableable (issue #11716,
