@@ -547,6 +547,11 @@ makes the *same* model obey a behavioural or semantic instruction more reliably.
 executable contract, ~0-FP gates, a withheld oracle, composed-goal acceptance, directed decomposition), not in a
 richer way to ask the model nicely.
 
+The forensic backing — what each feature is at the binary/protocol/storage level (the `thread/goal/*` app-server API
+and its `goals.sqlite` schema; the embedded reviewer prompt and `overall_correctness` verdict; the Starlark
+`prefix_rule` execpolicy vs the sandbox's `writable_roots`; why file-write scope is the one constraint that maps) —
+is in [docs/carrier-command-surface.md](docs/carrier-command-surface.md).
+
 ## Package
 
 The installable artifact lives at `packages/codex-org-bootstrap` and exposes:
