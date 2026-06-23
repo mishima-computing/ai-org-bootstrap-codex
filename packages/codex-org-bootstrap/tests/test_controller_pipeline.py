@@ -418,6 +418,127 @@ class ControllerPipelineTests(unittest.TestCase):
     def _linon_carrier_calls(self):
         return [call for call in self.calls if call[0] == "linon"]
 
+    @staticmethod
+    def _gate_report(finding):
+        return {"applicable": True, "passed": False, "checks_run": 1, "findings": [finding]}
+
+    def _run_with_conformance_reports(self, reports, *, gate_mode="block", max_repair_iterations=2):
+        seq = list(reports)
+
+        def _conf(repo, results, run_id, runner=None):
+            return seq.pop(0) if seq else None
+
+        with mock.patch.object(pipeline, "CONFORMANCE_GATE_MODE", gate_mode), \
+             mock.patch.object(pipeline, "_shadow_conformance", _conf), \
+             mock.patch.object(pipeline, "_secret_scan", return_value=None), \
+             mock.patch.object(pipeline, "_fuzz_cli", return_value=None):
+            return pipeline.run_pipeline(
+                ROOT, "wire declared org", "pipe-test", cache=False,
+                max_repair_iterations=max_repair_iterations,
+            )
+
+    def _repair_implementer_inputs(self):
+        matches = [payload["inputs"] for role, payload, run_id, _cache, _contract in self.calls
+                   if role == "implementer" and "-repair" in run_id]
+        self.assertTrue(matches, "expected a repair implementer invocation")
+        return matches[-1]
+
+    def test_adr0018_structural_finding_forwards_only_inert_evidence(self):
+        finding = {
+            "source": "http-conformance", "check": "lifecycle", "severity": "critical", "passed": False,
+            "detail": "service start command exited before readiness",
+            "returncode": 7, "stdout_tail": "own stdout", "stderr_tail": "own stderr",
+            "expected": "hidden-golden",
+        }
+        self._run_with_conformance_reports([self._gate_report(finding), None])
+
+        evidence = self._repair_implementer_inputs()["gate_findings"]
+        forwarded = evidence["findings"][0]
+        self.assertEqual(evidence["kind"], "inert_deterministic_gate_evidence")
+        self.assertEqual(forwarded["check"], "lifecycle")
+        self.assertEqual(forwarded["severity"], "critical")
+        self.assertEqual(forwarded["returncode"], 7)
+        self.assertEqual(forwarded["stdout_tail"], "own stdout")
+        self.assertEqual(forwarded["stderr_tail"], "own stderr")
+        self.assertNotIn("expected", forwarded)
+        self.assertNotIn("hidden-golden", json.dumps(evidence, sort_keys=True))
+
+    def test_adr0018_cli_http_rpc_oracle_findings_redact_expected_and_detail(self):
+        for source in ("cli-conformance", "http-conformance", "rpc-conformance"):
+            with self.subTest(source=source):
+                self.calls.clear()
+                golden = f"withheld-{source}"
+                finding = {
+                    "source": source, "check": "body_contains", "severity": "major", "passed": False,
+                    "detail": f"example 0 missed golden {golden}",
+                    "example": 0, "expected": golden, "actual": "observed-output",
+                }
+                self._run_with_conformance_reports([self._gate_report(finding), None])
+
+                evidence = self._repair_implementer_inputs()["gate_findings"]
+                forwarded = evidence["findings"][0]
+                self.assertEqual(forwarded["actual"], "observed-output")
+                self.assertTrue(forwarded["_oracle_withheld"])
+                self.assertNotIn("expected", forwarded)
+                self.assertNotIn(golden, json.dumps(self._repair_implementer_inputs(), sort_keys=True))
+
+    def test_adr0018_rpc_call_oracle_withheld_but_batch_and_json_specs_remain(self):
+        contract = {
+            "role_id": "aufheben-designer",
+            "deliverable_kind": "rpc_service",
+            "conformance": {
+                "rpc_service": {
+                    "start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
+                    "calls": [
+                        {"method": "add", "params": {"a": 1}, "expected_result_contains": ["sum:2"]},
+                        {"method": "bad", "params": {}, "expected_error_code": -32601},
+                    ],
+                },
+                "batch_job": {"run": {"command": "job"}, "expected_status": 2,
+                              "produced_artifacts": ["out.json"]},
+                "json": {"files": [{"path": "out.json", "required_paths": ["ok"]}]},
+            },
+        }
+
+        redacted = pipeline._withhold_acceptance_bundle("implementer", {pipeline.AUFHEBEN_ROLE: contract})
+        conf = redacted[pipeline.AUFHEBEN_ROLE]["conformance"]
+        calls = conf["rpc_service"]["calls"]
+        self.assertEqual(conf["rpc_service"]["_calls_oracle_withheld"], 2)
+        self.assertEqual(calls[0], {"method": "add", "params": {"a": 1}})
+        self.assertEqual(calls[1], {"method": "bad", "params": {}})
+        self.assertEqual(conf["batch_job"], contract["conformance"]["batch_job"])
+        self.assertEqual(conf["json"], contract["conformance"]["json"])
+        self.assertIn("expected_result_contains", contract["conformance"]["rpc_service"]["calls"][0])
+
+    def test_adr0018_http_and_rpc_deterministic_sources_route_to_implementer_only(self):
+        roles = ["aggressive-designer", "conservative-designer", "genius",
+                 pipeline.AUFHEBEN_ROLE, "implementer"]
+        for source in ("http-conformance", "rpc-conformance"):
+            with self.subTest(source=source):
+                self.assertEqual(pipeline._repair_roles_for([{"source": source}], roles), ["implementer"])
+
+    def test_adr0018_shadow_conformance_findings_are_never_forwarded(self):
+        finding = {"source": "http-conformance", "check": "body_contains", "severity": "major",
+                   "passed": False, "detail": "example 0 missed golden shadow-secret",
+                   "example": 0, "expected": "shadow-secret", "actual": "body"}
+        result = self._run_with_conformance_reports([self._gate_report(finding)], gate_mode="shadow")
+
+        implementer_calls = [call for call in self.calls if call[0] == "implementer"]
+        self.assertEqual(len(implementer_calls), 1)
+        self.assertNotIn("gate_findings", implementer_calls[0][1]["inputs"])
+        self.assertTrue(result["converged"])
+
+    def test_adr0018_targeted_gate_repair_still_converges_after_clean_iteration(self):
+        finding = {"source": "cli-conformance", "check": "stdout_contains", "severity": "major",
+                   "passed": False, "detail": "example 0 missing expected output",
+                   "example": 0, "expected": "golden-output", "actual": "wrong-output"}
+        result = self._run_with_conformance_reports([self._gate_report(finding), None])
+
+        self.assertTrue(result["converged"])
+        self.assertEqual(result["repair_iterations"], 1)
+        self.assertEqual([call[0] for call in self.calls if call[0] in {"implementer", "linon"}],
+                         ["implementer", "implementer", "linon"])
+
     def test_blocking_cheap_gate_skips_linon_entirely_first_pass(self):
         # ACCEPTANCE 1: a blocking cheap-gate finding -> NO *-linon stage, a linon_skipped record, no fabricated
         # stefan/linon pass in required_ok, and the loop continues (not converged).
