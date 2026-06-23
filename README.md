@@ -534,9 +534,10 @@ the wrong layer for build *quality*, and the official documentation makes no qua
   gates, which no LLM reviewer can match.
 - **[The execution-rules policy](#execution-rules-execpolicy)** (`prefix_rule` allow/forbidden). A deterministic authorization gate — but over *shell
   commands*, not the model's editing or reasoning. "Only edit these files" and "never leak the withheld value" are
-  behaviours, not commands; they cannot be expressed as a rule. The one constraint that maps cleanly is file-write
-  scope — enforced by the sandbox's writable roots, which is exactly this engine's deterministic-gate philosophy
-  applied earlier, inside the carrier. Semantic constraints stay with the gates and the reviewer.
+  behaviours, not commands; they cannot be expressed as a rule. Even file-write scope, the one constraint you'd expect
+  to map, the carrier sandbox can't enforce per-file (we tested: `read-only` blocks every write, `workspace-write` makes
+  the whole workspace writable and `writable_roots` only adds) — so the engine checks scope on the produced diff after
+  the run. Semantic constraints stay with the gates and the reviewer.
 - **[The skills system](#skills)** (a curated, routed prompt prime). This engine *does* use it (the cassette layer), but the
   evidence is sober: skills are weak for software engineering and self-generated skills can hurt, so they pay only
   curated, deterministically routed, and paired with the gate that hard-enforces the same thing — a prime, never the
@@ -675,12 +676,22 @@ no `prefix_rule` that expresses them. Restating them as rules is a category erro
 
 Carrier file edits do **not** go through execpolicy. They run through `apply_patch`, an internal tool handler
 (`core/src/tools/handlers/apply_patch.rs`; the binary notes *"apply_patch approval is not supported in exec mode"*).
-The constraint that governs **which paths may be written** is the sandbox's `SandboxWorkspaceWrite` / `writable_roots` /
-`sandbox_workspace_write` (sandbox modes `read-only` | `workspace-write` | `danger-full-access`; `FileSystemSpecialPath`
-∈ `project_roots`/`subpath`/`tmpdir`/`slash_tmp`). So the one constraint that maps cleanly is **file-write scope**:
-narrow `writable_roots` to a leaf's `files_allowed_to_change` and out-of-scope writes are blocked **by the sandbox** —
-this engine's deterministic-gate philosophy applied earlier, inside the carrier. Semantic constraints have no sandbox
-analogue and stay with the gates + the reviewer.
+The write authority is the sandbox, with three modes — `read-only`, `workspace-write`, `danger-full-access` — plus a
+`SandboxWorkspaceWrite` config carrying `writable_roots` (and a granular `FileSystemSandboxEntry` / `FileSystemSpecialPath`
+model: `project_roots`/`subpath`/`tmpdir`/`slash_tmp`).
+
+The tempting move is to narrow `writable_roots` to a leaf's `files_allowed_to_change` and let the sandbox **prevent**
+out-of-scope writes. **We tested it against the real CLI; it does not work.** `--sandbox read-only` *ignores*
+`writable_roots` and blocks every write (the carrier reports *"writing is blocked by read-only sandbox"*); `--sandbox
+workspace-write` makes the **whole** workspace writable and treats `writable_roots` as **additive** — it adds roots, it
+cannot subtract them. No simple `-c` knob expresses "minimal base, write only these N files." So the carrier sandbox
+**cannot, by itself, enforce per-file write scope.**
+
+That is *why* this engine enforces write scope **after** the run — a deterministic check of the produced diff against
+`files_allowed_to_change` (`carrier_harness.scope_deviations`) — rather than as an in-carrier prevention. It turns out
+to be the more robust choice anyway: it judges only the committed change and ignores the carrier's legitimate scratch
+(test outputs, caches, `__pycache__`), which a hard write-block would wrongly kill. Semantic constraints (oracle leak,
+hardcoded expected value) have no sandbox analogue either and stay with the gates + the reviewer.
 
 ### Skills
 
