@@ -541,6 +541,52 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertNotIn("expected", forwarded)
         self.assertNotIn("hidden-golden", json.dumps(evidence, sort_keys=True))
 
+    def test_fix_hint_survives_sanitization_to_reach_implementer(self):
+        # FIX 2 (load-bearing): the actionable fix_hint on a deterministic gate finding must be FORWARDED to
+        # the implementer on repair (it is the WHAT+WHERE remediation), not dropped by the allowlist — while
+        # an embedded oracle value would still be scrubbed.
+        finding = {
+            "source": "forbidden-pattern", "check": "forbidden_pattern", "severity": "major", "passed": False,
+            "detail": "forbidden pattern 'old_name' appears 1 time(s)", "pattern": "old_name",
+            "count": 1, "hits": ["tool.py:3"],
+            "fix_hint": "Remove or rename all 1 occurrence(s) of `old_name` in the produced tree at tool.py:3.",
+        }
+        self._run_with_conformance_reports([self._gate_report(finding), None])
+        forwarded = self._repair_implementer_inputs()["gate_findings"]["findings"][0]
+        self.assertIn("fix_hint", forwarded)
+        self.assertIn("tool.py:3", forwarded["fix_hint"])
+        self.assertTrue("remove" in forwarded["fix_hint"].lower() or "rename" in forwarded["fix_hint"].lower())
+
+    def test_fix_hint_is_scrubbed_for_withheld_oracle_values(self):
+        # a fix_hint can never become a side channel for the hidden acceptance oracle: any withheld value that
+        # appears in the hint is redacted just like the detail string.
+        finding = {
+            "source": "regression", "check": "regression_suite", "severity": "major", "passed": False,
+            "detail": "regression suite failed", "command": "make test", "exit_code": 1,
+            "example": 0, "expected": "hidden-golden",
+            "fix_hint": "Your change broke `make test` (exit 1); hidden-golden — do not modify the tests.",
+        }
+        self._run_with_conformance_reports([self._gate_report(finding), None])
+        evidence = self._repair_implementer_inputs()["gate_findings"]
+        self.assertNotIn("hidden-golden", json.dumps(evidence, sort_keys=True))
+
+    def test_static_check_fix_hint_forwarded_and_oracle_scrubbed(self):
+        # static-checks gate, acceptance (f): the BLOCKING `static-check` finding's actionable fix_hint reaches
+        # the implementer on repair (it is the WHAT remediation), while any withheld oracle value embedded in it
+        # is scrubbed through the SAME withholding path as `detail`.
+        finding = {
+            "source": "static-check", "check": "static_checks", "severity": "major", "passed": False,
+            "detail": "static check `python3 -m pyflakes .` failed (exit 1)",
+            "command": "python3 -m pyflakes .", "exit_code": 1,
+            "example": 0, "expected": "hidden-golden",
+            "fix_hint": "Static check `python3 -m pyflakes .` failed (exit 1) — hidden-golden — do not silence the analyzer.",
+        }
+        self._run_with_conformance_reports([self._gate_report(finding), None])
+        forwarded = self._repair_implementer_inputs()["gate_findings"]["findings"][0]
+        self.assertIn("fix_hint", forwarded)
+        self.assertIn("do not silence the analyzer", forwarded["fix_hint"].lower())
+        self.assertNotIn("hidden-golden", json.dumps(self._repair_implementer_inputs()["gate_findings"], sort_keys=True))
+
     def test_adr0018_cli_http_rpc_oracle_findings_redact_expected_and_detail(self):
         for source in ("cli-conformance", "http-conformance", "rpc-conformance"):
             with self.subTest(source=source):
@@ -591,7 +637,7 @@ class ControllerPipelineTests(unittest.TestCase):
     def test_adr0018_http_and_rpc_deterministic_sources_route_to_implementer_only(self):
         roles = ["aggressive-designer", "conservative-designer", "genius",
                  pipeline.AUFHEBEN_ROLE, "implementer"]
-        for source in ("http-conformance", "rpc-conformance"):
+        for source in ("http-conformance", "rpc-conformance", "static-check"):
             with self.subTest(source=source):
                 self.assertEqual(pipeline._repair_roles_for([{"source": source}], roles), ["implementer"])
 

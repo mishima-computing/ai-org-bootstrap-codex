@@ -1102,6 +1102,90 @@ def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] =
     }
 
 
+# Static-checks gate (ADR-0009 / ADR-0016): the cheapest catch for the HALLUCINATION / INCONSISTENCY defect
+# class — invented/undefined APIs (~26%), undefined variables (~16.9%), syntax errors. The contract declares a
+# LIST of static analyzers (py_compile, pyflakes, ruff, tsc --noEmit, ...), each of which must exit 0 on the
+# produced artifact; the gate re-runs each one through the conformance runner. An analyzer's exit code is a FACT
+# (~0-FP — it either resolves/parses or it doesn't), so this moves a deterministically-catchable hallucination
+# off the expensive semantic reviewer (Linon). Like regression_suite / forbidden_patterns it is KIND-AGNOSTIC
+# and folds into run_conformance alongside the kind-specific checker.
+_STATIC_CHECK_DEFAULT_TIMEOUT_SECONDS = 120
+_STATIC_CHECK_TAIL_CHARS = 1200        # bound the captured analyzer output so a chatty linter cannot flood the finding
+
+
+def _static_check_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
+    f = {"source": "static-check", "check": check, "severity": severity, "passed": passed, "detail": detail}
+    f.update(extra)
+    return f
+
+
+def _static_check_output_tail(stdout, stderr, limit: int = _STATIC_CHECK_TAIL_CHARS) -> str:
+    """Build a bounded tail from the analyzer's output (the reported undefined-name / import / syntax errors live
+    here). Defensive on purpose: coerces non-string / None / missing output and never raises, so a garbled runner
+    result yields an empty tail rather than crashing the gate."""
+    parts: list[str] = []
+    for label, val in (("stdout", stdout), ("stderr", stderr)):
+        try:
+            text = val if isinstance(val, str) else ("" if val is None else str(val))
+            text = _normalize(text)
+        except Exception:
+            text = ""
+        if text:
+            parts.append(f"{label}: {text[-limit:]}")
+    return " | ".join(parts)
+
+
+def run_static_checks(contract: dict, runner: Runner, *, cwd: Optional[str] = None) -> dict:
+    """The kind-agnostic static-analysis gate. Applicable only when the contract declares a non-empty
+    `static_checks` LIST with at least one well-formed `{ command }` entry — otherwise a vacuous pass (no finding,
+    no false positive). Runs EACH declared analyzer THROUGH the runner (the box boundary) against the produced
+    artifact; ANY non-zero exit emits ONE BLOCKING `static-check` finding for that command, capturing the command,
+    exit code, declared timeout, and an output tail (the analyzer's reported errors). One finding per failing
+    analyzer, so several failures all surface and the failing one is always named. Each check's `timeout_seconds`
+    budget is passed to the runner so a hung analyzer cannot stall the gate."""
+    checks = contract.get("static_checks")
+    if not isinstance(checks, list):
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    runnable = [c for c in checks
+                if isinstance(c, dict) and isinstance(c.get("command"), str) and c["command"].strip()]
+    if not runnable:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+
+    findings: list[dict] = []
+    for check in runnable:
+        command = check["command"]
+        timeout = check.get("timeout_seconds", _STATIC_CHECK_DEFAULT_TIMEOUT_SECONDS)
+        res = runner(command, cwd=cwd, timeout=timeout)
+        returncode = getattr(res, "returncode", None)          # garbled result -> None != 0 -> blocks, never crashes
+        if returncode == 0:
+            continue
+        stdout = getattr(res, "stdout", "")
+        stderr = getattr(res, "stderr", "")
+        tail = _static_check_output_tail(stdout, stderr)
+        detail = (f"static check `{command}`: expected exit 0, got {returncode} — the analyzer reported errors in "
+                  "the produced artifact (undefined names / unresolved imports / syntax)")
+        reason = check.get("reason")
+        if reason:
+            detail += f" — {reason}"
+        if tail:
+            detail += f"; output tail: {tail}"
+        # ACTIONABLE fix_hint (ADR-0016): tell the implementer exactly WHICH analyzer failed and WHAT NOT to do,
+        # so a repair fixes the real defect instead of suppressing the linter. The command + exit code are
+        # mechanically known facts, so the hint is concrete (never vague filler).
+        fix_hint = (f"Static check `{command}` failed (exit {returncode}) — fix the reported errors "
+                    "(undefined names / unresolved imports / syntax), do not silence the analyzer.")
+        findings.append(_static_check_finding(
+            "static_checks", "major", False, detail,
+            command=command, exit_code=returncode, timeout_seconds=timeout, output_tail=tail,
+            fix_hint=fix_hint))
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": len(runnable),
+    }
+
+
 def _merge_reports(base: dict, extra: dict) -> dict:
     """Fold a secondary gate's report into the kind-specific one: union the findings, AND the pass, sum the
     checks, and mark applicable if EITHER ran. Lets the kind-agnostic forbidden-pattern gate ride alongside
@@ -1124,11 +1208,14 @@ def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None
 
     The kind-agnostic gates ALWAYS fold in afterward when their fields are declared, so they block on ANY
     deliverable_kind (including `none`), not just CLI: the forbidden-pattern gate (ADR-0016 D7) when the
-    contract declares `forbidden_patterns` (an incomplete rename's stragglers), and the regression-suite gate
-    when it declares `regression_suite` (the change broke previously-working code — SWE-CI's biggest class)."""
+    contract declares `forbidden_patterns` (an incomplete rename's stragglers), the regression-suite gate when
+    it declares `regression_suite` (the change broke previously-working code — SWE-CI's biggest class), and the
+    static-checks gate when it declares `static_checks` (the hallucination/inconsistency class — undefined APIs,
+    undefined variables, syntax errors)."""
     base = _dispatch_kind_conformance(contract, runner, cwd=cwd, http_request=http_request)
     base = _merge_reports(base, run_forbidden_patterns(contract, cwd=cwd))
-    return _merge_reports(base, run_regression_suite(contract, runner, cwd=cwd))
+    base = _merge_reports(base, run_regression_suite(contract, runner, cwd=cwd))
+    return _merge_reports(base, run_static_checks(contract, runner, cwd=cwd))
 
 
 def _dispatch_kind_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,

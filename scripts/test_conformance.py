@@ -1572,6 +1572,165 @@ def test_schema_regression_suite_is_optional_and_shaped():
     print("ok  schema: regression_suite is optional and shape-constrained")
 
 
+# --- static-checks gate (ADR-0009 / ADR-0016): the cheap, kind-agnostic "did the change hallucinate" gate ---
+# (catches invented/undefined APIs, undefined variables, syntax errors via declared static analyzers) ---
+
+def _sc_contract(checks, kind="none"):
+    """A contract carrying static_checks. kind='none' proves the gate is kind-agnostic — it fires even where no
+    per-kind conformance profile exists."""
+    return {"role_id": "aufheben-designer", "deliverable_kind": kind, "static_checks": checks}
+
+
+def test_static_check_failure_blocks_with_exit_code_and_fix_hint():
+    # (a) a declared static analyzer exits non-zero -> a BLOCKING `static-check` finding with the exit code and a
+    # non-empty actionable fix_hint.
+    cmd = "python3 -m pyflakes ."
+    runner = fake_runner({cmd: R(1, "", "server.py:12:5 undefined name 'reqeusts'\n")})
+    rep = conf.run_conformance(_sc_contract([{"command": cmd, "reason": "no undefined names"}]), runner)
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "static-check")
+    assert f["severity"] == "major" and not f["passed"], f
+    assert f["check"] == "static_checks" and f["command"] == cmd and f["exit_code"] == 1, f
+    assert "undefined name 'reqeusts'" in f["output_tail"], f   # the analyzer's reported error captured
+    assert "no undefined names" in f["detail"], f               # declared reason surfaced
+    # acceptance (a): the BLOCKING finding carries a NON-EMPTY actionable fix_hint naming the failing command,
+    # the exit code, and the "do not silence the analyzer" guardrail.
+    fh = f["fix_hint"]
+    assert fh and cmd in fh, f
+    assert "exit 1" in fh, f                                     # the exit code is on the hint, not only the detail
+    assert "do not silence the analyzer" in fh.lower(), f
+    print("ok  static-check: a failing analyzer blocks with exit code + output tail + actionable fix_hint")
+
+
+def test_static_checks_all_pass_is_clean_pass():
+    # (b) every declared analyzer exits 0 -> no finding, the gate passes.
+    checks = [{"command": "python3 -m py_compile cockpit/server.py"}, {"command": "ruff check"}]
+    runner = fake_runner({"python3 -m py_compile cockpit/server.py": R(0, "", ""), "ruff check": R(0, "All checks passed!\n", "")})
+    rep = conf.run_conformance(_sc_contract(checks), runner)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    assert rep["checks_run"] >= 2, rep                           # both analyzers counted
+    print("ok  static-check: all analyzers passing (exit 0) passes with no finding")
+
+
+def test_static_checks_absent_or_empty_is_noop():
+    # (c) no static_checks declared, or an empty/command-less list -> not applicable, no finding, no FP, runner
+    # never invoked.
+    rep = conf.run_conformance({"role_id": "aufheben-designer", "deliverable_kind": "none"}, fake_runner({}))
+    assert rep["applicable"] is False and rep["passed"] and rep["findings"] == [], rep
+    for empty in ([], [{}], [{"command": ""}], [{"command": "   "}], [{"reason": "no command"}], "not-a-list"):
+        r = conf.run_static_checks({"static_checks": empty}, fake_runner({}))
+        assert r["applicable"] is False and r["passed"] and r["findings"] == [], (empty, r)
+    print("ok  static-check: absent / empty / command-less -> no-op, runner never run, no false positive")
+
+
+def test_static_checks_multiple_one_failing_blocks_naming_the_failing_one():
+    # (d) several analyzers, exactly ONE failing -> the gate blocks and the finding NAMES the failing command
+    # (not the passing ones); checks_run counts all declared analyzers.
+    ok1, ok2, bad = "python3 -m py_compile app.py", "ruff check", "python3 -m pyflakes ."
+    runner = fake_runner({
+        ok1: R(0, "", ""),
+        ok2: R(0, "", ""),
+        bad: R(1, "", "app.py:3:1 undefined name 'foo'\n"),
+    })
+    rep = conf.run_conformance(_sc_contract([{"command": ok1}, {"command": ok2}, {"command": bad}]), runner)
+    assert not rep["passed"], rep
+    sc = [f for f in rep["findings"] if f["source"] == "static-check"]
+    assert len(sc) == 1 and sc[0]["command"] == bad, sc       # only the failing analyzer surfaces, by name
+    assert bad in sc[0]["fix_hint"] and ok1 not in sc[0]["fix_hint"], sc
+    assert rep["checks_run"] >= 3, rep                          # all three analyzers counted
+    print("ok  static-check: one failing analyzer among several blocks, naming the failing one")
+
+
+def test_static_checks_garbled_runner_output_does_not_crash():
+    # a garbled / partial runner result (None fields, missing returncode, non-string output) must still produce a
+    # finding without crashing the gate (the exit code is treated as != 0 -> blocks).
+    cmd = "tsc --noEmit"
+
+    class _Garbled:                                            # a result missing returncode, with odd output types
+        stdout = None
+        stderr = 12345
+
+    for bad in (_Garbled(), None, R(2, None, None)):
+        r = conf.run_static_checks(_sc_contract([{"command": cmd}]), lambda c, *, cwd=None, timeout=None, _b=bad: _b)
+        f = next(f for f in r["findings"] if f["source"] == "static-check")
+        assert not r["passed"] and isinstance(f["output_tail"], str), (bad, r)   # never raises, tail is a string
+    print("ok  static-check: garbled / partial runner output yields a finding, never crashes")
+
+
+def test_static_checks_timeout_passed_to_runner():
+    # the declared timeout_seconds is passed through to the runner per check; absent -> the default budget.
+    cmd = "python3 -m pyflakes ."
+    seen = {}
+
+    def spy(c, *, cwd=None, timeout=None):
+        seen["cmd"], seen["timeout"] = c, timeout
+        return R(0, "", "")
+
+    conf.run_static_checks(_sc_contract([{"command": cmd, "timeout_seconds": 30}]), spy)
+    assert seen["cmd"] == cmd and seen["timeout"] == 30, seen
+    seen.clear()
+    conf.run_static_checks(_sc_contract([{"command": cmd}]), spy)
+    assert seen["timeout"] == conf._STATIC_CHECK_DEFAULT_TIMEOUT_SECONDS, seen
+    # and the failing finding records the budget it ran under.
+    rep = conf.run_static_checks(_sc_contract([{"command": cmd, "timeout_seconds": 30}]),
+                                 lambda c, *, cwd=None, timeout=None: R(1, "", "boom"))
+    f = next(f for f in rep["findings"] if f["source"] == "static-check")
+    assert f["timeout_seconds"] == 30, f
+    print("ok  static-check: timeout_seconds is passed to the runner (and recorded on the finding)")
+
+
+def test_static_checks_folds_alongside_cli_checker():
+    # the gate is kind-agnostic: it rides ALONGSIDE a per-kind (cli) checker. A clean CLI run with a failing
+    # static analyzer still blocks, and checks_run sums both gates.
+    cmd = "python3 -m pyflakes ."
+    contract = {"role_id": "aufheben-designer", "deliverable_kind": "cli",
+                "conformance": {"cli": {"entrypoint": {"invocation": "echo hi"},
+                                        "examples": [{"invocation": "", "expected_status": 0}]}},
+                "static_checks": [{"command": cmd}]}
+    rep = conf.run_conformance(contract, fake_runner({"echo hi": R(0, "", ""), cmd: R(1, "", "undefined name\n")}))
+    sources = {f["source"] for f in rep["findings"]}
+    assert not rep["passed"] and "static-check" in sources, rep
+    assert rep["checks_run"] >= 2, rep                          # cli examples + 1 static check
+    print("ok  static-check: folds alongside the per-kind (cli) checker")
+
+
+def test_static_check_is_a_deterministic_impl_source():
+    # (e) the source must be a BLOCKING deterministic implementation source, so gate-behind routes a pure
+    # static-check defect to the implementer ONLY and skips the expensive Linon reviewer.
+    assert "static-check" in cp._DETERMINISTIC_IMPL_SOURCES
+    findings = [{"source": "static-check", "passed": False}]
+    assert cp._repair_roles_for(findings, ["aufheben-designer", "implementer"]) == ["implementer"], \
+        "a pure static-check defect must route to the implementer only"
+    print("ok  static-check: recognized as a deterministic impl source (implementer-only repair)")
+
+
+def test_schema_static_checks_is_optional_and_shaped():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h", "deliverable_kind": "none"}
+    assert v.is_valid(base), list(v.iter_errors(base))          # optional: absent still validates
+    ok = {**base, "static_checks": [{"command": "python3 -m pyflakes .", "timeout_seconds": 60,
+                                     "reason": "no undefined names"},
+                                    {"command": "python3 -m py_compile cockpit/server.py"}]}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert v.is_valid({**base, "static_checks": []}), "empty list still validates (vacuous no-op)"
+    assert not v.is_valid({**base, "static_checks": [{"reason": "no command"}]}), "command is required"
+    assert not v.is_valid({**base, "static_checks": [{"command": ""}]}), "command must be non-empty"
+    assert not v.is_valid({**base, "static_checks": [{"command": "x", "timeout_seconds": 0}]}), \
+        "timeout_seconds must be >= 1"
+    assert not v.is_valid({**base, "static_checks": [{"command": "x", "junk": 1}]}), "no extra props"
+    assert not v.is_valid({**base, "static_checks": {"command": "x"}}), "must be a list, not an object"
+    print("ok  schema: static_checks is optional, a list, and shape-constrained")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

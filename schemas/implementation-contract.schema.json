@@ -236,6 +236,33 @@
       },
       "additionalProperties": false
     },
+    "static_checks": {
+      "description": "ADR-0009 / ADR-0016: a CHEAP, deterministic (~0-FP) conformance gate for the HALLUCINATION / INCONSISTENCY defect class — invented or undefined APIs (~26%), undefined variables (~16.9%), and outright syntax errors. A LIST of declared static analyzers, each of which MUST exit 0 on the produced artifact (e.g. `python3 -m py_compile cockpit/server.py`, `python3 -m pyflakes .`, `ruff check`, `tsc --noEmit`). Applicable to ANY deliverable_kind. The gate runs each command via the conformance runner against the produced artifact and emits a BLOCKING finding (source 'static-check') per failing analyzer, capturing the command, exit code, and an output tail (the analyzer's reported errors) when it exits non-zero. An analyzer's exit code is a FACT — it either resolves/parses or it doesn't — so this moves a deterministically-catchable hallucination off the expensive semantic reviewer (Linon). Empty / absent list = no-op (the gate never fabricates a finding it cannot ground).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "description": "The static-analysis command that must exit 0 on the produced artifact — e.g. `python3 -m py_compile cockpit/server.py`, `python3 -m pyflakes .`, `ruff check`, or `tsc --noEmit`. Run as a shell string through the conformance runner (the box is the containment boundary, ADR-0022).",
+            "type": "string",
+            "minLength": 1
+          },
+          "timeout_seconds": {
+            "description": "Wall-clock budget for this analyzer, passed to the runner (default ~120). Keeps a hung or runaway analyzer from stalling the gate.",
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "description": "Why this analyzer must pass — surfaced in the finding so a reader (and the repair routing) understands the obligation.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "conformance": {
       "description": "ADR-0009: the EXECUTABLE part of the contract \u2014 what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
       "type": "object",
