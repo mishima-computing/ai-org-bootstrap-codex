@@ -9,5 +9,27 @@
     },
     "body": "Wire the production path for REAL and exercise it end-to-end. Match the contract's exact exit code / HTTP status / port / response shape. NEVER stub or mock the production boundary — a silently-stubbed path is a prod-incident pattern and fails first-pass: the conformance gate boots and probes the real artifact, so a mock will not satisfy it. Verify by running the real endpoint and observing its actual status + body; do not assert against a mock you control.",
     "paired_gate": "real-wiring (Part A)"
+  },
+  {
+    "name": "rename",
+    "description": "Renaming or replacing an identifier across files. Use when the task renames a symbol, replaces a pattern, or migrates an API/token throughout the tree.",
+    "when": {
+      "task_types": ["rename", "refactor", "replace", "migrate", "deprecate"],
+      "deliverable_kinds": [],
+      "languages": []
+    },
+    "body": "When renaming or replacing an identifier across the codebase, do it straggler-proof: (1) GREP for EVERY reference first — snake_case AND camelCase variants, partial matches, and occurrences inside strings and comments — so you know the full reach; (2) replace across all of them; (3) RE-GREP to confirm ZERO survivors remain. The forbidden_patterns gate greps the old token after you finish, so any straggler outside the declared exclusions fails first-pass. Mind the exclusion boundaries in both directions: over-excluding silently leaves a real reference unrenamed; under-excluding renames something that must stay.",
+    "paired_gate": "forbidden_patterns"
+  },
+  {
+    "name": "verification",
+    "description": "Writing or running tests / proving the change works. Use when the task adds tests, fixtures, or must demonstrate correctness.",
+    "when": {
+      "task_types": ["test", "testing", "fixture", "verify", "verification"],
+      "deliverable_kinds": [],
+      "languages": []
+    },
+    "body": "Do not claim 'it works' or 'tests pass' — SHOW the observed output of the real run. A test must exercise real behavior: never assert against a mock you control, and never chase line coverage that runs no real path (high coverage is not correctness). The gates re-run the real artifact and the full pre-existing suite and do not trust your claim, so a faked or non-exercising test fails anyway. A green new test sitting on top of a now-red existing test is a regression, not a pass; run the whole suite before declaring done. Stay within files_allowed_to_change.",
+    "paired_gate": "regression / static_checks / scope"
   }
 ]
