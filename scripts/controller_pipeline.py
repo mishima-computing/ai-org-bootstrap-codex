@@ -808,6 +808,10 @@ CONFORMANCE_GATE_MODE = os.environ.get("CONFORMANCE_GATE", "block").lower()   # 
 
 _DETERMINISTIC_IMPL_SOURCES = {
     "cli-conformance", "http-conformance", "rpc-conformance", "conformance", "cli-fuzz", "secret-scan",
+    # forbidden-pattern: the kind-agnostic grep gate (ADR-0016 D7). A straggler from an incomplete rename is
+    # purely an artifact defect (grep is a fact), so it pins repair to the implementer and lets gate-behind
+    # skip the expensive Linon reviewer on it.
+    "forbidden-pattern",
 }
 
 

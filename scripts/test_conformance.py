@@ -1254,6 +1254,133 @@ def test_http_service_not_applicable_for_non_http():
     print("ok  dispatcher still routes cli (http_service port did not break it)")
 
 
+# --- forbidden-pattern gate (ADR-0016 D7): the cheap, kind-agnostic grep gate ----------------------------
+
+def _fp_contract(patterns, kind="none"):
+    """A contract carrying forbidden_patterns. kind='none' proves the gate is kind-agnostic — it fires even
+    where no per-kind conformance profile exists."""
+    return {"role_id": "aufheben-designer", "deliverable_kind": kind, "forbidden_patterns": patterns}
+
+
+def test_forbidden_pattern_straggler_blocks_with_file_line():
+    # (a) the live motivation: a scaffold-rename left `_scaffold_seed_commit` behind -> BLOCKING finding.
+    with _ws({"demo.py": "def go():\n    return _scaffold_seed_commit()\n"}) as d:
+        rep = conf.run_conformance(_fp_contract([{"pattern": "_scaffold_seed_commit",
+                                                  "reason": "renamed to _seed_commit"}]),
+                                   fake_runner({}), cwd=d)
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["severity"] == "major" and not f["passed"], f
+    assert f["pattern"] == "_scaffold_seed_commit" and f["count"] == 1, f
+    assert f["hits"] == ["demo.py:2"], f                      # snake_case ref caught (no token-regex blind spot)
+    assert "renamed to _seed_commit" in f["detail"], f
+    print("ok  forbidden-pattern: a rename straggler blocks with pattern + file:line hit")
+
+
+def test_forbidden_pattern_clean_tree_passes():
+    # (b) the token is fully gone -> no finding, the gate passes.
+    with _ws({"demo.py": "def go():\n    return _seed_commit()\n"}) as d:
+        rep = conf.run_conformance(_fp_contract([{"pattern": "_scaffold_seed_commit"}]), fake_runner({}), cwd=d)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    print("ok  forbidden-pattern: a clean tree (token absent) passes with no finding")
+
+
+def test_forbidden_pattern_match_inside_exclude_does_not_block():
+    # (c) the only remaining occurrence is in an excluded file (e.g. the changelog) -> does NOT block.
+    with _ws({"src.py": "x = _seed_commit()\n",
+              "CHANGELOG.md": "renamed _scaffold_seed_commit -> _seed_commit\n"}) as d:
+        rep = conf.run_conformance(_fp_contract([{"pattern": "_scaffold_seed_commit",
+                                                  "exclude": ["CHANGELOG.md"]}]), fake_runner({}), cwd=d)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    print("ok  forbidden-pattern: a match inside an exclude glob does not block")
+
+
+def test_forbidden_pattern_max_occurrences_honored():
+    # (d) max_occurrences budget: N allowed passes, N+1 blocks.
+    two = {"a.py": "TODO\nTODO\n"}
+    with _ws(two) as d:
+        ok = conf.run_conformance(_fp_contract([{"pattern": "TODO", "max_occurrences": 2}]), fake_runner({}), cwd=d)
+    assert ok["passed"] and ok["findings"] == [], ok
+    three = {"a.py": "TODO\nTODO\nTODO\n"}
+    with _ws(three) as d:
+        bad = conf.run_conformance(_fp_contract([{"pattern": "TODO", "max_occurrences": 2}]), fake_runner({}), cwd=d)
+    f = next(f for f in bad["findings"] if f["source"] == "forbidden-pattern")
+    assert not bad["passed"] and f["count"] == 3 and f["max_occurrences"] == 2, f
+    print("ok  forbidden-pattern: max_occurrences honored (N allowed, N+1 blocks)")
+
+
+def test_forbidden_pattern_absent_is_noop():
+    # (e) no forbidden_patterns declared -> not applicable, no finding, no false positive.
+    with _ws({"a.py": "_scaffold_seed_commit\n"}) as d:
+        rep = conf.run_conformance({"role_id": "aufheben-designer", "deliverable_kind": "none"},
+                                   fake_runner({}), cwd=d)
+    assert rep["applicable"] is False and rep["passed"] and rep["findings"] == [], rep
+    empty = conf.run_forbidden_patterns(_fp_contract([]), cwd=d)
+    assert empty["applicable"] is False and empty["passed"], empty
+    print("ok  forbidden-pattern: absent (or empty) -> no-op, no false positive")
+
+
+def test_forbidden_pattern_skips_binary_and_git():
+    # (f) the token lives only in a binary blob and under .git/ -> both skipped, gate passes.
+    with _ws({}) as d:
+        os.makedirs(os.path.join(d, ".git"))
+        with open(os.path.join(d, ".git", "COMMIT_EDITMSG"), "w") as fh:
+            fh.write("_scaffold_seed_commit\n")              # under .git -> pruned by the walk
+        with open(os.path.join(d, "blob.bin"), "wb") as fh:
+            fh.write(b"prefix\x00_scaffold_seed_commit\x00tail")  # NUL byte -> sniffed as binary, skipped
+        rep = conf.run_conformance(_fp_contract([{"pattern": "_scaffold_seed_commit"}]), fake_runner({}), cwd=d)
+    assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+    print("ok  forbidden-pattern: binary files and .git/ are skipped")
+
+
+def test_forbidden_pattern_folds_alongside_cli_checker():
+    # the gate is kind-agnostic: it rides ALONGSIDE a per-kind (cli) checker, not instead of it. A clean CLI
+    # run with a forbidden straggler still blocks, and checks_run sums both gates.
+    with _ws({"tool.py": "old_name = 1\n"}) as d:
+        contract = {"role_id": "aufheben-designer", "deliverable_kind": "cli",
+                    "conformance": {"cli": {"entrypoint": {"invocation": "echo hi"},
+                                            "examples": [{"invocation": "", "expected_status": 0}]}},
+                    "forbidden_patterns": [{"pattern": "old_name"}]}
+        rep = conf.run_conformance(contract, fake_runner({"echo hi": R(0, "", "")}), cwd=d)
+    sources = {f["source"] for f in rep["findings"]}
+    assert not rep["passed"] and "forbidden-pattern" in sources, rep
+    assert rep["checks_run"] >= 2, rep                        # cli examples + 1 forbidden pattern
+    print("ok  forbidden-pattern: folds alongside the per-kind (cli) checker")
+
+
+def test_forbidden_pattern_is_a_deterministic_impl_source():
+    # the source must be recognized as a BLOCKING deterministic implementation source, so gate-behind can
+    # route a straggler to the implementer ONLY and skip the expensive Linon reviewer.
+    assert "forbidden-pattern" in cp._DETERMINISTIC_IMPL_SOURCES
+    findings = [{"source": "forbidden-pattern", "passed": False}]
+    assert cp._repair_roles_for(findings, ["aufheben-designer", "implementer"]) == ["implementer"], \
+        "a pure forbidden-pattern defect must route to the implementer only"
+    print("ok  forbidden-pattern: recognized as a deterministic impl source (implementer-only repair)")
+
+
+def test_schema_forbidden_patterns_is_optional_and_shaped():
+    try:
+        import jsonschema
+    except ImportError:
+        print("skip  jsonschema not installed")
+        return
+    v = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    base = {"role_id": "aufheben-designer", "contract_id": "c", "objective": "o", "selected_direction": "d",
+            "rejected_parts": [], "implementation_summary": "s", "acceptance_criteria": [],
+            "files_allowed_to_change": [], "files_not_allowed_to_change": [], "required_checks": [],
+            "security_requirements": [], "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "f", "handoff_to_implementer": "h", "deliverable_kind": "none"}
+    assert v.is_valid(base), list(v.iter_errors(base))        # optional: absent still validates
+    ok = {**base, "forbidden_patterns": [{"pattern": "_scaffold_seed_commit",
+                                          "exclude": ["CHANGELOG.md"], "max_occurrences": 0, "reason": "renamed"}]}
+    assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert not v.is_valid({**base, "forbidden_patterns": [{"reason": "no pattern"}]}), "pattern is required"
+    assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "max_occurrences": -1}]}), \
+        "max_occurrences must be >= 0"
+    assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "junk": 1}]}), "no extra props"
+    print("ok  schema: forbidden_patterns is optional and shape-constrained")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

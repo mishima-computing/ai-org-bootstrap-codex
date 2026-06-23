@@ -24,6 +24,7 @@ Design:
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -882,11 +883,131 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
     }
 
 
+# Forbidden-pattern gate (ADR-0009 / ADR-0016 D7): the cheapest, most general deterministic check — grep the
+# produced tree for a token that should be gone. It is KIND-AGNOSTIC (a rename/refactor straggler is a defect
+# whatever the deliverable is), so it folds into run_conformance alongside the kind-specific checker rather
+# than living on one profile. grep is a FACT (~0-FP); this moves a deterministically-catchable defect off the
+# expensive semantic reviewer (Linon), which previously had to read the regex to find it.
+_FORBIDDEN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".hg", ".svn", ".venv", "venv", ".mypy_cache"}
+_FORBIDDEN_BINARY_SNIFF_BYTES = 8192
+_FORBIDDEN_MAX_HITS_REPORTED = 5     # cap the file:line evidence so a noisy match cannot flood the finding
+
+
+def _forbidden_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
+    f = {"source": "forbidden-pattern", "check": check, "severity": severity, "passed": passed, "detail": detail}
+    f.update(extra)
+    return f
+
+
+def _is_probably_binary(path: str) -> bool:
+    """Sniff a leading chunk for a NUL byte — the cheap, conventional 'is this binary' heuristic (git uses the
+    same). A read error is treated as binary (skip it): the gate never crashes on an unreadable file."""
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(_FORBIDDEN_BINARY_SNIFF_BYTES)
+    except OSError:
+        return True
+
+
+def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict]:
+    """For each declared pattern, grep the produced tree at `cwd` (text files only; .git / node_modules / vendor
+    dirs and binary files skipped) and count matches in files NOT matching the pattern's `exclude` globs. When
+    the count exceeds `max_occurrences` (default 0), emit ONE BLOCKING `forbidden-pattern` finding naming the
+    pattern, the count, and up to a few `file:line` hits. A pattern is compiled as a regex; if it is not valid
+    regex it is matched as a literal substring (so a bare token like `_scaffold_seed_commit` works either way)."""
+    root = cwd or "."
+    findings: list[dict] = []
+    for spec in patterns:
+        if not isinstance(spec, dict):
+            continue
+        raw = spec.get("pattern")
+        if not raw:
+            continue
+        try:
+            rx = re.compile(raw)
+        except re.error:
+            rx = re.compile(re.escape(raw))            # an invalid regex is a literal token, not a gate crash
+        excludes = spec.get("exclude") or []
+        max_occ = spec.get("max_occurrences", 0)
+        count = 0
+        hits: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _FORBIDDEN_SKIP_DIRS]
+            for fn in sorted(filenames):
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root)
+                if any(fnmatch.fnmatch(rel, g) for g in excludes):
+                    continue
+                if _is_probably_binary(full):
+                    continue
+                try:
+                    with open(full, encoding="utf-8") as fh:
+                        for lineno, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                count += len(rx.findall(line))
+                                if len(hits) < _FORBIDDEN_MAX_HITS_REPORTED:
+                                    hits.append(f"{rel}:{lineno}")
+                except (OSError, UnicodeDecodeError):
+                    continue                           # unreadable / non-utf8 text: skip, never crash the gate
+        if count > max_occ:
+            reason = spec.get("reason")
+            detail = (f"forbidden pattern {raw!r} appears {count} time(s) in the produced tree "
+                      f"(allowed at most {max_occ})")
+            if reason:
+                detail += f" — {reason}"
+            if hits:
+                detail += "; e.g. " + ", ".join(hits)
+            findings.append(_forbidden_finding(
+                "forbidden_pattern", "major", False, detail,
+                pattern=raw, count=count, max_occurrences=max_occ, hits=hits))
+    return findings
+
+
+def run_forbidden_patterns(contract: dict, *, cwd: Optional[str] = None) -> dict:
+    """The kind-agnostic forbidden-pattern gate. Applicable only when the contract declares a non-empty
+    `forbidden_patterns` list — otherwise a vacuous pass (no finding, no false positive). Runs NO process: it
+    only reads the produced files, so it executes nothing untrusted and needs no runner."""
+    patterns = contract.get("forbidden_patterns")
+    if not isinstance(patterns, list) or not patterns:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    findings = _forbidden_pattern_findings(patterns, cwd)
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": len(patterns),
+    }
+
+
+def _merge_reports(base: dict, extra: dict) -> dict:
+    """Fold a secondary gate's report into the kind-specific one: union the findings, AND the pass, sum the
+    checks, and mark applicable if EITHER ran. Lets the kind-agnostic forbidden-pattern gate ride alongside
+    the per-kind checker without a parallel call site or a second routing path."""
+    if not extra.get("applicable"):
+        return base
+    merged = dict(base)
+    merged["applicable"] = True
+    merged["findings"] = list(base.get("findings") or []) + list(extra.get("findings") or [])
+    merged["passed"] = bool(base.get("passed", True)) and bool(extra.get("passed", True))
+    merged["checks_run"] = int(base.get("checks_run", 0)) + int(extra.get("checks_run", 0))
+    return merged
+
+
 def run_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None, http_request=None) -> dict:
     """Dispatch the conformance gate on `deliverable_kind`. CLI is the one real checker today; the other kinds
     route to their empty slot (recognized, unchecked). A contract with no kind / no profile is not applicable.
     This is the single entry point the pipeline calls, so adding a real checker later is a one-line wiring in
-    `_SLOT_CHECKERS` (or the `cli` branch), not a change to the gate's call site."""
+    `_SLOT_CHECKERS` (or the `cli` branch), not a change to the gate's call site.
+
+    The kind-agnostic forbidden-pattern gate (ADR-0016 D7) ALWAYS folds in afterward when the contract declares
+    `forbidden_patterns` — so an incomplete rename's stragglers block on ANY deliverable_kind (including `none`),
+    not just CLI."""
+    base = _dispatch_kind_conformance(contract, runner, cwd=cwd, http_request=http_request)
+    return _merge_reports(base, run_forbidden_patterns(contract, cwd=cwd))
+
+
+def _dispatch_kind_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = None,
+                               http_request=None) -> dict:
     kind = contract.get("deliverable_kind")
     if kind == "cli":
         return run_cli_conformance(contract, runner, cwd=cwd)

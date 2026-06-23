@@ -178,6 +178,40 @@
         "none"
       ]
     },
+    "forbidden_patterns": {
+      "description": "ADR-0009 / ADR-0016 D7: a CHEAP, deterministic (~0-FP) conformance gate, applicable to ANY deliverable_kind. Each entry declares a token (literal or regex) that must appear at most max_occurrences times in the PRODUCED artifact tree, ignoring files matching `exclude`. The gate greps the produced tree and emits a BLOCKING finding (source 'forbidden-pattern') when the count exceeds the budget \u2014 catching the straggler an incomplete rename/refactor leaves behind, which Linon would otherwise have to read the regex to find. grep is a FACT, so this moves a deterministically-catchable defect off the expensive semantic reviewer. Absent field = no-op (the check never fabricates a finding it cannot ground).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "description": "The token that must be (near-)absent from the produced tree. Compiled as a regex; if it is not valid regex it is treated as a literal substring. A bare identifier like `_scaffold_seed_commit` works either way.",
+            "type": "string",
+            "minLength": 1
+          },
+          "exclude": {
+            "description": "Glob patterns (fnmatch over the workspace-relative path) whose matching files are ignored \u2014 e.g. the file that legitimately still defines the old name, a changelog, or generated fixtures. Keep narrow: an over-broad exclude defeats the gate.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_occurrences": {
+            "description": "The maximum number of matches allowed across the (non-excluded) tree before the gate blocks (default 0 \u2014 the token must be fully gone).",
+            "type": "integer",
+            "minimum": 0
+          },
+          "reason": {
+            "description": "Why this pattern is forbidden \u2014 surfaced in the finding so a reader (and the repair routing) understands the obligation.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "conformance": {
       "description": "ADR-0009: the EXECUTABLE part of the contract \u2014 what the deterministic gate runs against the built artifact. A discriminated profile per deliverable_kind; only the kind's own profile is required (oneOf-style, so the schema never degrades into a universal checklist).",
       "type": "object",
