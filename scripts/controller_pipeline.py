@@ -482,14 +482,15 @@ def _withhold_acceptance_bundle(role: str, inputs: dict[str, dict]) -> dict[str,
 
 
 def _execute_stage(repo: Path, role: str, entry: RegistryEntry, objective: str, inputs: dict[str, dict],
-                   stage_run_id: str, cache: bool, resume_session=None) -> tuple[bool, dict | None, dict, dict]:
+                   stage_run_id: str, cache: bool, resume_session=None,
+                   goal_context=None) -> tuple[bool, dict | None, dict, dict]:
     if role == "linon" and _linon_via_codex_review_enabled():
         return _execute_linon_via_codex_review(repo, stage_run_id)
     inputs = _withhold_acceptance_bundle(role, inputs)
     contract = _contract(entry, objective, inputs, resume_session)
     started_at = _utc_now()
     stage_ok, result, result_path, result_sha256, report, stage_errors = _run_stage(
-        repo, entry, contract, stage_run_id, cache, resume_session
+        repo, entry, contract, stage_run_id, cache, resume_session, goal_context
     )
     finished_at = _utc_now()
     report_dict = report.to_dict()
@@ -518,7 +519,8 @@ def _copy_stage_journal(wt: Path, repo: Path, stage_run_id: str) -> None:
 
 
 def _execute_stage_isolated(repo: Path, role: str, entry: RegistryEntry, objective: str,
-                            inputs: dict[str, dict], stage_run_id: str, cache: bool) -> tuple:
+                            inputs: dict[str, dict], stage_run_id: str, cache: bool,
+                            goal_context=None) -> tuple:
     """Run ONE write role in its own git worktree (detached at HEAD) so its scope check evaluates only
     its OWN diff, then merge its file changes back into the main repo. This is the serial-but-isolated
     path (max_parallel=1); the concurrent path is _run_wave_parallel. Falls back to in-repo execution if
@@ -528,10 +530,11 @@ def _execute_stage_isolated(repo: Path, role: str, entry: RegistryEntry, objecti
                          capture_output=True, text=True)
     if add.returncode != 0:
         shutil.rmtree(wt, ignore_errors=True)
-        return _execute_stage(repo, role, entry, objective, inputs, stage_run_id, cache)
+        return _execute_stage(repo, role, entry, objective, inputs, stage_run_id, cache,
+                              goal_context=goal_context)
     try:
         stage_ok, result, report_dict, stage = _execute_stage(wt, role, entry, objective, inputs,
-                                                              stage_run_id, cache)
+                                                              stage_run_id, cache, goal_context=goal_context)
         _copy_stage_journal(wt, repo, stage_run_id)
         stage = json.loads(json.dumps(stage).replace(str(wt), str(repo)))   # worktree paths -> repo
         if stage_ok:
@@ -909,11 +912,13 @@ def _preserve_result(repo: Path, stage_run_id: str,
 
 
 def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
-               cache: bool, resume_session=None) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
+               cache: bool, resume_session=None,
+               goal_context=None) -> tuple[bool, dict | None, Path | None, str | None, object, list[str]]:
     result_path = repo / RESULT_FILE
     if result_path.exists():
         result_path.unlink()
-    report = controller_run.run(repo, contract, run_id, cache=cache, resume_session=resume_session)
+    report = controller_run.run(repo, contract, run_id, cache=cache, resume_session=resume_session,
+                                goal_context=goal_context)
     if entry.write_scope:
         stage_ok = bool(report.ok)
         return stage_ok, None, None, None, report, []
@@ -926,7 +931,7 @@ def _run_stage(repo: Path, entry: RegistryEntry, contract: dict, run_id: str,
             "— no prose, no markdown fences, double-quoted keys, no trailing commas.")
         if result_path.exists():
             result_path.unlink()
-        report = controller_run.run(repo, reask, run_id + "-reask", cache=False)
+        report = controller_run.run(repo, reask, run_id + "-reask", cache=False, goal_context=goal_context)
         stage_errors = []
         result, preserved_path, result_sha256 = _preserve_result(repo, run_id + "-reask", stage_errors)
     stage_ok = bool(report.ok) and result is not None
@@ -977,7 +982,8 @@ def _apply_worktree_changes(repo: Path, wt: Path, changed_files: list[str]) -> N
 
 
 def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
-                       predecessors, results: dict, run_id: str, cache: bool, max_workers: int) -> dict:
+                       predecessors, results: dict, run_id: str, cache: bool, max_workers: int,
+                       goal_context=None) -> dict:
     """Run wave roles each in its own git worktree (detached at HEAD) so their result.json and — for
     write roles — their working-tree edits and scope checks cannot collide. READ-ONLY producers only
     emit result.json; WRITE roles' file changes are merged back into the main repo after the wave, in a
@@ -997,7 +1003,8 @@ def _run_wave_parallel(repo: Path, roles: list[str], entries, objective: str,
             raise RuntimeError(f"worktree add failed for {role}: {err[-200:]}")
         inputs = {u: results[u] for u in predecessors.get(role, []) if u in results}
         stage_ok, result, report_dict, stage = _execute_stage(wt, role, entries[role], objective,
-                                                              inputs, stage_run_id, cache)
+                                                              inputs, stage_run_id, cache,
+                                                              goal_context=goal_context)
         src = wt / ".agent-runs" / "controller"        # copy the stage journal back so provenance finds it
         if src.is_dir():
             dst = repo / ".agent-runs" / "controller"
@@ -1044,7 +1051,8 @@ def _has_valid_producer_for_aufheben(predecessors: dict[str, list[str]], produce
 
 
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
-                 max_repair_iterations: int = 3, max_parallel: int = 1) -> dict:
+                 max_repair_iterations: int = 3, max_parallel: int = 1,
+                 goal_context=None) -> dict:
     if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
@@ -1087,7 +1095,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         outcomes: dict[str, tuple] = {}
         if repo_is_git and max_parallel > 1 and len(wave) > 1:
             outcomes.update(_run_wave_parallel(repo, sorted(wave), entries, objective, predecessors,
-                                               results, run_id, cache, max_parallel))
+                                               results, run_id, cache, max_parallel,
+                                               goal_context=goal_context))
         for role in wave:
             if role in outcomes:
                 continue
@@ -1100,7 +1109,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
                       else _execute_stage)
             outcomes[role] = runner(repo, role, entries[role], objective, inputs,
-                                    f"{run_id}-{role}", cache)
+                                    f"{run_id}-{role}", cache, goal_context=goal_context)
         if pipeline_failed:
             break
         for role in wave:                              # record deterministically in wave order
@@ -1140,7 +1149,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             entry = entries[role]
             stage_run_id = f"{run_id}-{role}"
             stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
-                                                                  verifier_inputs, stage_run_id, cache)
+                                                                  verifier_inputs, stage_run_id, cache,
+                                                                  goal_context=goal_context)
             summary[role] = bool(report_dict.get("ok"))
             required_ok[role] = stage_ok
             fatal_ok[role] = stage_ok
@@ -1206,7 +1216,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             resume = sessions.get(role) if role in SESSION_REUSE_ROLES else None
             stage_ok, result, report_dict, stage = _execute_stage(repo, role, entry, objective,
                                                                   inputs, stage_run_id, cache,
-                                                                  resume_session=resume)
+                                                                  resume_session=resume,
+                                                                  goal_context=goal_context)
             if report_dict.get("session_id"):           # chain the next repair onto this iteration's session
                 sessions[role] = report_dict["session_id"]
             summary[role] = bool(report_dict.get("ok"))
@@ -1226,7 +1237,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             entry = entries["linon"]
             stage_run_id = f"{run_id}-repair{repair_iterations}-linon"
             stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective,
-                                                                  verifier_inputs, stage_run_id, cache)
+                                                                  verifier_inputs, stage_run_id, cache,
+                                                                  goal_context=goal_context)
             summary["linon"] = bool(report_dict.get("ok"))
             required_ok["linon"] = stage_ok
             reports["linon"] = report_dict
