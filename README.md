@@ -169,8 +169,16 @@ one node (`run()` a leaf via the dialectic; `split()` it when it cannot converge
 - each leaf runs the dialectic in its OWN worktree (the same isolation, one level up); on convergence its
   diff merges back, on a repair-cap failure the leaf SPLITS into children (recursion) — UNLESS it is at
   the FLOOR (atomic scope / max depth), where it fails rather than splitting forever.
-- termination is the floor + a token budget, **never a human**: when stuck the org varies strategy or
-  grows a new tool, and when the budget is spent it records partial progress and moves on.
+- a leaf that is **underdetermined** — its falsifiable acceptance (outcome / success condition / negative
+  control) cannot be named (ADR-0016 D1b) — is NOT split (decomposing an undefined unit only multiplies the
+  undefinedness): the org instead **asks for the missing information and parks that leaf** (`blocked_hitl`)
+  while its independent siblings keep building, and a supplied answer reaches the parked leaf's refine on
+  resume. Before asking bare, it first SEARCHES the repo's own ADRs for the already-decided answer and asks
+  you to CONFIRM it ("found THIS — right?"), listing conflicts side-by-side rather than guessing.
+- termination is the floor + a token budget — the org never asks a human to *decompose* or to keep going;
+  the one thing it asks for is missing *information* (above), and even then only that leaf waits while the
+  rest of the run continues. When stuck it varies strategy or grows a new tool; when the budget is spent it
+  records partial progress and moves on.
 - every step appends to a shared event log (`STREAM_LOG`, default `.agent-runs/stream.jsonl`) that can be
   tailed for live observability, independent of which worktree a leaf runs in.
 
@@ -231,6 +239,21 @@ capability with a single contract, so every edition inherits it rather than re-i
   shared stream as a `{"type":"state", ...}` event: the store is the current-state authority, the log is the
   history/audit. State data belongs on the log (event-sourced); a poor minimal log that drops it is a time
   bomb — the store is never the only copy.
+
+## The Border Collie (an anti-pattern immune system)
+
+`scripts/border_collie.py` is a high-layer, **independent** patroller — a *pack* of cheap anti-pattern
+smell-detectors that runs ALONGSIDE the builder, never inside its loop. It tails the shared event log
+read-only, SNIFFS the heuristic signature of a known failure mode (a self-declared-minimal node re-split
+forever; a branch churning without landing; gold-plating a prerequisite while the goal's named deliverable is
+never touched; re-implementing existing logic in another language; an ADR that claims a gate with no code), and
+BARKS an **advisory** steer at the drifting node — folded at that node's next dispatch, never a kill. The
+catalog GROWS as new failure modes are diagnosed, and is sharded across N dogs (`--scents`, `--instance i/N`)
+so it scales by adding dogs, not weight. Barking follows neural **habituation** (an adaptive firing threshold):
+a dog tires of the same smell and quiets, recovers over time, and escalates on a smell that persists or
+intensifies — so it warns without becoming noise. This is capability in the MECHANISM, not in hoping a smart
+model never errs: the knowledge of how autonomous builders fail lives in one patroller's catalog, not as
+special-cases scattered through the decomposition logic.
 
 ## Mechanical harness
 
