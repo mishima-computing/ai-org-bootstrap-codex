@@ -1506,6 +1506,172 @@ def test_merge_goal_to_main_leaves_main_clean_on_conflict():
     print("ok  (point 2) a conflicting merge aborts -> main stays clean, branch retained")
 
 
+# ---------------------------------------------------------------------------------------------------------
+# ADR-0016 D7 — GOAL-LEVEL ACCEPTANCE GATE wiring. After all leaves are green + composed, BEFORE merge-to-main,
+# run_goal boots the COMPOSED goal artifact (this worktree) against the OWNER's intake-fixed executable
+# acceptance_profile. PASS -> verified:true + merge; FAIL -> verified:false + do NOT merge (blocked). The
+# determinism lives in the intake profile, NOT in compiling the NL success_condition. These wire-tests boot a
+# REAL tiny http server committed into the goal worktree; if the sandbox cannot bind a port the gate verdict is
+# stubbed so the WIRING (verdict -> merge/no-merge) is still exercised.
+def _free_port():
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", 0))
+        except PermissionError:
+            return None
+        return s.getsockname()[1]
+
+
+def _server_src(serves: bool) -> str:
+    return (
+        "import http.server, socketserver, sys\n"
+        f"SERVES = {serves!r}\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def log_message(self, *a): pass\n"
+        "    def do_GET(self):\n"
+        "        if self.path.startswith('/time'):\n"
+        "            body, code = (b'{\"the-time\": \"now\"}', 200) if SERVES else (b'nope', 404)\n"
+        "        else:\n"
+        "            body, code = b'ok', 200\n"
+        "        self.send_response(code); self.send_header('Content-Length', str(len(body)))\n"
+        "        self.end_headers(); self.wfile.write(body)\n"
+        "class S(socketserver.TCPServer):\n"
+        "    allow_reuse_address = True\n"
+        "with S(('127.0.0.1', int(sys.argv[1])), H) as srv:\n"
+        "    srv.serve_forever()\n")
+
+
+def _acc_profile(port):
+    # the OWNER-authored executable acceptance contract, FIXED AT INTAKE (not compiled from the NL WHY).
+    return {"start": {"command": f"python3 -u server.py {port}", "base_url": f"http://127.0.0.1:{port}",
+                      "ready_path": "/", "timeout": 5},
+            "probes": [{"request": {"method": "GET", "path": "/time"},
+                        "expect": {"status": 200, "body_contains": "the-time"}}]}
+
+
+_GATE_STUB = {}
+
+
+def _stub_gate_if_no_port(port, *, verified):
+    # only when a real port is unbindable: drive the gate verdict so the wiring (verdict -> merge) still runs.
+    if port is not None:
+        return
+    _GATE_STUB["orig"] = cg.conformance.run_goal_acceptance
+    cg.conformance.run_goal_acceptance = lambda profile, repo, **k: {
+        "applicable": True, "verified": verified, "probes_run": 1,
+        "evidence": [{"label": "probe[0]", "method": "GET", "path": "/time",
+                      "status": 200 if verified else 404,
+                      "body": "the-time" if verified else "nope", "ok": verified}],
+        "findings": [] if verified else [{"check": "status", "passed": False, "detail": "stub red"}]}
+
+
+def _unstub_gate():
+    if "orig" in _GATE_STUB:
+        cg.conformance.run_goal_acceptance = _GATE_STUB.pop("orig")
+
+
+def _run_goal_with_profile(repo, serves, *, goal_id, deliverable_kind=None, extra_leaf=None):
+    import os, subprocess
+    port = _free_port()
+    leaf = {"id": "a", "objective": "serve the time", "scope": ["server.py"], "depends_on": []}
+    if deliverable_kind is not None:
+        leaf["deliverable_kind"] = deliverable_kind
+    split = lambda g, c, ca: [leaf]
+
+    def run_leaf(r, t):
+        with open(os.path.join(r, "server.py"), "w") as fh:
+            fh.write(_server_src(serves))
+        subprocess.run(["git", "-C", r, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", r, "commit", "-m", "server"], capture_output=True)
+        return {"outcome": "converged", "commit": None}
+
+    ctx = {"acceptance_profile": _acc_profile(port or 8000)}
+    events = []
+    _stub_gate_if_no_port(port, verified=serves)
+    try:
+        cg.run_goal(repo, "serve the time", run_leaf=run_leaf, split=split, context=ctx,
+                    goal_id=goal_id, emit=events.append)
+    finally:
+        _unstub_gate()
+    return events
+
+
+def test_goal_acceptance_gate_verifies_and_merges_when_artifact_serves():
+    # (a) profile present + the COMPOSED artifact actually serves the probe -> goal_acceptance verified:true,
+    # durable evidence captured, and the goal MERGES into local main.
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        events = _run_goal_with_profile(repo, serves=True, goal_id="acc-ok")
+        acc = [e for e in events if e["type"] == "goal_acceptance"]
+        assert acc and acc[0]["verified"] is True and acc[0]["status"] == "verified", (acc, events)
+        assert acc[0].get("evidence"), ("the probe responses are captured as durable evidence", acc)
+        assert acc[0].get("probes_run", 0) >= 1, acc
+        assert any(e.get("type") == "goal_merged" for e in events), "a verified goal must merge to main"
+        assert _rev(git, "main") != base, "main HEAD must advance on a verified goal"
+        assert os.path.isfile(os.path.join(repo, "server.py")), "the composed artifact reaches main"
+        assert any(e.get("type") == "goal_finished" and e["status"] == "done" for e in events), events
+    print("ok  (a) acceptance profile passes on a serving artifact -> verified:true + evidence + merged")
+
+
+def test_goal_acceptance_gate_blocks_merge_when_artifact_does_not_serve():
+    # (b) profile present + the artifact does NOT serve the probe (mislabeled/stubbed) -> verified:false, the
+    # goal is NOT merged to main and is blocked (worktree retained) — THIS is the hole closing.
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        events = _run_goal_with_profile(repo, serves=False, goal_id="acc-bad")
+        acc = [e for e in events if e["type"] == "goal_acceptance"]
+        assert acc and acc[0]["verified"] is False and acc[0]["status"] == "failed_acceptance", (acc, events)
+        assert not any(e.get("type") == "goal_merged" for e in events), "an UNVERIFIED goal must NOT merge"
+        assert _rev(git, "main") == base, "main must stay at base — the composed artifact failed the WHY"
+        assert any(e.get("type") == "goal_worktree_retained" for e in events), "blocked goal retains its worktree"
+        assert any(e.get("type") == "goal_finished" and e["status"] == "failed" for e in events), events
+    print("ok  (b) acceptance profile fails on a non-serving artifact -> verified:false, NOT merged (HOLE CLOSED)")
+
+
+def test_no_acceptance_profile_keeps_shadow_behavior_and_still_merges():
+    # (c) NO executable profile -> unchanged shadow behavior: a structured WHY emits goal_acceptance
+    # verified:false / needs_info, and the green goal STILL merges (no regression for profile-less goals).
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        base = _rev(git)
+        split = lambda g, c, ca: [{"id": "a", "objective": "do a", "scope": ["feat.py"], "depends_on": []}]
+
+        def run_leaf(r, t):
+            open(os.path.join(r, "feat.py"), "w").write("feature\n")
+            subprocess.run(["git", "-C", r, "add", "-A"], capture_output=True)
+            subprocess.run(["git", "-C", r, "commit", "-m", "leaf"], capture_output=True)
+            return {"outcome": "converged", "commit": None}
+
+        import subprocess
+        events = []
+        cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                    goal_id="acc-shadow", emit=events.append)
+        acc = [e for e in events if e["type"] == "goal_acceptance"]
+        assert acc and acc[0]["verified"] is False and acc[0]["status"] == "needs_info", (acc, events)
+        assert any(e.get("type") == "goal_merged" for e in events), "a profile-less green goal still merges"
+        assert _rev(git, "main") != base, "main advances — no regression for profile-less goals"
+    print("ok  (c) no profile -> shadow goal_acceptance (needs_info) and the green goal still merges")
+
+
+def test_goal_acceptance_gate_is_deliverable_kind_independent():
+    # (d) the goal probe runs and verifies even when the leaf is labeled "library" — the gate is driven ENTIRELY
+    # by the goal profile, INDEPENDENT of any leaf's deliverable_kind.
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _wt_repo(d)
+        events = _run_goal_with_profile(repo, serves=True, goal_id="acc-lib", deliverable_kind="library")
+        acc = [e for e in events if e["type"] == "goal_acceptance"]
+        assert acc and acc[0]["verified"] is True, ("the goal probe runs regardless of the leaf kind", acc, events)
+        assert any(e.get("type") == "goal_merged" for e in events), events
+    print("ok  (d) goal acceptance is deliverable_kind-INDEPENDENT (library leaf, goal probe still runs)")
+
+
 if __name__ == "__main__":
     import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

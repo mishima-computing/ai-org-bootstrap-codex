@@ -883,6 +883,202 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
     }
 
 
+# ---------------------------------------------------------------------------------------------------------
+# GOAL-LEVEL acceptance gate (ADR-0016 D7 — the COMPOSING-layer WHY check).
+#
+# The per-leaf checkers above prove only leaf-obeys-contract. A goal whose leaves are all `done` has NOT been
+# checked against its OWN outcome. This gate boots the COMPOSED, assembled goal artifact and probes it.
+#
+# CRITICAL: the determinism lives in an EXECUTABLE `acceptance_profile` FIXED AT INTAKE (the goal contract the
+# owner submits/confirms) — NOT in compiling the natural-language `success_condition` into a probe at the end
+# (that re-introduces the exact LLM-label-trust the goal-level hole came from). Profile shape:
+#   { "start": {"command": str, "base_url"?: str, "ready_path"?: str, "timeout"?: float},
+#     "probes": [ {"request": {"method"?, "path"?, "json"?}, "expect": {"status"?, "body_contains"?}} ],
+#     "negative_control"?: {"request": {...}, "expect": {...}} }
+# The probe is driven ENTIRELY by the goal profile, INDEPENDENT of any leaf's `deliverable_kind`.
+#
+# It REUSES the per-leaf service-boot helpers (`_launch_service` -> the `_rlimit_preexec` sandbox + killpg
+# teardown), so the goal boot has the SAME resource bound + GUARANTEED process teardown as the leaf gate.
+_GOAL_ACCEPTANCE_DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+_GOAL_ACCEPTANCE_DEFAULT_TIMEOUT = 10.0
+_GOAL_EVIDENCE_BODY_LIMIT = 2000
+
+
+def _as_substrings(value) -> list[str]:
+    """Coerce an `expect.body_contains` (a string OR a list of strings) to a list — WITHOUT exploding a bare
+    string into characters (list("ab") == ['a','b'] would silently weaken the check)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def validate_acceptance_profile(profile) -> list[str]:
+    """Shape-check a goal `acceptance_profile` (the executable goal contract authored at INTAKE). Returns the
+    list of missing/invalid field paths — EMPTY iff the profile is runnable. An ABSENT profile is the caller's
+    concern (no goal-level probe = today's shadow behavior), never reaches here."""
+    bad: list[str] = []
+    if not isinstance(profile, dict):
+        return ["acceptance_profile"]
+    start = profile.get("start")
+    if not isinstance(start, dict) or not str(start.get("command") or "").strip():
+        bad.append("start.command")
+    probes = profile.get("probes")
+    if not isinstance(probes, list) or not probes:
+        bad.append("probes")
+    else:
+        for i, pr in enumerate(probes):
+            expect = pr.get("expect") if isinstance(pr, dict) else None
+            if not isinstance(expect, dict) or (expect.get("status") is None and not expect.get("body_contains")):
+                bad.append(f"probes[{i}].expect")   # an expectation that asserts NOTHING is not a probe
+    nc = profile.get("negative_control")
+    if nc is not None and (not isinstance(nc, dict) or not isinstance(nc.get("expect"), dict)):
+        bad.append("negative_control.expect")
+    return bad
+
+
+def _wait_for_goal_readiness(base_url: str, ready_path, timeout: float, http_request) -> Optional[dict]:
+    """Poll the booted artifact until it answers (mirrors `_wait_for_http_readiness`, but on the goal profile's
+    own `start.ready_path`/`start.timeout`). Returns None on ready, or a lifecycle finding on timeout."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    url = _join_http_url(base_url, ready_path) if ready_path else base_url
+    last_error = None
+    while True:
+        remaining = deadline - time.monotonic()
+        request_timeout = min(_HTTP_REQUEST_TIMEOUT_SECONDS, max(0.05, remaining if remaining > 0 else 0.05))
+        try:
+            http_request("GET", url, timeout=request_timeout)
+            return None
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(_HTTP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+    return _http_finding(
+        "lifecycle", "critical", False,
+        f"composed goal artifact did not become ready before timeout ({timeout:g}s)",
+        error=type(last_error).__name__ if last_error else None,
+    )
+
+
+def _goal_probe_evidence(base_url: str, probe: dict, http_request, *, label: str) -> tuple[dict, list[dict]]:
+    """Replay one probe (or the negative control) against the booted artifact. Returns (evidence, findings):
+    `evidence` is the captured request+response (durable proof), `findings` is non-empty iff the response does
+    NOT satisfy the authored `expect` (status, if named + every `body_contains` substring)."""
+    request = probe.get("request") or {}
+    expect = probe.get("expect") or {}
+    method = str(request.get("method", "GET")).upper()
+    path = request.get("path", "")
+    url = _join_http_url(base_url, path)
+    has_json_body = "json" in request
+    want_status = expect.get("status")
+    want_body = _as_substrings(expect.get("body_contains"))
+    evidence = {"label": label, "method": method, "path": path,
+                "expect": {"status": want_status, "body_contains": want_body}}
+    findings: list[dict] = []
+    try:
+        resp = http_request(method, url, json_body=request.get("json"),
+                            has_json_body=has_json_body, timeout=_HTTP_REQUEST_TIMEOUT_SECONDS)
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        evidence.update({"ok": False, "error": type(exc).__name__})
+        findings.append(_http_finding(
+            "request", "critical", False, f"{label} {method} {path}: request failed",
+            error=type(exc).__name__))
+        return evidence, findings
+    decoded = _decode_http_body(resp.body)
+    evidence.update({"status": resp.status, "body": decoded[:_GOAL_EVIDENCE_BODY_LIMIT]})
+    if want_status is not None and resp.status != want_status:
+        findings.append(_http_finding(
+            "status", "critical", False,
+            f"{label} {method} {path}: expected status {want_status}, got {resp.status}",
+            expected=want_status, actual=resp.status))
+    for needle in want_body:
+        if needle not in decoded:
+            findings.append(_http_finding(
+                "body_contains", "critical", False,
+                f"{label} {method} {path}: response body missing expected substring {needle!r}",
+                expected=needle, actual=decoded[:_GOAL_EVIDENCE_BODY_LIMIT]))
+    evidence["ok"] = not findings
+    return evidence, findings
+
+
+def run_goal_acceptance(profile: dict, composed_repo: str, *, http_request=None,
+                        service_launcher=None) -> dict:
+    """Boot the COMPOSED, assembled goal artifact (the goal worktree AFTER all leaves have merged, BEFORE the
+    final merge-to-main) by running `profile.start.command` in `composed_repo`, wait for readiness, replay each
+    `probe` asserting status + body_contains, then GUARANTEE teardown. Driven ENTIRELY by the goal profile —
+    INDEPENDENT of any leaf's `deliverable_kind`. Reuses `_launch_service` so the boot runs under the SAME
+    rlimit sandbox + killpg teardown as the per-leaf gate; the process is ALWAYS torn down (finally), even on
+    probe failure or exception.
+
+    Returns {applicable, verified, probes_run, evidence, findings}. `verified` is True IFF the profile is
+    runnable, at least one probe ran, readiness held, every probe satisfied its `expect`, and (if declared) the
+    negative control produced its expected red. A declared `negative_control` whose expected red does NOT
+    appear means the probe set is a green-only smoke -> NOT verified."""
+    http_request = http_request or _stdlib_http_request
+    bad = validate_acceptance_profile(profile)
+    if bad:
+        return {"applicable": True, "verified": False, "probes_run": 0, "evidence": [],
+                "findings": [_http_finding("profile", "critical", False,
+                             "goal acceptance_profile is missing/invalid required fields", missing=bad)]}
+    start = profile["start"]
+    base_url = str(start.get("base_url") or _GOAL_ACCEPTANCE_DEFAULT_BASE_URL)
+    ready_path = start.get("ready_path")
+    timeout = float(start.get("timeout") or _GOAL_ACCEPTANCE_DEFAULT_TIMEOUT)
+    findings: list[dict] = []
+    evidence: list[dict] = []
+    probes_run = 0
+    handle = None
+    try:
+        launcher = service_launcher or _launch_service
+        handle = launcher(start["command"], cwd=str(composed_repo),
+                          profile={"readiness_timeout_seconds": timeout})
+        readiness = _wait_for_goal_readiness(base_url, ready_path, timeout, http_request)
+        if readiness:
+            findings.append(readiness)
+        else:
+            for i, probe in enumerate(profile["probes"]):
+                ev, fs = _goal_probe_evidence(base_url, probe, http_request, label=f"probe[{i}]")
+                evidence.append(ev)
+                findings.extend(fs)
+                probes_run += 1
+            nc = profile.get("negative_control")
+            if nc is not None:
+                ev, fs = _goal_probe_evidence(base_url, nc, http_request, label="negative_control")
+                evidence.append(ev)
+                probes_run += 1
+                if fs:                               # the control did NOT show its expected red -> smoke-only
+                    findings.append(_http_finding(
+                        "negative_control", "critical", False,
+                        "negative control did not produce its expected (red) response — the probe set is a "
+                        "green-only smoke and cannot discriminate the goal WHY", control_findings=fs))
+    except _ServiceStartError as exc:
+        result = exc.result
+        findings.append(_http_finding(
+            "lifecycle", "critical", False,
+            f"composed goal artifact start command exited before readiness (exit {result.returncode})",
+            command=exc.command, returncode=result.returncode,
+            stdout_tail=_normalize(result.stdout)[-800:], stderr_tail=_normalize(result.stderr)[-800:]))
+    except Exception as exc:                         # noqa: BLE001 — any boot failure is a non-verified result
+        findings.append(_http_finding(
+            "lifecycle", "critical", False, f"goal acceptance lifecycle setup failed: {exc}",
+            error=type(exc).__name__))
+    finally:
+        if handle is not None:                       # GUARANTEE teardown — no leaked process/port, ever
+            try:
+                handle.stop()
+            except Exception as exc:                 # noqa: BLE001
+                findings.append(_http_finding(
+                    "lifecycle", "critical", False, "goal acceptance lifecycle cleanup failed",
+                    error=type(exc).__name__))
+    verified = (not findings) and probes_run > 0
+    return {"applicable": True, "verified": verified, "probes_run": probes_run,
+            "evidence": evidence, "findings": findings}
+
+
 # Forbidden-pattern gate (ADR-0009 / ADR-0016 D7): the cheapest, most general deterministic check — grep the
 # produced tree for a token that should be gone. It is KIND-AGNOSTIC (a rename/refactor straggler is a defect
 # whatever the deliverable is), so it folds into run_conformance alongside the kind-specific checker rather

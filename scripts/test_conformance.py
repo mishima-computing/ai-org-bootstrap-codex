@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import socket
 import sys
 import tempfile
@@ -1729,6 +1730,149 @@ def test_schema_static_checks_is_optional_and_shaped():
     assert not v.is_valid({**base, "static_checks": [{"command": "x", "junk": 1}]}), "no extra props"
     assert not v.is_valid({**base, "static_checks": {"command": "x"}}), "must be a list, not an object"
     print("ok  schema: static_checks is optional, a list, and shape-constrained")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# GOAL-LEVEL acceptance gate (ADR-0016 D7) — run_goal_acceptance boots the COMPOSED artifact and probes it
+# against the OWNER's intake-fixed executable profile, reusing the per-leaf service-boot helpers (so the same
+# rlimit sandbox + GUARANTEED killpg teardown apply). These tests boot a REAL process; if the sandbox cannot
+# bind a port they fall back to a real stand-in process + an injected http_request (mirroring the existing
+# real-service tests). The helper ASSERTS the process group is torn down on EVERY call — proving (e).
+_GOAL_SERVER = r"""
+import http.server, os, pathlib, socketserver, sys
+
+pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))
+serves = sys.argv[3] == "1"
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        p = self.path
+        if p == "/__nope":
+            body, code = b"missing", 404
+        elif p.startswith("/time"):
+            body, code = (b'{"the-time": "now"}', 200) if serves else (b"not found", 404)
+        else:
+            body, code = b"ok", 200
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+class S(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with S(("127.0.0.1", int(sys.argv[1])), H) as srv:
+    srv.serve_forever()
+"""
+
+
+def _goal_routes(serves: bool, path: str):
+    if path == "/__nope":
+        return 404, b"missing"
+    if path.startswith("/time"):
+        return (200, b'{"the-time": "now"}') if serves else (404, b"not found")
+    return 200, b"ok"
+
+
+def _run_goal_acceptance(serves: bool, probes, negative_control=None, *, timeout=4):
+    """Boot a tiny composed HTTP artifact and run the goal-acceptance gate against it. Real port when one is
+    bindable; otherwise a real stand-in process + injected http_request. ASSERTS teardown after the run."""
+    port = _free_local_port()
+    tmp = tempfile.mkdtemp(prefix="goal-acc-")
+    try:
+        pid_file = Path(tmp) / "pid"
+        if port is None:
+            ready_file = Path(tmp) / "ready"
+            stub = ("import os, pathlib, sys, time\n"
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                    "pathlib.Path(sys.argv[2]).write_text('ready')\n"
+                    "while True:\n    time.sleep(60)\n")
+            base_url = "http://goal.local"
+            command = (f"python3 -u -c {shlex.quote(stub)} "
+                       f"{shlex.quote(str(pid_file))} {shlex.quote(str(ready_file))}")
+
+            def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+                if not ready_file.exists():
+                    raise conf.urllib.error.URLError("not ready")
+                path = url[len(base_url):] or "/"
+                code, body = _goal_routes(serves, path)
+                return conf.HttpResponse(code, body)
+
+            profile = {"start": {"command": command, "base_url": base_url, "ready_path": "/", "timeout": timeout},
+                       "probes": probes}
+            if negative_control is not None:
+                profile["negative_control"] = negative_control
+            result = conf.run_goal_acceptance(profile, tmp, http_request=req)
+            assert _eventually_process_gone(pid_file), "goal-acceptance stand-in process must be torn down"
+            return result
+        base_url = f"http://127.0.0.1:{port}"
+        command = (f"python3 -u -c {shlex.quote(_GOAL_SERVER)} {port} "
+                   f"{shlex.quote(str(pid_file))} {'1' if serves else '0'}")
+        profile = {"start": {"command": command, "base_url": base_url, "ready_path": "/", "timeout": timeout},
+                   "probes": probes}
+        if negative_control is not None:
+            profile["negative_control"] = negative_control
+        result = conf.run_goal_acceptance(profile, tmp)
+        assert _eventually_closed(base_url), "real launched goal artifact port must be closed after the gate"
+        assert _eventually_process_gone(pid_file), "real launched goal process group must be killed"
+        return result
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_goal_acceptance_verifies_when_composed_artifact_serves():
+    # (a) profile present + the composed artifact actually serves the probe -> verified True, evidence captured.
+    result = _run_goal_acceptance(
+        serves=True,
+        probes=[{"request": {"method": "GET", "path": "/time"},
+                 "expect": {"status": 200, "body_contains": "the-time"}}],
+        negative_control={"request": {"path": "/__nope"}, "expect": {"status": 404}})
+    assert result["verified"] is True and result["findings"] == [], result
+    assert result["probes_run"] == 2, result          # the probe + the negative control both ran
+    ev = [e for e in result["evidence"] if e["label"] == "probe[0]"]
+    assert ev and ev[0]["status"] == 200 and "the-time" in ev[0]["body"], result
+    print("ok  goal acceptance: serving artifact -> verified True, durable evidence, control sees its red")
+
+
+def test_goal_acceptance_red_when_artifact_does_not_serve():
+    # (b) the artifact boots+is ready but does NOT serve the probe (mislabeled/stubbed) -> verified False with a
+    # status finding. (e) the process is STILL torn down — asserted inside the helper.
+    result = _run_goal_acceptance(
+        serves=False,
+        probes=[{"request": {"method": "GET", "path": "/time"},
+                 "expect": {"status": 200, "body_contains": "the-time"}}])
+    assert result["verified"] is False, result
+    assert any(f["check"] == "status" for f in result["findings"]), result
+    print("ok  goal acceptance: non-serving artifact -> verified False (+ guaranteed teardown) — hole closing")
+
+
+def test_goal_acceptance_negative_control_smoke_is_caught():
+    # a declared negative control that does NOT produce its expected red means the probe set is a green-only
+    # smoke -> verified False even though the positive probe passed (the D2 precondition for the goal gate).
+    result = _run_goal_acceptance(
+        serves=True,
+        probes=[{"request": {"path": "/time"}, "expect": {"status": 200}}],
+        negative_control={"request": {"path": "/"}, "expect": {"status": 404}})   # "/" returns 200, not 404
+    assert result["verified"] is False, result
+    assert any(f["check"] == "negative_control" for f in result["findings"]), result
+    print("ok  goal acceptance: green-only smoke (control shows no red) -> verified False")
+
+
+def test_goal_acceptance_profile_validation_and_no_boot_on_invalid():
+    # the executable profile is shape-checked at the gate (the intake contract); an invalid one is rejected
+    # WITHOUT a boot — verified False with a profile finding and zero probes run.
+    assert conf.validate_acceptance_profile(
+        {"start": {"command": "x"}, "probes": [{"request": {"path": "/"}, "expect": {"status": 200}}]}) == []
+    assert "start.command" in conf.validate_acceptance_profile({"probes": [{"expect": {"status": 200}}]})
+    assert "probes" in conf.validate_acceptance_profile({"start": {"command": "x"}, "probes": []})
+    assert any(m.startswith("probes[0].expect") for m in conf.validate_acceptance_profile(
+        {"start": {"command": "x"}, "probes": [{"request": {"path": "/"}, "expect": {}}]}))
+    bad = conf.run_goal_acceptance({"probes": []}, "/tmp")
+    assert bad["verified"] is False and bad["probes_run"] == 0, bad
+    assert any(f["check"] == "profile" for f in bad["findings"]), bad
+    print("ok  goal acceptance: profile shape-checked; invalid contract -> no boot, verified False")
 
 
 if __name__ == "__main__":
