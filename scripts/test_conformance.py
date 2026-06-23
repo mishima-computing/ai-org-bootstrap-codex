@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import socket
 import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -498,6 +504,12 @@ class _SvcRunner:
         return _Handle()
 
 
+def _launcher_from_start(obj):
+    def launch(command, *, cwd=None, profile=None):
+        return obj.start(command, cwd=cwd)
+    return launch
+
+
 def _json_rpc_request(by_method):
     """A fake http_request: GET (readiness) returns 200; a JSON-RPC POST returns the canned envelope for its
     method, always over HTTP 200 (the JSON-RPC convention the checker must look past)."""
@@ -514,7 +526,8 @@ def test_rpc_json_rpc_call_passes_and_stops_service():
                "calls": [{"method": "add", "params": {"a": 1, "b": 2}, "expected_result_contains": ["3"]}]}
     runner = _SvcRunner()
     rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
-                                           http_request=_json_rpc_request({"add": {"result": 3}}))
+                                           http_request=_json_rpc_request({"add": {"result": 3}}),
+                                           service_launcher=_launcher_from_start(runner))
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     assert runner.stopped, "the service must be stopped after the calls"
     print("ok  rpc(json_rpc_http): a real call whose result matches -> passes; service stopped")
@@ -523,8 +536,10 @@ def test_rpc_json_rpc_call_passes_and_stops_service():
 def test_rpc_json_rpc_unexpected_error_is_major_not_gated_on_http_status():
     profile = {"start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
                "calls": [{"method": "add", "params": {}}]}
-    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(),
-        http_request=_json_rpc_request({"add": {"error": {"code": -32000, "message": "boom"}}}))
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
+        http_request=_json_rpc_request({"add": {"error": {"code": -32000, "message": "boom"}}}),
+        service_launcher=_launcher_from_start(runner))
     assert not rep["passed"] and any(f["check"] == "error" for f in rep["findings"]), rep
     print("ok  rpc(json_rpc_http): an error in the body (over HTTP 200) -> major, not a pass")
 
@@ -532,8 +547,10 @@ def test_rpc_json_rpc_unexpected_error_is_major_not_gated_on_http_status():
 def test_rpc_json_rpc_expected_error_code_matches():
     profile = {"start": {"command": "serve"}, "base_url": "http://x", "transport": "json_rpc_http",
                "calls": [{"method": "bad", "expected_error_code": -32601}]}
-    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(),
-        http_request=_json_rpc_request({"bad": {"error": {"code": -32601, "message": "no method"}}}))
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
+        http_request=_json_rpc_request({"bad": {"error": {"code": -32601, "message": "no method"}}}),
+        service_launcher=_launcher_from_start(runner))
     assert rep["passed"], rep
     print("ok  rpc(json_rpc_http): a declared expected_error_code that matches -> passes")
 
@@ -541,7 +558,8 @@ def test_rpc_json_rpc_expected_error_code_matches():
 def test_rpc_unsupported_transport_is_critical_without_boot():
     profile = {"start": {"command": "serve"}, "base_url": "x", "transport": "thrift", "calls": [{"method": "m"}]}
     runner = _SvcRunner()
-    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner)
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
+                                           service_launcher=_launcher_from_start(runner))
     assert not rep["passed"], rep
     assert any(f["check"] == "transport" and f["severity"] == "critical" for f in rep["findings"]), rep
     assert not runner.stopped, "an unsupported transport is caught before booting"
@@ -556,7 +574,9 @@ def test_rpc_grpc_real_invocation_with_injected_invoker_passes():
         assert method == "pkg.Svc/Get" and params == {"id": 1}
         return ({"status": "ok"}, None)
 
-    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner(), grpc_invoker=invoker)
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner, grpc_invoker=invoker,
+                                           service_launcher=_launcher_from_start(runner))
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     print("ok  rpc(grpc): a real dynamic invocation (injected) whose result matches -> passes")
 
@@ -566,7 +586,9 @@ def test_rpc_grpc_unavailable_machinery_is_a_finding_not_silent():
     # heavy machinery is loaded lazily and its absence is surfaced, never a silent pass nor an always-on dep.
     profile = {"start": {"command": "serve"}, "base_url": "h:50051", "transport": "grpc",
                "calls": [{"method": "pkg.Svc/Get"}]}
-    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), _SvcRunner())
+    runner = _SvcRunner()
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), runner,
+                                           service_launcher=_launcher_from_start(runner))
     assert not rep["passed"] and any(f["check"] == "transport_unavailable" for f in rep["findings"]), rep
     print("ok  rpc(grpc): missing transport machinery -> transport_unavailable finding (lazy, not silent)")
 
@@ -818,6 +840,187 @@ def test_subprocess_runner_is_resource_bounded():
     assert slow.returncode == 124 and "timeout" in slow.stderr, slow
     print("ok  subprocess_runner: normal run ok, output capped, slow run -> 124 timeout")
 
+
+def _free_local_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except PermissionError:
+            return None
+        return sock.getsockname()[1]
+
+
+def _eventually_process_gone(pid_file: Path) -> bool:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not pid_file.exists():
+            time.sleep(0.05)
+            continue
+        pid = int(pid_file.read_text())
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _eventually_closed(url: str) -> bool:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=0.1).read()
+        except (OSError, TimeoutError, urllib.error.URLError):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_http_service_real_subprocess_runner_launches_and_stops_service():
+    port = _free_local_port()
+    if port is None:
+        with tempfile.TemporaryDirectory(prefix="conf-http-real-") as tmp:
+            tmpdir = Path(tmp)
+            pid_file = tmpdir / "pid"
+            ready_file = tmpdir / "ready"
+            script = r"""
+import os
+import pathlib
+import sys
+import time
+
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+pathlib.Path(sys.argv[2]).write_text("ready")
+while True:
+    time.sleep(60)
+"""
+            profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} "
+                                             f"{shlex.quote(str(pid_file))} {shlex.quote(str(ready_file))}"},
+                       "base_url": "http://service.local", "readiness_timeout_seconds": 3,
+                       "examples": [{"method": "GET", "path": "/", "expected_status": 200,
+                                     "expected_body_contains": ["ok-live-http"]}]}
+
+            def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+                if not ready_file.exists():
+                    raise conf.urllib.error.URLError("not ready")
+                return conf.HttpResponse(200, b"ok-live-http")
+
+            rep = conf.run_http_service_conformance(
+                _http_contract(profile), conf.subprocess_runner(timeout=2.0), http_request=req)
+            assert rep["applicable"] and rep["passed"] and rep["checks_run"] == 2, rep
+            assert _eventually_process_gone(pid_file), "real launched http stand-in must be stopped"
+            print("ok  http_service: production callable runner launches a real process and stops it")
+            return
+
+    script = r"""
+import http.server
+import socketserver
+import sys
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok-live-http")
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", int(sys.argv[1])), Handler) as server:
+    server.serve_forever()
+"""
+    base_url = f"http://127.0.0.1:{port}"
+    profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} {port}"},
+               "base_url": base_url, "readiness_timeout_seconds": 3,
+               "examples": [{"method": "GET", "path": "/", "expected_status": 200,
+                             "expected_body_contains": ["ok-live-http"]}]}
+    rep = conf.run_http_service_conformance(_http_contract(profile), conf.subprocess_runner(timeout=2.0))
+    assert rep["applicable"] and rep["passed"] and rep["checks_run"] == 2, rep
+    assert _eventually_closed(base_url), "real launched http service must be stopped after conformance"
+    print("ok  http_service: production callable runner launches a real process and stops it")
+
+
+def test_rpc_service_real_subprocess_runner_launches_and_stops_json_rpc_service():
+    port = _free_local_port()
+    if port is None:
+        with tempfile.TemporaryDirectory(prefix="conf-rpc-real-") as tmp:
+            tmpdir = Path(tmp)
+            pid_file = tmpdir / "pid"
+            ready_file = tmpdir / "ready"
+            script = r"""
+import os
+import pathlib
+import sys
+import time
+
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+pathlib.Path(sys.argv[2]).write_text("ready")
+while True:
+    time.sleep(60)
+"""
+            profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} "
+                                             f"{shlex.quote(str(pid_file))} {shlex.quote(str(ready_file))}"},
+                       "base_url": "http://service.local", "transport": "json_rpc_http",
+                       "readiness_timeout_seconds": 3,
+                       "calls": [{"method": "ping", "expected_result_contains": ["ok-live-rpc"]}]}
+
+            def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+                if not ready_file.exists():
+                    raise conf.urllib.error.URLError("not ready")
+                if method == "GET":
+                    return conf.HttpResponse(200, b"ready")
+                body = {"jsonrpc": "2.0", "id": json_body["id"], "result": {"message": "ok-live-rpc"}}
+                return conf.HttpResponse(200, json.dumps(body).encode())
+
+            rep = conf.run_rpc_service_conformance(
+                _rpc_contract(profile), conf.subprocess_runner(timeout=2.0), http_request=req)
+            assert rep["applicable"] and rep["passed"] and rep["checks_run"] == 2, rep
+            assert _eventually_process_gone(pid_file), "real launched rpc stand-in must be stopped"
+            print("ok  rpc_service: production callable runner launches a real process and stops it")
+            return
+
+    script = r"""
+import http.server
+import json
+import socketserver
+import sys
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ready")
+    def do_POST(self):
+        size = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(size) or b"{}")
+        response = {"jsonrpc": "2.0", "id": body.get("id"), "result": {"message": "ok-live-rpc"}}
+        encoded = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", int(sys.argv[1])), Handler) as server:
+    server.serve_forever()
+"""
+    base_url = f"http://127.0.0.1:{port}"
+    profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} {port}"},
+               "base_url": base_url, "transport": "json_rpc_http",
+               "readiness_timeout_seconds": 3,
+               "calls": [{"method": "ping", "expected_result_contains": ["ok-live-rpc"]}]}
+    rep = conf.run_rpc_service_conformance(_rpc_contract(profile), conf.subprocess_runner(timeout=2.0))
+    assert rep["applicable"] and rep["passed"] and rep["checks_run"] == 2, rep
+    assert _eventually_closed(base_url), "real launched rpc service must be stopped after conformance"
+    print("ok  rpc_service: production callable runner launches a real process and stops it")
+
 # ---- http_service conformance (ADR-0009 #5, ported from an AI Org build) ----
 class _Handle:
     def __init__(self, owner): self.owner = owner
@@ -858,14 +1061,17 @@ def test_http_service_missing_profile_is_critical():
 
 def test_http_service_success_boots_checks_and_stops():
     boot = FakeBoot()
-    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(200, b"ok"))
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(200, b"ok"),
+                                            service_launcher=_launcher_from_start(boot))
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     assert boot.started and boot.stopped, "service is started and stopped"
     print("ok  http_service: boot -> ready -> examples pass -> stopped")
 
 
 def test_http_service_status_mismatch_is_major():
-    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), FakeBoot(), http_request=_http_req(500, b"ok"))
+    boot = FakeBoot()
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(500, b"ok"),
+                                            service_launcher=_launcher_from_start(boot))
     checks = {f["check"] for f in rep["findings"]}
     assert "status" in checks and not rep["passed"], rep["findings"]
     print("ok  http_service: wrong status -> major status finding")
@@ -873,10 +1079,24 @@ def test_http_service_status_mismatch_is_major():
 
 def test_http_service_readiness_timeout_skips_examples():
     boot = FakeBoot()
-    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(ready=False))
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), boot, http_request=_http_req(ready=False),
+                                            service_launcher=_launcher_from_start(boot))
     assert not rep["passed"] and any(f["check"] == "lifecycle" for f in rep["findings"]), rep
     assert boot.stopped, "the service is still stopped after a readiness timeout"
     print("ok  http_service: readiness timeout -> critical lifecycle, examples skipped, still stopped")
+
+
+def test_http_service_start_failure_reports_exit_and_captured_stderr():
+    profile = {"start": {"command": "python3 -c 'import sys; sys.stderr.write(\"boot exploded\"); sys.exit(7)'"},
+               "base_url": "http://service.local", "readiness_timeout_seconds": 1,
+               "examples": [{"method": "GET", "path": "/", "expected_status": 200}]}
+    rep = conf.run_http_service_conformance(_http_contract(profile), conf.subprocess_runner(timeout=2.0),
+                                            http_request=_http_req())
+    finding = rep["findings"][0]
+    assert not rep["passed"] and finding["check"] == "lifecycle", rep
+    assert finding["returncode"] == 7 and "boot exploded" in finding["stderr_tail"], finding
+    assert finding.get("error") != "AttributeError", finding
+    print("ok  http_service: failed start reports real exit code and captured stderr")
 
 
 def test_http_service_not_applicable_for_non_http():
