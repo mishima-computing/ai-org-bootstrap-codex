@@ -14,6 +14,9 @@ Codex.
 None.
 
 ## Canonical behavior
+Stefan is opt-in at the controller level. The registry keeps this role available, but
+`scripts/controller_pipeline.py` must skip it by default unless `STEFAN_ENABLED` is truthy.
+
 Governed verbatim by `.agent-org/knowledge/ui/aesthetic-review-profile.md` (the four layers, the
 measured backbone `scripts/stefan-aesthetic-review.py`, exemplar-anchored review, directional axes,
 severity bands, genre-band caveat, calibration fairness, owner-final rule). That profile is
