@@ -18,6 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _SKIP_DIRS = {".git", "node_modules", ".agent-runs", "__pycache__", ".venv", "dist", "build"}
+# R4 (repair re-localization): on a repair the failing region is KNOWN — a defect_locus naming the file
+# (and optional symbols / line_range). These bonuses BIAS the advisory candidate ranking toward that region,
+# reusing symbol_to_paths + the reference graph. The file bonus is deliberately dominant so the failing file
+# leads the advisory list; neighbours/symbols promote materially without overrunning it. No locus -> no effect.
+_LOCUS_FILE_BONUS = 1000.0
+_LOCUS_NEIGHBOR_BONUS = 60.0
+_LOCUS_SYMBOL_BONUS = 80.0
 _INDEX_CACHE: dict = {}   # (repo, HEAD) -> RepoIndex, process-local (see RepoIndex.cached)
 _TEST_NAME_RE = re.compile(r"(\.test\.[jt]sx?$)|(^test_.*\.py$)|(_test\.py$)|(\.spec\.[jt]sx?$)")
 _TOKEN_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -172,7 +179,49 @@ class PreLocalizer:
         self.repo = Path(repo).resolve()
         self.index = index or RepoIndex.cached(self.repo)
 
-    def candidates(self, objective: str, *, k: int = 12) -> list[Candidate]:
+    def _normalize_locus_path(self, raw) -> str | None:
+        """Resolve a defect_locus file reference to a repo-relative path in the index. Accepts a repo-relative
+        posix path (the finding shape), an absolute path under the repo, or a bare basename. Returns None when
+        nothing in the index matches — the locus is advisory, so an unknown file simply has no effect."""
+        if not raw:
+            return None
+        p = str(raw).replace("\\", "/").split("#")[0].strip()
+        if p.startswith("./"):
+            p = p[2:]
+        try:
+            ap = Path(p)
+            if ap.is_absolute():
+                p = ap.resolve().relative_to(self.repo).as_posix()
+        except (ValueError, OSError):
+            pass
+        if p in self.index.paths:
+            return p
+        hits = self.index.basename_to_paths.get(Path(p).name)   # finding may name just the file
+        return hits[0] if hits else None
+
+    def _apply_defect_locus(self, defect_locus: dict, add) -> None:
+        """R4 — repair re-localization. Given a defect_locus = {file, optional line_range, optional symbols},
+        PROMOTE the failing file, its reference neighbours, and files declaring the named symbols, reusing the
+        existing reference-graph + symbol_to_paths machinery. Applied BEFORE reference propagation so the locus
+        file also seeds neighbour propagation. Advisory only: it re-ranks candidates, never the write boundary."""
+        idx = self.index
+        locus_file = self._normalize_locus_path(defect_locus.get("file") or defect_locus.get("path"))
+        if locus_file:
+            why = "defect locus (repair re-localization)"
+            rng = defect_locus.get("line_range") or defect_locus.get("lines")
+            if isinstance(rng, dict) and "start" in rng:
+                why += f" lines {rng.get('start')}-{rng.get('end', rng.get('start'))}"
+            elif isinstance(rng, (list, tuple)) and len(rng) == 2:
+                why += f" lines {rng[0]}-{rng[1]}"
+            add(locus_file, _LOCUS_FILE_BONUS, why)
+            for nbr in (idx.refs_in.get(locus_file, set()) | idx.refs_out.get(locus_file, set())):
+                add(nbr, _LOCUS_NEIGHBOR_BONUS, f"near defect locus (references {Path(locus_file).name})")
+        for sym in defect_locus.get("symbols") or []:
+            for tok in _split_tokens(str(sym)):
+                for p in set(idx.symbol_to_paths.get(tok, [])):
+                    add(p, _LOCUS_SYMBOL_BONUS, f"defect locus symbol '{tok}'")
+
+    def candidates(self, objective: str, *, k: int = 12, defect_locus: dict | None = None) -> list[Candidate]:
         idx = self.index
         toks = _split_tokens(objective)
         # literal path/filename tokens (whole paths or basenames appearing verbatim)
@@ -205,6 +254,11 @@ class PreLocalizer:
                 decay = 1.0 / math.sqrt(max(1, len(members)))
                 for p in members:
                     add(p, 30 * decay, f"dir keyword '{tok}'")
+
+        # R4 re-localization: on a repair, bias toward the known failing region BEFORE propagation so the
+        # locus file also seeds the reference graph. No locus (first attempt) -> scores are untouched.
+        if defect_locus:
+            self._apply_defect_locus(defect_locus, add)
 
         # reference-graph propagation: a strongly-matched file lends weight to files that reference it
         # or that it references (siblings), so a referenced index.html surfaces without a literal path.

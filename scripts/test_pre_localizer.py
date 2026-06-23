@@ -73,5 +73,76 @@ class PreLocalizerTest(unittest.TestCase):
             self.assertEqual(a, b)
 
 
+class DefectLocusReLocalizationTest(unittest.TestCase):
+    """R4: on a repair the failing region (defect_locus) re-ranks the advisory candidates toward it."""
+
+    OBJ = "add a live chat view to the seller dashboard"
+
+    def test_locus_file_ranks_top(self):
+        # (a) a defect_locus naming file X promotes X to the TOP candidate, even when X is NOT the
+        # objective's natural top hit (clay-live.js loses to seller-dashboard.js without a locus).
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            pl = pre_localizer.PreLocalizer(repo)
+            no_locus = [c.path for c in pl.candidates(self.OBJ)]
+            self.assertNotEqual(no_locus[0], "cockpit/clay/clay-live.js")   # not naturally top
+            with_locus = pl.candidates(self.OBJ, defect_locus={"file": "cockpit/clay/clay-live.js"})
+            self.assertEqual(with_locus[0].path, "cockpit/clay/clay-live.js")
+            self.assertTrue(any("defect locus" in r for r in with_locus[0].reasons), with_locus[0].reasons)
+
+    def test_low_ranked_file_materially_promoted(self):
+        # (b) a locus pointing at a file the objective did NOT surface at all (billing.py, score 0)
+        # promotes it into — and to the top of — the candidate set.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            pl = pre_localizer.PreLocalizer(repo)
+            self.assertNotIn("unrelated/billing.py", [c.path for c in pl.candidates(self.OBJ)])
+            promoted = pl.candidates(self.OBJ, defect_locus={"file": "unrelated/billing.py"})
+            self.assertEqual(promoted[0].path, "unrelated/billing.py")
+
+    def test_no_locus_is_byte_for_byte_identical(self):
+        # (c) no locus (first attempt) -> candidates identical to the no-argument call; the new code path
+        # is fully gated behind a non-None defect_locus.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            pl = pre_localizer.PreLocalizer(repo)
+            base = [(c.path, c.score, tuple(c.reasons)) for c in pl.candidates(self.OBJ)]
+            none_locus = [(c.path, c.score, tuple(c.reasons))
+                          for c in pl.candidates(self.OBJ, defect_locus=None)]
+            empty_locus = [(c.path, c.score, tuple(c.reasons))
+                           for c in pl.candidates(self.OBJ, defect_locus={})]
+            self.assertEqual(base, none_locus)
+            self.assertEqual(base, empty_locus)
+
+    def test_locus_neighbors_and_symbols_promoted_via_reference_graph(self):
+        # the locus reuses the reference graph (neighbours of X) and symbol_to_paths (named symbols).
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            pl = pre_localizer.PreLocalizer(repo)
+            cands = pl.candidates(self.OBJ, defect_locus={
+                "file": "cockpit/clay/index.html",                 # references both clay JS files
+                "symbols": ["buildLayout"],                        # declared in clay-live.js
+            })
+            by_path = {c.path: c for c in cands}
+            self.assertIn("cockpit/clay/index.html", by_path)
+            # index.html references seller-dashboard.js + clay-live.js -> both get the neighbour bonus.
+            self.assertTrue(any("near defect locus" in r
+                                for r in by_path["cockpit/clay/seller-dashboard.js"].reasons),
+                            by_path["cockpit/clay/seller-dashboard.js"].reasons)
+            self.assertTrue(any("defect locus symbol" in r
+                                for r in by_path["cockpit/clay/clay-live.js"].reasons),
+                            by_path["cockpit/clay/clay-live.js"].reasons)
+
+    def test_unknown_locus_file_is_advisory_noop(self):
+        # a locus naming a file not in the index has no effect (advisory) — equal to no locus.
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_clay_repo(Path(d))
+            pl = pre_localizer.PreLocalizer(repo)
+            base = [(c.path, c.score) for c in pl.candidates(self.OBJ)]
+            ghost = [(c.path, c.score)
+                     for c in pl.candidates(self.OBJ, defect_locus={"file": "does/not/exist.js"})]
+            self.assertEqual(base, ghost)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

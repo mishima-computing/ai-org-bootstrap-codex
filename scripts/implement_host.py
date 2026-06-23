@@ -78,7 +78,8 @@ def _why_from_context(goal_context: dict | None) -> dict:
 
 
 def build_map_for(repo, raw_prompt: str, *, contract_inputs: dict | None = None,
-                  write_scope: list[str] | None = None, goal_context: dict | None = None) -> dict:
+                  write_scope: list[str] | None = None, goal_context: dict | None = None,
+                  defect_locus: dict | None = None) -> dict:
     rp = Path(repo).resolve()
     objective = objective_from_prompt(raw_prompt)
     inputs = contract_inputs if isinstance(contract_inputs, dict) else inputs_from_prompt(raw_prompt)
@@ -87,13 +88,40 @@ def build_map_for(repo, raw_prompt: str, *, contract_inputs: dict | None = None,
     forbidden_globs = list(impl_contract.get("files_not_allowed_to_change") or [])
 
     index = pre_localizer.RepoIndex.cached(rp)
-    candidates = pre_localizer.PreLocalizer(rp, index=index).candidates(objective)
+    # R4: on a repair, re-seed pre-localization from the blocking finding's defect_locus so the advisory
+    # candidate set zooms to the failing region. No locus (first attempt) -> identical ranking to today. The
+    # locus only RE-RANKS advisory candidates; the write boundary below stays files_allowed_to_change (ADR-0006).
+    locus = defect_locus if isinstance(defect_locus, dict) and defect_locus else None
+    candidates = pre_localizer.PreLocalizer(rp, index=index).candidates(objective, defect_locus=locus)
     candidate_paths = {c.path for c in candidates}
     in_scope_candidates = [c for c in candidates if _matches_any(c.path, allowed_globs)]
     in_scope_real = sorted(p for p in index.paths if _matches_any(p, allowed_globs))
 
     guard_map = GuardScan(rp, [c.path for c in candidates]).build()
     guard_map["candidates"] = [{"path": c.path, "score": c.score, "reasons": c.reasons} for c in candidates]
+
+    localization = {
+        "in_scope_prelocalized": [
+            {"path": c.path, "score": c.score, "reasons": c.reasons} for c in in_scope_candidates
+        ],
+        "in_scope_not_prelocalized": [
+            {"path": p, "reason": "scope says writable; PreLocalizer did not surface it"}
+            for p in in_scope_real if p not in candidate_paths
+        ],
+        "prelocalized_out_of_scope": [
+            {"path": c.path, "score": c.score, "reasons": c.reasons}
+            for c in candidates if not _matches_any(c.path, allowed_globs)
+        ],
+    }
+    if locus:
+        # R4: echo the failing region so the implementer sees WHERE (advisory; never widens scope).
+        localization["defect_locus"] = {
+            "file": locus.get("file") or locus.get("path"),
+            "line_range": locus.get("line_range") or locus.get("lines"),
+            "symbols": locus.get("symbols") or [],
+            "note": "Repair re-localization: candidates re-ranked around this region. Advisory only — the "
+                    "write boundary is still files_allowed_to_change.",
+        }
 
     return {
         "objective": objective,
@@ -103,19 +131,7 @@ def build_map_for(repo, raw_prompt: str, *, contract_inputs: dict | None = None,
             "files_not_allowed_to_change": forbidden_globs,
             "note": "Pre-localization is advisory only. The write boundary remains files_allowed_to_change.",
         },
-        "localization": {
-            "in_scope_prelocalized": [
-                {"path": c.path, "score": c.score, "reasons": c.reasons} for c in in_scope_candidates
-            ],
-            "in_scope_not_prelocalized": [
-                {"path": p, "reason": "scope says writable; PreLocalizer did not surface it"}
-                for p in in_scope_real if p not in candidate_paths
-            ],
-            "prelocalized_out_of_scope": [
-                {"path": c.path, "score": c.score, "reasons": c.reasons}
-                for c in candidates if not _matches_any(c.path, allowed_globs)
-            ],
-        },
+        "localization": localization,
         "contract_guards": {
             "deliverable_kind": impl_contract.get("deliverable_kind"),
             "acceptance_criteria": impl_contract.get("acceptance_criteria") or [],
@@ -175,8 +191,11 @@ def format_build_section(build_map: dict) -> str:
 
 
 def make_implement_carrier_runner(repo, *, objective, contract_inputs=None, write_scope=None,
-                                  goal_context=None, carrier=None, max_attempts=3):
-    """Return a controller_workflow carrier_runner for the write-role implementer."""
+                                  goal_context=None, carrier=None, max_attempts=3, defect_locus=None):
+    """Return a controller_workflow carrier_runner for the write-role implementer.
+
+    `defect_locus` (R4): on a repair, the blocking finding's failing region re-seeds pre-localization so the
+    advisory candidate set zooms to it. None on a first attempt -> identical grounding to today."""
     carrier = carrier or _default_carrier
 
     def runner(rp, prompt, sandbox, *, timeout=600, retries=1, out_dir=None, resume_session=None):
@@ -185,7 +204,8 @@ def make_implement_carrier_runner(repo, *, objective, contract_inputs=None, writ
         out_dir.mkdir(parents=True, exist_ok=True)
 
         build_map = build_map_for(rp, objective, contract_inputs=contract_inputs,
-                                  write_scope=write_scope, goal_context=goal_context)
+                                  write_scope=write_scope, goal_context=goal_context,
+                                  defect_locus=defect_locus)
         build_file = out_dir / BUILD_MAP_FILE
         build_file.write_text(json.dumps(build_map, indent=2, ensure_ascii=False), encoding="utf-8")
 

@@ -83,7 +83,7 @@ def _inject_output_schema(repo: Path, contract: dict, schema_file: str) -> dict:
 
 
 def run(repo, contract: dict, run_id: str, *, cache=True,
-        resume_session=None, goal_context=None) -> workflow.models.ControllerRunReport:
+        resume_session=None, goal_context=None, defect_locus=None) -> workflow.models.ControllerRunReport:
     repo = Path(repo).resolve()
     role = contract.get("role")
     info = _registry_role(repo, role)
@@ -127,6 +127,7 @@ def run(repo, contract: dict, run_id: str, *, cache=True,
             contract_inputs=inputs,
             write_scope=list(contract.get("files_allowed_to_change") or []),
             goal_context=goal_context,
+            defect_locus=defect_locus,   # R4: re-seed pre-localization from the failing region on a repair
         )
         # The build-map and WHY are runner-owned inputs, not CarrierContract fields, so they are not in the
         # existing cache key. Do not replay a stale implementation without folding the current grounding.

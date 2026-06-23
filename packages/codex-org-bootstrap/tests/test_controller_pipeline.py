@@ -443,6 +443,84 @@ class ControllerPipelineTests(unittest.TestCase):
         self.assertTrue(matches, "expected a repair implementer invocation")
         return matches[-1]
 
+    # ---- R4: repair-iteration re-localization around the defect locus ----
+    def test_finding_defect_locus_extracts_file_line_and_symbol(self):
+        # picks the WORST blocking finding that names a reviewable file; carries its line range + symbol.
+        findings = [
+            {"file": "scripts/a.py", "severity": "minor", "claim": "nit"},
+            {"file": "scripts/b.py", "line_range": {"start": 12, "end": 20},
+             "symbol": "do_thing", "severity": "critical", "claim": "real bug"},
+        ]
+        self.assertEqual(
+            pipeline._finding_defect_locus(findings),
+            {"file": "scripts/b.py", "line_range": [12, 20], "symbols": ["do_thing"]},
+        )
+
+    def test_finding_defect_locus_skips_nonreviewable_and_fileless(self):
+        # scratch/artifact targets and findings with no file are not a usable locus.
+        self.assertIsNone(pipeline._finding_defect_locus(
+            [{"file": ".agent-runs/x/journal.jsonl", "severity": "critical"},
+             {"severity": "critical", "claim": "no file named"}]))
+
+    def test_finding_line_range_handles_dict_list_and_bare_line(self):
+        self.assertEqual(pipeline._finding_line_range({"line_range": {"start": 3, "end": 9}}), [3, 9])
+        self.assertEqual(pipeline._finding_line_range({"range": [4, 4]}), [4, 4])
+        self.assertEqual(pipeline._finding_line_range({"line": 7}), [7, 7])
+        self.assertIsNone(pipeline._finding_line_range({"severity": "major"}))
+
+    def test_repair_threads_defect_locus_into_implementer_only(self):
+        # On a repair the blocking linon finding's locus reaches the implementer's controller_run.run call
+        # (and ONLY the implementer's); the first attempt and the producer/aufheben repairs carry no locus.
+        captured = []   # (role, run_id, defect_locus)
+        linon_runs = 0
+
+        def _repair_run(repo, contract, run_id, *, cache=True, defect_locus=None, **_):
+            nonlocal linon_runs
+            role = contract["role"]
+            payload = json.loads(contract["prompt"])
+            self.calls.append((role, payload, run_id, cache, contract))
+            captured.append((role, run_id, defect_locus))
+            if "files_allowed_to_change" not in contract:
+                result = {"role_id": role, "seen_inputs": payload["inputs"]}
+                if role == "aufheben-designer":
+                    result = {
+                        "role_id": "aufheben-designer",
+                        "contract_id": f"impl-{len([c for c in self.calls if c[0] == role])}",
+                        "objective": payload["objective"],
+                        "files_allowed_to_change": ["scripts/controller_pipeline.py"],
+                        "required_checks": ["python -m unittest x"],
+                        "received_from": sorted(payload["inputs"]),
+                        "acceptance_criteria": ["reach implementer"],
+                        "deliverable_kind": "none",
+                    }
+                elif role == "linon":
+                    linon_runs += 1
+                    result = {
+                        "profile_id": "linon-review",
+                        "findings": [{
+                            "file": "scripts/controller_pipeline.py",
+                            "line_range": {"start": 5, "end": 8},
+                            "severity": "major", "lens": "silent-failure", "basis": "static-read",
+                            "claim": "first pass finding",
+                            "evidence_ref": "scripts/controller_pipeline.py:5",
+                        }] if linon_runs == 1 else [],
+                        "criterion_verdicts": [], "gaps": [],
+                    }
+                (Path(repo) / pipeline.RESULT_FILE).write_text(json.dumps(result), encoding="utf-8")
+            return _Rep(True, run_id=run_id, role=role)
+
+        controller_run.run = _repair_run
+        result = pipeline.run_pipeline(ROOT, "wire declared org", "pipe-test", cache=False)
+        self.assertTrue(result["converged"])
+
+        impl_loci = {run_id: locus for role, run_id, locus in captured if role == "implementer"}
+        first = next(locus for run_id, locus in impl_loci.items() if "-repair" not in run_id)
+        repair = next(locus for run_id, locus in impl_loci.items() if "-repair" in run_id)
+        self.assertIsNone(first)                                    # first attempt unchanged
+        self.assertEqual(repair, {"file": "scripts/controller_pipeline.py", "line_range": [5, 8]})
+        # the locus is implementer-only: no other role's repair call carried it.
+        self.assertTrue(all(locus is None for role, _run, locus in captured if role != "implementer"))
+
     def test_adr0018_structural_finding_forwards_only_inert_evidence(self):
         finding = {
             "source": "http-conformance", "check": "lifecycle", "severity": "critical", "passed": False,
