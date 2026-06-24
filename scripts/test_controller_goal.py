@@ -35,6 +35,21 @@ def _statuses(plan):
     return out
 
 
+def _temp_git_repo(root, name="r"):
+    import os, subprocess
+    repo = os.path.join(root, name)
+    os.mkdir(repo)
+    def git(*a):
+        return subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, text=True)
+    git("init", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    open(os.path.join(repo, "seed.txt"), "w").write("seed\n")
+    git("add", "-A")
+    git("commit", "-m", "base")
+    return repo, git
+
+
 def test_all_leaves_converge():
     split = lambda goal, ctx, carrier: [_leaf("a", ["x.py"]), _leaf("b", ["y.py"])]
     events = []
@@ -258,6 +273,342 @@ def test_budget_stops():
     done = sum(1 for v in _statuses(plan).values() if v == "done")
     assert done == 1, ("budget=1 -> only one leaf ran", _statuses(plan))
     print("ok  budget caps total leaf runs (autonomous bound, not a human)")
+
+
+def test_frontier_leaf_parallel_batch_starts_siblings_before_either_finishes():
+    import os, threading
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    sequence = []
+    lock = threading.Lock()
+    both_started = threading.Event()
+    errors = []
+
+    def run_leaf(_repo, task, **_kwargs):
+        with lock:
+            sequence.append(("start", task["id"]))
+            if len([x for x in sequence if x[0] == "start"]) == 2:
+                both_started.set()
+        if not both_started.wait(2):
+            errors.append(f"{task['id']} finished before both siblings started")
+            return "failed"
+        with lock:
+            sequence.append(("finish", task["id"]))
+        return "converged"
+
+    try:
+        split = lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])]
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split)
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert not errors, errors
+    first_finish = next(i for i, x in enumerate(sequence) if x[0] == "finish")
+    assert [x[0] for x in sequence[:first_finish]] == ["start", "start"], sequence
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  frontier leaf wave runs disjoint ready siblings concurrently")
+
+
+def test_frontier_leaf_dependency_waves_cut_worktrees_from_folded_head():
+    import os, tempfile
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    seen = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def split(_g, _c, _k):
+                return [
+                    _leaf("A", ["work/A.txt"]),
+                    _leaf("B", ["work/B.txt"], deps=["A"]),
+                    _leaf("C", ["work/C.txt"], deps=["A"]),
+                    _leaf("D", ["work/D.txt"], deps=["B", "C"]),
+                ]
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                if leaf_id in {"B", "C"}:
+                    assert os.path.isfile(os.path.join(wt, "work", "A.txt")), f"{leaf_id} missing A"
+                if leaf_id == "D":
+                    for dep in ("A", "B", "C"):
+                        assert os.path.isfile(os.path.join(wt, "work", f"{dep}.txt")), f"D missing {dep}"
+                os.makedirs(os.path.join(wt, "work"), exist_ok=True)
+                open(os.path.join(wt, "work", f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                seen.append(leaf_id)
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf, split=split)
+    finally:
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert seen[0] == "A" and seen[-1] == "D", seen
+    assert set(seen[1:3]) == {"B", "C"}, seen
+    assert _statuses(plan) == {"A": "done", "B": "done", "C": "done", "D": "done"}, _statuses(plan)
+    print("ok  dependency waves release only after folded commits reach the next worktree HEAD")
+
+
+def test_frontier_leaf_merge_is_serial_even_when_leaf_work_overlaps():
+    import os, tempfile, threading, time
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    real_merge = cg.git_ops.merge_and_commit_leaf
+    active = {"n": 0, "max": 0}
+    lock = threading.Lock()
+    both_started = threading.Event()
+    starts = []
+
+    def wrapped_merge(*args, **kwargs):
+        with lock:
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+        try:
+            time.sleep(0.05)
+            return real_merge(*args, **kwargs)
+        finally:
+            with lock:
+                active["n"] -= 1
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+            cg.git_ops.merge_and_commit_leaf = wrapped_merge
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                with lock:
+                    starts.append(leaf_id)
+                    if len(starts) == 2:
+                        both_started.set()
+                assert both_started.wait(2), "leaf work did not overlap"
+                open(os.path.join(wt, f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("a", ["a.txt"]), _leaf("b", ["b.txt"])])
+    finally:
+        cg.git_ops.merge_and_commit_leaf = real_merge
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert active["max"] == 1, active
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  merge_and_commit_leaf is entered only by the serial fold")
+
+
+def test_run_leaf_without_defer_merge_support_forces_serial_execution():
+    import os, tempfile, threading, time
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    real_merge = cg.git_ops.merge_and_commit_leaf
+    active_leaf = {"n": 0, "max": 0}
+    active_merge = {"n": 0, "max": 0}
+    lock = threading.Lock()
+
+    def wrapped_merge(*args, **kwargs):
+        with lock:
+            active_merge["n"] += 1
+            active_merge["max"] = max(active_merge["max"], active_merge["n"])
+        try:
+            time.sleep(0.03)
+            return real_merge(*args, **kwargs)
+        finally:
+            with lock:
+                active_merge["n"] -= 1
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+            cg.git_ops.merge_and_commit_leaf = wrapped_merge
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                with lock:
+                    active_leaf["n"] += 1
+                    active_leaf["max"] = max(active_leaf["max"], active_leaf["n"])
+                try:
+                    time.sleep(0.05)
+                    open(os.path.join(wt, f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                    return {"converged": True}
+                finally:
+                    with lock:
+                        active_leaf["n"] -= 1
+
+            def run_leaf(repo_arg, task):                    # intentionally NO defer_merge support
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("a", ["a.txt"]), _leaf("b", ["b.txt"])])
+    finally:
+        cg.git_ops.merge_and_commit_leaf = real_merge
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert active_leaf["max"] == 1, active_leaf
+    assert active_merge["max"] == 1, active_merge
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  run_leaf without defer_merge support is throttled to serial leaf execution")
+
+
+def test_frontier_leaf_scope_guard_rejects_out_of_scope_changed_file():
+    import os, tempfile
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    events = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                open(os.path.join(wt, "oops.py"), "w").write("out of scope\n")
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("bad", ["allowed.py"])],
+                               emit=events.append)
+            assert not os.path.exists(os.path.join(repo, "oops.py")), "out-of-scope file must not merge"
+    finally:
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert _statuses(plan) == {"bad": "failed"}, _statuses(plan)
+    viol = [e for e in events if e.get("type") == "leaf_scope_violation"]
+    assert viol and viol[0]["out_of_scope"] == ["oops.py"], events
+    print("ok  scope guard blocks changed_files outside declared scope and emits leaf_scope_violation")
+
+
+def test_frontier_leaf_crash_isolation_keeps_sibling_result():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    try:
+        def run_leaf(_repo, task, **_kwargs):
+            if task["id"] == "boom":
+                raise RuntimeError("leaf exploded")
+            return "converged"
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf,
+                           split=lambda g, c, k: [_leaf("boom", ["boom.py"]), _leaf("ok", ["ok.py"])])
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert _statuses(plan) == {"boom": "failed", "ok": "done"}, _statuses(plan)
+    print("ok  one leaf crash is folded as that leaf failure while sibling converges")
+
+
+def test_defer_mode_failure_cleans_up_worktree_and_reconciles_spent():
+    # REGRESSION (the PR1 worktree leak): in defer/parallel mode a NON-converged leaf (mechanical failure)
+    # handed its worktree to nobody, and default_run_leaf's `finally` skipped removal in defer mode -> the
+    # worktree + tempdir LEAKED on every failed/retried leaf. A REAL default_run_leaf (defer_merge=True, the
+    # parallel path) over a FAILING pipeline must leave NO worktree registered and run a BOUNDED number of
+    # attempts (spent reconciled: one initial run + MECH_RETRY_CAP resumes, never an unbounded leak).
+    import os, subprocess, tempfile
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"           # leaf worktrees register on `repo` -> visible in the list
+    calls = {"n": 0}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                calls["n"] += 1                           # a REAL run that fails mechanically (never converges)
+                return {"converged": False}
+
+            def run_leaf(repo_arg, task, **kwargs):       # **kwargs carries defer_merge=True (the parallel path)
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("atom", ["only.py"])])
+            wts = subprocess.run(["git", "-C", repo, "worktree", "list"],
+                                 capture_output=True, text=True).stdout
+    finally:
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert "leaf-" not in wts, ("a failed defer-mode leaf must not leak its worktree", wts)
+    assert _statuses(plan) == {"atom": "failed"}, _statuses(plan)
+    assert calls["n"] == 1 + cg.MECH_RETRY_CAP, ("spent must be bounded (1 run + MECH_RETRY_CAP resumes)", calls)
+    print("ok  defer-mode failure removes its worktree + tempdir and reconciles spent (no leak)")
+
+
+def test_frontier_leaf_budget_bound_dispatches_only_budgeted_ready_leaf():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    starts = []
+    events = []
+    try:
+        plan = cg.run_goal("/repo", "g",
+                           run_leaf=lambda r, t: starts.append(t["id"]) or "converged",
+                           split=lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])],
+                           budget=1, emit=events.append)
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert starts == ["a"], starts
+    assert any(e.get("type") == "budget_exhausted" and e.get("spent") == 1 for e in events), events
+    assert _statuses(plan) == {"a": "done", "b": "pending"}, _statuses(plan)
+    print("ok  budget bounds concurrent dispatch before a full ready wave is submitted")
+
+
+def test_frontier_leaf_max_parallel_one_is_serial_escape_hatch():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "1"
+    sequence = []
+    try:
+        def run_leaf(_repo, task):
+            sequence.append(("start", task["id"]))
+            sequence.append(("finish", task["id"]))
+            return "converged"
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf,
+                           split=lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])])
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert sequence == [("start", "a"), ("finish", "a"), ("start", "b"), ("finish", "b")], sequence
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  AI_ORG_MAX_PARALLEL=1 preserves serial leaf execution order")
 
 
 def test_stream_emit_appends():
