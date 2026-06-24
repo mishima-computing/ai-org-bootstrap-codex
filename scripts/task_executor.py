@@ -374,7 +374,7 @@ class TaskExecutor:
 
     def __init__(self, repo=None, *, run_leaf=None, verify=None, integrate=None, commit_integration=None,
                  decompose_carrier=None, decomposer=None, max_parallel: int | None = None,
-                 max_depth: int | None = None):
+                 max_depth: int | None = None, emit=None):
         self.repo = Path(repo) if repo else None
         self._run_leaf = run_leaf or self._default_run_leaf
         self._verify = verify or self._default_verify
@@ -384,6 +384,7 @@ class TaskExecutor:
         self._decomposer = decomposer or self._default_decompose
         self.max_parallel = max_parallel if max_parallel is not None else _max_parallel()
         self.max_depth = max_depth if max_depth is not None else _max_depth()
+        self._emit = emit or (lambda _event: None)
         # recursion trace (proves TaskExecutor -> TaskExecutor): every execute() call's node id, and the parent->child
         # edges followed when a composite recursed into its children.
         self.calls: list[str] = []
@@ -396,20 +397,28 @@ class TaskExecutor:
         integrate + verify + commit."""
         with self._lock:
             self.calls.append(node.id)
+        self._emit({"type": "leaf_start", "id": node.id, "kind": node.kind, "depth": node.depth})
         if node.subtasks:
             return self.execute_composite(node)
         if should_be_leaf(node, self.max_depth):
             return self.execute_leaf(node)
         node.subtasks = self._decompose_node(node)
         if node.subtasks:
+            self._emit({"type": "leaf_split", "id": node.id, "n": len(node.subtasks),
+                        "children": [child.id for child in node.subtasks]})
             return self.execute_composite(node)
+        self._emit({"type": "decompose_empty_fallback", "id": node.id, "kind": node.kind,
+                    "depth": node.depth,
+                    "detail": "decomposer returned no children; executing the node as a single leaf"})
         return self.execute_leaf(node)
 
     def execute_leaf(self, node: TaskNode) -> VerifiedCommit:
         """A leaf: run the dialectic (injected ``run_leaf``, default = controller_pipeline) and return
         its verified commit."""
         result = self._run_leaf(node)
-        return _as_verified_commit(result, node)
+        verified = _as_verified_commit(result, node)
+        self._emit({"type": "leaf_done", "id": node.id, "commit": verified.commit_sha})
+        return verified
 
     def execute_composite(self, node: TaskNode) -> VerifiedCommit:
         """A composite: execute children RECURSIVELY (parallel where depends_on allows), integrate their
@@ -419,7 +428,12 @@ class TaskExecutor:
         if not node.subtasks:
             node.subtasks = self._decompose_node(node)
             if not node.subtasks:
+                self._emit({"type": "decompose_empty_fallback", "id": node.id, "kind": node.kind,
+                            "depth": node.depth,
+                            "detail": "composite decomposed to no children; executing it as a single leaf"})
                 return self.execute_leaf(node)
+            self._emit({"type": "leaf_split", "id": node.id, "n": len(node.subtasks),
+                        "children": [child.id for child in node.subtasks]})
         # 1. execute children recursively (this is where execute calls execute)
         child_commits = self._execute_children(node, base)
         # 2. integrate the children's commits in TOPOLOGICAL order on a branch off base
@@ -427,9 +441,18 @@ class TaskExecutor:
         ordered_commits = [child_commits[c.id] for c in ordered if c.id in child_commits]
         integrated_head, integ_wt = self._integrate(node, base, ordered_commits)
         # 3. verify the INTEGRATED result (Linon / acceptance over the integrated commit)
-        evidence = self._verify(node, integrated_head, ordered_commits)
-        # 4. create THIS node's integration commit (a single, cherry-pickable net diff off base)
-        integration_sha = self._commit_integration(node, base, integrated_head, integ_wt, evidence)
+        try:
+            evidence = self._verify(node, integrated_head, ordered_commits)
+            if not _verification_confirmed(evidence):
+                raise TaskExecutorIntegrationError(
+                    f"composite verification failed for {node.id}: {evidence!r}")
+            # 4. create THIS node's integration commit (a single, cherry-pickable net diff off base)
+            integration_sha = self._commit_integration(node, base, integrated_head, integ_wt, evidence)
+        except Exception:
+            if integ_wt:
+                self._git("worktree", "remove", "--force", str(integ_wt))
+                shutil.rmtree(integ_wt, ignore_errors=True)
+            raise
         return VerifiedCommit(
             task_id=node.id,
             commit_sha=integration_sha,
@@ -633,6 +656,11 @@ class TaskExecutor:
             "integrated_head": integrated_head,
             "children": [c.task_id for c in child_commits],
         }
+
+
+def _verification_confirmed(evidence) -> bool:
+    """Composite verification is fail-closed: only an explicit verified:true is green."""
+    return isinstance(evidence, dict) and evidence.get("verified") is True
 
 
 def _as_verified_commit(result, node: TaskNode) -> VerifiedCommit:

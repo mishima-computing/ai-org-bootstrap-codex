@@ -321,6 +321,80 @@ def test_root_decompose_result_sets_max_depth_once():
     print("ok  root DecomposeResult sets max_depth once; non-root metadata is ignored")
 
 
+def test_failing_composite_verify_blocks_integration_commit():
+    committed: list[str] = []
+
+    def run_leaf(node):
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    def verify(node, integrated_head, child_commits):
+        return {"verified": False, "finding": "integrated result was not accepted"}
+
+    def integrate(node, base, child_commits):
+        return (f"integrated-head-{node.id}", None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        committed.append(node.id)
+        return f"integ-sha-{node.id}"
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("a", kind=S.LEAF, objective="do a"),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, max_parallel=1)
+    try:
+        task_executor.execute(root)
+        raise AssertionError("a failing composite verify must not silently pass")
+    except S.TaskExecutorIntegrationError as exc:
+        assert "composite verification failed" in str(exc), exc
+    assert committed == [], committed
+    print("ok  failing composite verify blocks integration commit")
+
+
+def test_cockpit_events_cover_start_done_split_and_empty_fallback():
+    events: list[dict] = []
+
+    def run_leaf(node):
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    def verify(node, integrated_head, child_commits):
+        return {"verified": True}
+
+    def integrate(node, base, child_commits):
+        return (f"integrated-head-{node.id}", None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        return f"integ-sha-{node.id}"
+
+    split_root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose")
+    def split_once(node):
+        if node.id == "root":
+            return [S.TaskNode("leaf", kind=S.LEAF, base_sha=node.base_sha,
+                               objective="do leaf", depth=node.depth + 1)]
+        return []
+
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, decomposer=split_once,
+                      max_parallel=1, emit=events.append)
+    task_executor.execute(split_root)
+
+    assert any(e.get("type") == "leaf_start" and e.get("id") == "root" for e in events), events
+    assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and e.get("children") == ["leaf"]
+               for e in events), events
+    assert any(e.get("type") == "leaf_done" and e.get("id") == "leaf" and e.get("commit") == "leaf-sha-leaf"
+               for e in events), events
+
+    fallback_events: list[dict] = []
+    fallback = S.TaskNode("fallback", kind=S.COMPOSITE, base_sha="BASE0", objective="atomic")
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, decomposer=lambda _node: [],
+                      max_parallel=1, emit=fallback_events.append)
+    task_executor.execute(fallback)
+    assert any(e.get("type") == "decompose_empty_fallback" and e.get("id") == "fallback"
+               for e in fallback_events), fallback_events
+    print("ok  cockpit events: leaf_start, leaf_split, leaf_done(commit), decompose_empty_fallback")
+
+
 if __name__ == "__main__":
     test_true_recursion_commit_per_node()
     test_real_git_integration()
@@ -328,4 +402,6 @@ if __name__ == "__main__":
     test_serial_child_with_multiple_deps_resumes_from_integrated_head()
     test_default_max_depth_is_floor_when_env_unset()
     test_root_decompose_result_sets_max_depth_once()
+    test_failing_composite_verify_blocks_integration_commit()
+    test_cockpit_events_cover_start_done_split_and_empty_fallback()
     print("\nall task_executor tests passed.")

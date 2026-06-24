@@ -58,7 +58,7 @@ class _Rep:
 class ControllerPipelineTests(unittest.TestCase):
     def setUp(self):
         self._orig = controller_run.run
-        self._env = mock.patch.dict(os.environ, {"STEFAN_ENABLED": ""})
+        self._env = mock.patch.dict(os.environ, {"STEFAN_ENABLED": "", "CI_WRITERS_ENABLED": "1"})
         self._env.start()
         self.calls = []
 

@@ -5,11 +5,14 @@ Uses STUB split + run_leaf so the loop is proven without a carrier or the dialec
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import controller_goal as cg
+
+os.environ.setdefault("AI_ORG_USE_TASKEXECUTOR", "0")
 
 
 def _leaf(i, scope, deps=None):
@@ -1641,6 +1644,352 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
             os.environ["AI_ORG_ROOT"] = old_org
         cg.codex_carrier = real
     print("ok  default-split path: sufficient intake auto-refines then decomposes (production proceed path)")
+
+
+def test_taskexecutor_flag_defaults_on():
+    old = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    try:
+        os.environ.pop("AI_ORG_USE_TASKEXECUTOR", None)
+        assert cg._use_taskexecutor() is True, "AI_ORG_USE_TASKEXECUTOR must default ON"
+    finally:
+        if old is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old
+    print("ok  AI_ORG_USE_TASKEXECUTOR defaults ON")
+
+
+def test_taskexecutor_path_runs_injected_decompose_leaf_and_acceptance_then_merges():
+    import tempfile, subprocess, shutil
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_gate = cg.conformance.run_goal_acceptance
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            base = _rev(git)
+
+            def split(g, c, ca):
+                return [{"id": "leaf", "objective": "write feature", "scope": ["feature.txt"],
+                         "depends_on": []}]
+
+            def run_leaf(_repo_arg, task):
+                wt = os.path.join(d, "leaf-wt")
+                subprocess.run(["git", "-C", repo, "worktree", "add", "--detach", wt, "HEAD"],
+                               check=True, capture_output=True)
+                try:
+                    with open(os.path.join(wt, "feature.txt"), "w") as fh:
+                        fh.write(task["objective"] + "\n")
+                    subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+                    subprocess.run(["git", "-C", wt, "commit", "-m", "leaf feature"],
+                                   check=True, capture_output=True)
+                    return {"outcome": "converged",
+                            "commit": subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"],
+                                                     check=True, capture_output=True,
+                                                     text=True).stdout.strip()}
+                finally:
+                    subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", wt],
+                                   capture_output=True)
+                    shutil.rmtree(wt, ignore_errors=True)
+
+            gate_seen = {}
+            def gate(profile, composed_repo, **_k):
+                gate_seen["repo"] = composed_repo
+                assert os.path.isfile(os.path.join(composed_repo, "feature.txt")), "acceptance sees composed artifact"
+                return {"verified": True, "evidence": [{"ok": True}], "findings": [], "probes_run": 1}
+
+            cg.conformance.run_goal_acceptance = gate
+            events = []
+            plan = cg.run_goal(repo, "build feature", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+                               goal_id="texec-a", emit=events.append)
+            assert _statuses(plan) == {"leaf": "done"}, plan
+            assert any(e.get("type") == "taskexecutor_start" for e in events), events
+            assert any(e.get("type") == "taskexecutor_done" for e in events), events
+            assert any(e.get("type") == "leaf_start" and e.get("id") == "root" and
+                       e.get("goal_id") == "texec-a" for e in events), events
+            assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and
+                       e.get("children") == ["leaf"] for e in events), events
+            assert any(e.get("type") == "leaf_done" and e.get("id") == "leaf" and
+                       e.get("commit") for e in events), events
+            acc = [e for e in events if e.get("type") == "goal_acceptance"]
+            assert acc and acc[0]["verified"] is True, (acc, events)
+            assert any(e.get("type") == "goal_merged" for e in events), events
+            assert _rev(git, "main") != base, "TaskExecutor result must merge back to local main"
+            assert os.path.isfile(os.path.join(repo, "feature.txt")), "merged main has the final artifact"
+            assert gate_seen.get("repo"), "goal acceptance ran"
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+    print("ok  flag ON: run_goal uses TaskExecutor, injected decompose/leaf, acceptance, and merge")
+
+
+def test_taskexecutor_live_dependent_default_leaf_builds_on_dependency_output():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    old_commit = cg._commit_worktree_off_base
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    commits = {}
+    seen = {}
+
+    def split(g, c, ca):
+        return [{"id": "A", "objective": "write A", "scope": ["a.txt"], "depends_on": []},
+                {"id": "B", "objective": "write B", "scope": ["b.txt"], "depends_on": ["A"]}]
+
+    def record_commit(repo, wt, base, message):
+        sha = old_commit(repo, wt, base, message)
+        if message == "leaf: A":
+            commits["A"] = sha
+        if message == "leaf: B":
+            commits["B"] = sha
+        return sha
+
+    def pipeline(wt, objective, run_id, **_kwargs):
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        if "write A" in objective:
+            seen["A_head"] = head
+            with open(os.path.join(wt, "a.txt"), "w") as fh:
+                fh.write("A\n")
+        else:
+            seen["B_head"] = head
+            seen["B_saw_a"] = os.path.isfile(os.path.join(wt, "a.txt"))
+            with open(os.path.join(wt, "b.txt"), "w") as fh:
+                fh.write("B\n")
+        return {"converged": True, "linon_findings_count": 0, "sessions": {}}
+
+    def run_leaf(repo_arg, task, *, goal_context=None, defer_merge=False):
+        return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, goal_context=goal_context,
+                                   defer_merge=defer_merge)
+
+    try:
+        cg._commit_worktree_off_base = record_commit
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            plan = cg.run_goal(repo, "serial build", run_leaf=run_leaf, split=split)
+            assert _statuses(plan) == {"A": "done", "B": "done"}, plan
+            assert commits.get("A"), commits
+            assert seen.get("B_head") == commits["A"], (seen, commits)
+            assert seen.get("B_saw_a") is True, seen
+            assert os.path.isfile(os.path.join(repo, "a.txt")), "dependency output survived final integration"
+            assert os.path.isfile(os.path.join(repo, "b.txt")), "dependent output survived final integration"
+            assert git("show", "HEAD:a.txt").stdout == "A\n", "final tree keeps A's file"
+    finally:
+        cg._commit_worktree_off_base = old_commit
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor live path cuts a dependent default leaf from its dependency output")
+
+
+def test_taskexecutor_live_additive_steering_reaches_dispatched_leaf():
+    import tempfile, subprocess, goal_store
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    seen = []
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        seen.append(task["objective"])
+        with open(os.path.join(repo_arg, "x.py"), "w") as fh:
+            fh.write("x\n")
+        subprocess.run(["git", "-C", repo_arg, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf x"], capture_output=True)
+        return {"outcome": "converged",
+                "commit": subprocess.run(["git", "-C", repo_arg, "rev-parse", "HEAD"],
+                                         capture_output=True, text=True).stdout.strip()}
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _wt_repo(d)
+            st = goal_store.GoalStore(repo)
+            st.create("goal-texec-steer", "build it", "codex")
+            st.steer("goal-texec-steer", "prefer official tools")
+            events = []
+            cg.run_goal(repo, "build it", run_leaf=run_leaf, goal_id="goal-texec-steer",
+                        split=split, emit=events.append)
+            assert seen and "prefer official tools" in seen[0], seen
+            assert "do a" in seen[0], seen
+            assert any(e.get("type") == "steer_applied" and e.get("id") == "a" for e in events), events
+    finally:
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor live path folds additive steering into the dispatched leaf")
+
+
+def test_taskexecutor_root_ci_step_is_opt_in():
+    import tempfile
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_ci = os.environ.get("CI_WRITERS_ENABLED")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    real_root_ci = cg._run_root_ci_writers
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    calls = []
+
+    def fake_root_ci(repo, goal, context, emit):
+        calls.append((repo, goal, context))
+        emit({"type": "root_ci_test_stub"})
+        return True
+
+    try:
+        cg._run_root_ci_writers = fake_root_ci
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            split = lambda g, c, ca: []
+            run_leaf = lambda r, t: {"outcome": "converged", "commit": _rev(git)}
+
+            os.environ.pop("CI_WRITERS_ENABLED", None)
+            events = []
+            cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+            assert calls == [], calls
+            assert not any(e.get("type") == "root_ci_test_stub" for e in events), events
+            assert any(e.get("type") == "root_ci_skipped" and e.get("reason") == "disabled"
+                       for e in events), events
+
+            os.environ["CI_WRITERS_ENABLED"] = "1"
+            events = []
+            cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+            assert len(calls) == 1, calls
+            assert any(e.get("type") == "root_ci_test_stub" for e in events), events
+    finally:
+        cg._run_root_ci_writers = real_root_ci
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_ci is None:
+            os.environ.pop("CI_WRITERS_ENABLED", None)
+        else:
+            os.environ["CI_WRITERS_ENABLED"] = old_ci
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  root CI writers run once at root only when CI_WRITERS_ENABLED opts in")
+
+
+def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "1"
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "write feature", "scope": ["feat.py"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        with open(os.path.join(repo_arg, "feat.py"), "w") as fh:
+            fh.write("feature\n")
+        subprocess.run(["git", "-C", repo_arg, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf feature"],
+                       check=True, capture_output=True)
+        return {"outcome": "converged",
+                "commit": subprocess.run(["git", "-C", repo_arg, "rev-parse", "HEAD"],
+                                         check=True, capture_output=True,
+                                         text=True).stdout.strip()}
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            base = _rev(git, "main")
+            events = []
+            plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               goal_id="texec-shadow", emit=events.append)
+            assert _statuses(plan) == {"a": "done"}, plan
+            acc = [e for e in events if e.get("type") == "goal_acceptance"]
+            assert acc and acc[0]["verified"] is False and acc[0]["status"] == "needs_info", (acc, events)
+            assert any(e.get("type") == "goal_finished" and e.get("status") == "needs_info"
+                       for e in events), events
+            assert not any(e.get("type") == "goal_done" for e in events), events
+            assert not any(e.get("type") == "goal_merged" for e in events), events
+            assert any(e.get("type") == "goal_worktree_retained" and e.get("status") == "needs_info"
+                       for e in events), events
+            assert _rev(git, "main") == base, "unverified TaskExecutor composition must not merge to main"
+            assert not os.path.exists(os.path.join(repo, "feat.py")), "main must not receive the unverified file"
+            retained = next(e for e in events if e.get("type") == "goal_worktree_retained")
+            cg._cleanup_goal_worktree(repo, retained.get("worktree"), retained.get("branch"), delete_branch=True)
+    finally:
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor no acceptance_profile -> needs_info, goal_done absent, NOT merged")
+
+
+def test_taskexecutor_non_defer_failed_leaf_with_commit_does_not_verify():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    old_gate = cg.conformance.run_goal_acceptance
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "do a", "scope": ["seed.txt"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        tree = subprocess.run(["git", "-C", repo_arg, "rev-parse", f"{task['base_sha']}^{{tree}}"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(["git", "-C", repo_arg, "commit-tree", tree, "-p", task["base_sha"],
+                                 "-m", "failed leaf with commit"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+        return {"outcome": "failed", "reason": "linon", "commit": commit}
+
+    def gate(_profile, _repo, **_kwargs):
+        return {"verified": True, "evidence": [{"ok": True}], "findings": [], "probes_run": 1}
+
+    try:
+        cg.conformance.run_goal_acceptance = gate
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _wt_repo(d)
+            events = []
+            plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+                               goal_id="texec-failed-commit", emit=events.append)
+            assert _statuses(plan) == {"a": "failed"}, (plan, events)
+            assert any(e.get("type") == "goal_aborted" and "did not converge" in e.get("error", "")
+                       for e in events), events
+            assert any(e.get("type") == "goal_finished" and e.get("status") == "failed"
+                       for e in events), events
+            assert not any(e.get("type") == "goal_acceptance" for e in events), events
+            assert not any(e.get("type") == "goal_done" for e in events), events
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor non-defer failed leaf with attached commit is NOT verified")
 
 
 def test_main_returns_exit_2_on_intake_hold():

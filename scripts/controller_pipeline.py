@@ -42,6 +42,11 @@ PROVENANCE_FILE = "provenance-manifest.json"
 WRITE_ROLE_RETRIES = 2
 AUFHEBEN_ROLE = "aufheben-designer"
 STEFAN_ROLE = "stefan"
+CI_WRITER_ROLES = frozenset({
+    "functional-ci-action-writer",
+    "security-ci-action-writer",
+    "nonfunctional-ci-action-writer",
+})
 
 # On a REPAIR iteration these four roles RESUME their prior codex session (keeping full memory, emitting
 # only a small delta) instead of re-deriving from scratch. aufheben-designer/linon/stefan stay FRESH:
@@ -102,10 +107,18 @@ def _stefan_enabled() -> bool:
     return _env_enabled("STEFAN_ENABLED")
 
 
+def _ci_writers_enabled() -> bool:
+    """Control shell for CI writers: default OFF, opt in with CI_WRITERS_ENABLED=1/true/yes/on."""
+    return _env_enabled("CI_WRITERS_ENABLED")
+
+
 def _active_entries(entries: dict[str, RegistryEntry]) -> dict[str, RegistryEntry]:
-    if _stefan_enabled():
-        return dict(entries)
-    return {role: entry for role, entry in entries.items() if role != STEFAN_ROLE}
+    active = dict(entries)
+    if not _stefan_enabled():
+        active = {role: entry for role, entry in active.items() if role != STEFAN_ROLE}
+    if not _ci_writers_enabled():
+        active = {role: entry for role, entry in active.items() if role not in CI_WRITER_ROLES}
+    return active
 
 
 def _verifier_roles(entries: dict[str, RegistryEntry]) -> list[str]:
