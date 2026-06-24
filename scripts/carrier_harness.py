@@ -29,6 +29,7 @@ import os
 import selectors
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,48 @@ NO_OUTPUT_TIMEOUT_ENV = "CODEX_CARRIER_NO_OUTPUT_TIMEOUT_SECONDS"
 # child command; the 600s hard wall remains the real ceiling, and the stdin-wait hang is already
 # prevented by stdin=DEVNULL — so the tight 120s no longer earns its false positives.
 DEFAULT_NO_OUTPUT_TIMEOUT_SECONDS = 300.0
+_PROCESS_GROUP_OBSERVERS: dict[int, tuple] = {}
+_PROCESS_GROUP_OBSERVER_LOCK = threading.Lock()
+_PROCESS_GROUP_OBSERVER_SEQ = 0
+
+
+def register_process_group_observer(register, unregister=None) -> int:
+    """Let an outer lifecycle owner observe carrier pgids so it can abort them if its run is cancelled."""
+    global _PROCESS_GROUP_OBSERVER_SEQ
+    with _PROCESS_GROUP_OBSERVER_LOCK:
+        _PROCESS_GROUP_OBSERVER_SEQ += 1
+        token = _PROCESS_GROUP_OBSERVER_SEQ
+        _PROCESS_GROUP_OBSERVERS[token] = (register, unregister)
+        return token
+
+
+def unregister_process_group_observer(token: int | None) -> None:
+    if token is None:
+        return
+    with _PROCESS_GROUP_OBSERVER_LOCK:
+        _PROCESS_GROUP_OBSERVERS.pop(token, None)
+
+
+def _notify_process_group_started(pgid: int) -> None:
+    with _PROCESS_GROUP_OBSERVER_LOCK:
+        observers = list(_PROCESS_GROUP_OBSERVERS.values())
+    for register, _unregister in observers:
+        try:
+            register(pgid)
+        except Exception:  # noqa: BLE001 - observer telemetry must never break carrier execution
+            pass
+
+
+def _notify_process_group_finished(pgid: int) -> None:
+    with _PROCESS_GROUP_OBSERVER_LOCK:
+        observers = list(_PROCESS_GROUP_OBSERVERS.values())
+    for _register, unregister in observers:
+        if unregister is None:
+            continue
+        try:
+            unregister(pgid)
+        except Exception:  # noqa: BLE001 - observer telemetry must never break carrier execution
+            pass
 
 
 def _iso8601_utc() -> str:
@@ -264,6 +307,7 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
     pgid = proc.pid                 # capture NOW (== the group id under start_new_session); proc.poll() later
     #                                 reaps the leader, so os.getpgid(proc.pid) at kill time would ESRCH while
     #                                 grandchildren still live. The group persists, keyed by this pgid.
+    _notify_process_group_started(pgid)
     selector = selectors.DefaultSelector()
     if proc.stdout is not None:
         selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
@@ -359,6 +403,7 @@ def _stream_carrier_process(argv: list[str], repo: Path, timeout: float,
             _kill_process_group(pgid)
             killed = True
         code = proc.wait()
+        _notify_process_group_finished(pgid)
 
     stdout = b"".join(stdout_chunks).decode("utf-8", "replace")
     stderr = b"".join(stderr_chunks).decode("utf-8", "replace")

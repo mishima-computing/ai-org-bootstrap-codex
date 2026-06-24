@@ -15,9 +15,12 @@ Run:  python3 scripts/test_executer.py
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -123,6 +126,30 @@ def _temp_git_repo(root) -> str:
     return str(repo)
 
 
+def _worktree_paths(repo) -> list[str]:
+    out = _git(repo, "worktree", "list", "--porcelain")
+    return [line.split(" ", 1)[1] for line in out.splitlines() if line.startswith("worktree ")]
+
+
+def _assert_only_main_worktree(repo):
+    paths = _worktree_paths(repo)
+    assert [str(Path(p).resolve()) for p in paths] == [str(Path(repo).resolve())], paths
+
+
+def _make_child_commit(repo, base: str, rel: str, content: str) -> str:
+    wt = Path(tempfile.mkdtemp(prefix="t-child-commit-"))
+    _git(repo, "worktree", "add", "--detach", str(wt), base)
+    try:
+        (wt / rel).write_text(content)
+        _git(wt, "add", "--", rel)
+        tree = _git(wt, "write-tree").strip()
+        return _git(repo, "commit-tree", tree, "-p", base, "-m", f"child {rel}").strip()
+    finally:
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                       capture_output=True)
+        shutil.rmtree(wt, ignore_errors=True)
+
+
 def _is_sha(s: str) -> bool:
     return isinstance(s, str) and len(s) in (40, 64) and all(c in "0123456789abcdef" for c in s)
 
@@ -179,6 +206,7 @@ def test_real_git_integration():
 
         # the user's working tree / HEAD was never disturbed (integration ran in throwaway worktrees)
         assert _git(repo, "status", "--porcelain").strip() == "", "working tree must stay clean"
+        _assert_only_main_worktree(repo)
 
         print("ok  real-git recursion: cherry-pick integration + commit-tree -> real commit-per-node")
 
@@ -351,6 +379,126 @@ def test_failing_composite_verify_blocks_integration_commit():
     print("ok  failing composite verify blocks integration commit")
 
 
+def test_default_leaf_exception_leaves_no_worktree():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        import controller_pipeline
+        original = controller_pipeline.run_pipeline
+
+        def raising_pipeline(*_args, **_kwargs):
+            raise RuntimeError("carrier crashed mid-leaf")
+
+        controller_pipeline.run_pipeline = raising_pipeline
+        try:
+            leaf = S.TaskNode("boom", kind=S.LEAF, base_sha=_git(repo, "rev-parse", "HEAD").strip(),
+                              objective="raise after worktree add")
+            task_executor = S.TaskExecutor(repo, max_parallel=1)
+            try:
+                task_executor.execute(leaf)
+                raise AssertionError("default leaf exception must propagate")
+            except RuntimeError as exc:
+                assert "carrier crashed" in str(exc), exc
+            _assert_only_main_worktree(repo)
+        finally:
+            controller_pipeline.run_pipeline = original
+    print("ok  default leaf exception removes its worktree")
+
+
+def test_composite_verify_failure_leaves_no_integration_worktree():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        def run_leaf(node):
+            sha = _make_child_commit(repo, node.base_sha, f"{node.id}.txt", f"{node.id}\n")
+            return S.VerifiedCommit(node.id, sha, {"kind": "leaf"})
+
+        def verify(_node, _integrated_head, _child_commits):
+            return {"verified": False, "finding": "reject integrated result"}
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("a", kind=S.LEAF, objective="do a"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, verify=verify, max_parallel=1)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("failing composite verify must raise")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "composite verification failed" in str(exc), exc
+        _assert_only_main_worktree(repo)
+    print("ok  composite verify failure removes its integration worktree")
+
+
+def test_worktree_cleanup_is_idempotent():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        wt = Path(tempfile.mkdtemp(prefix="t-idempotent-wt-"))
+        _git(repo, "worktree", "add", "--detach", str(wt), base)
+        task_executor = S.TaskExecutor(repo, max_parallel=1)
+        task_executor._cleanup_worktree(wt)
+        task_executor._cleanup_worktree(wt)
+        _assert_only_main_worktree(repo)
+    print("ok  worktree cleanup is idempotent")
+
+
+def test_parallel_child_abort_cleans_inflight_worktree_and_pgid():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        slow_ready = threading.Event()
+        proc_holder: dict[str, subprocess.Popen] = {}
+        executor_holder: dict[str, S.TaskExecutor] = {}
+
+        def run_leaf(node):
+            task_executor = executor_holder["executor"]
+            if node.id == "fail":
+                assert slow_ready.wait(5), "slow sibling did not register its resources"
+                raise RuntimeError("abort the wave")
+
+            wt = Path(tempfile.mkdtemp(prefix="t-abort-child-"))
+            add = task_executor._git("worktree", "add", "--detach", str(wt), node.base_sha)
+            assert add.returncode == 0, add.stderr
+            task_executor._register_worktree(wt)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            proc_holder["proc"] = proc
+            task_executor.register_carrier_pgid(proc.pid)
+            slow_ready.set()
+            try:
+                deadline = time.monotonic() + 5
+                while proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                return S.VerifiedCommit(node.id, "0" * 40, {"kind": "leaf"})
+            finally:
+                task_executor.unregister_carrier_pgid(proc.pid)
+                task_executor._cleanup_worktree(wt)
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("slow", kind=S.LEAF, objective="long running"),
+            S.TaskNode("fail", kind=S.LEAF, objective="fail fast"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=2)
+        executor_holder["executor"] = task_executor
+        try:
+            task_executor.execute(root)
+            raise AssertionError("parallel child failure must raise")
+        except RuntimeError as exc:
+            assert "abort the wave" in str(exc), exc
+
+        proc = proc_holder["proc"]
+        deadline = time.monotonic() + 5
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert proc.poll() is not None, "abort cleanup must kill registered carrier pgid"
+        _assert_only_main_worktree(repo)
+    print("ok  parallel child abort cleans in-flight worktree and registered carrier pgid")
+
+
 def test_cockpit_events_cover_start_done_split_and_empty_fallback():
     events: list[dict] = []
 
@@ -403,5 +551,9 @@ if __name__ == "__main__":
     test_default_max_depth_is_floor_when_env_unset()
     test_root_decompose_result_sets_max_depth_once()
     test_failing_composite_verify_blocks_integration_commit()
+    test_default_leaf_exception_leaves_no_worktree()
+    test_composite_verify_failure_leaves_no_integration_worktree()
+    test_worktree_cleanup_is_idempotent()
+    test_parallel_child_abort_cleans_inflight_worktree_and_pgid()
     test_cockpit_events_cover_start_done_split_and_empty_fallback()
     print("\nall task_executor tests passed.")

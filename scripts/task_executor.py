@@ -30,6 +30,7 @@ import concurrent.futures
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -390,6 +391,9 @@ class TaskExecutor:
         self.calls: list[str] = []
         self.recursion_edges: list[tuple[str, str]] = []
         self._lock = threading.Lock()
+        self._abort = threading.Event()
+        self._active_worktrees: set[Path] = set()
+        self._active_pgids: set[int] = set()
 
     # -- dispatch ---------------------------------------------------------------------------------
     def execute(self, node: TaskNode) -> VerifiedCommit:
@@ -439,20 +443,18 @@ class TaskExecutor:
         # 2. integrate the children's commits in TOPOLOGICAL order on a branch off base
         ordered = _topo_order(node.subtasks)
         ordered_commits = [child_commits[c.id] for c in ordered if c.id in child_commits]
-        integrated_head, integ_wt = self._integrate(node, base, ordered_commits)
-        # 3. verify the INTEGRATED result (Linon / acceptance over the integrated commit)
+        integ_wt = None
         try:
+            integrated_head, integ_wt = self._integrate(node, base, ordered_commits)
+            # 3. verify the INTEGRATED result (Linon / acceptance over the integrated commit)
             evidence = self._verify(node, integrated_head, ordered_commits)
             if not _verification_confirmed(evidence):
                 raise TaskExecutorIntegrationError(
                     f"composite verification failed for {node.id}: {evidence!r}")
             # 4. create THIS node's integration commit (a single, cherry-pickable net diff off base)
             integration_sha = self._commit_integration(node, base, integrated_head, integ_wt, evidence)
-        except Exception:
-            if integ_wt:
-                self._git("worktree", "remove", "--force", str(integ_wt))
-                shutil.rmtree(integ_wt, ignore_errors=True)
-            raise
+        finally:
+            self._cleanup_worktree(integ_wt)
         return VerifiedCommit(
             task_id=node.id,
             commit_sha=integration_sha,
@@ -487,15 +489,25 @@ class TaskExecutor:
                     self._record_edge(node, child)
                     results[child.id] = self.execute(child)
             else:
-                with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=min(self.max_parallel, len(wave))) as executor:
-                    futures = {}
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(self.max_parallel, len(wave)))
+                futures = {}
+                try:
                     for child in wave:
                         self._record_edge(node, child)
                         futures[executor.submit(self.execute, child)] = child
                     for future in concurrent.futures.as_completed(futures):
                         child = futures[future]
-                        results[child.id] = future.result()
+                        try:
+                            results[child.id] = future.result()
+                        except BaseException:
+                            self._abort_wave(futures)
+                            raise
+                except BaseException:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                else:
+                    executor.shutdown(wait=True)
         return results
 
     def _child_base(self, node: TaskNode, base: str, child: TaskNode,
@@ -511,11 +523,12 @@ class TaskExecutor:
             return child.base_sha if child.base_sha is not None else base
         if len(dep_commits) == 1:                           # serial: resume from the dep's output commit
             return dep_commits[0].commit_sha
-        integrated_head, integ_wt = self._integrate(node, base, dep_commits)  # resume from integrated deps
-        if integ_wt:
-            self._git("worktree", "remove", "--force", str(integ_wt))
-            shutil.rmtree(integ_wt, ignore_errors=True)
-        return integrated_head
+        integ_wt = None
+        try:
+            integrated_head, integ_wt = self._integrate(node, base, dep_commits)  # resume from integrated deps
+            return integrated_head
+        finally:
+            self._cleanup_worktree(integ_wt)
 
     def _record_edge(self, node: TaskNode, child: TaskNode) -> None:
         with self._lock:
@@ -541,6 +554,79 @@ class TaskExecutor:
         return decompose_with_metadata(node, carrier, self.max_depth)
 
     # -- default git machinery (overridable for tests) --------------------------------------------
+    def _register_worktree(self, wt) -> None:
+        if wt:
+            with self._lock:
+                self._active_worktrees.add(Path(wt))
+
+    def _cleanup_worktree(self, wt) -> None:
+        """Idempotently remove an executor-owned git worktree and prune stale metadata.
+
+        Cleanup is fail-soft by design: callers use it from exception/finally paths, so an already-removed
+        worktree, a stale git metadata entry, or a partially-created tempdir must never mask the real error.
+        """
+        if not wt:
+            return
+        path = Path(wt)
+        try:
+            if self.repo is not None:
+                self._git("worktree", "remove", "--force", str(path))
+                self._git("worktree", "prune")
+        except Exception:  # noqa: BLE001 - cleanup must be idempotent/fail-soft
+            pass
+        shutil.rmtree(path, ignore_errors=True)
+        with self._lock:
+            self._active_worktrees.discard(path)
+
+    def register_carrier_pgid(self, pgid: int | None) -> None:
+        """Allow leaf/integration adapters that spawn carriers to give abort cleanup their process group."""
+        if pgid is None:
+            return
+        try:
+            pgid = int(pgid)
+        except (TypeError, ValueError):
+            return
+        if pgid <= 0:
+            return
+        with self._lock:
+            self._active_pgids.add(pgid)
+
+    def unregister_carrier_pgid(self, pgid: int | None) -> None:
+        try:
+            pgid = int(pgid)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            self._active_pgids.discard(pgid)
+
+    def _kill_carrier_pgid(self, pgid: int) -> None:
+        try:
+            import carrier_harness
+            carrier_harness._kill_process_group(pgid)
+            return
+        except Exception:  # noqa: BLE001 - fall back to the same killpg pattern below
+            pass
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            pass
+
+    def _cleanup_active_resources(self) -> None:
+        with self._lock:
+            pgids = list(self._active_pgids)
+            worktrees = list(self._active_worktrees)
+        for pgid in pgids:
+            self._kill_carrier_pgid(pgid)
+            self.unregister_carrier_pgid(pgid)
+        for wt in worktrees:
+            self._cleanup_worktree(wt)
+
+    def _abort_wave(self, futures: dict[concurrent.futures.Future, TaskNode]) -> None:
+        self._abort.set()
+        for future in futures:
+            future.cancel()
+        self._cleanup_active_resources()
+
     def _git(self, *args, cwd=None) -> subprocess.CompletedProcess:
         return subprocess.run(["git", "-C", str(cwd or self.repo), *args], capture_output=True, text=True)
 
@@ -583,7 +669,18 @@ class TaskExecutor:
         if add.returncode != 0:
             shutil.rmtree(wt, ignore_errors=True)
             raise TaskExecutorIntegrationError(f"worktree add failed for leaf {node.id}: {add.stderr.strip()}")
+        self._register_worktree(wt)
+        carrier_harness = None
+        pgid_observer = None
         try:
+            try:
+                import carrier_harness as _carrier_harness
+                carrier_harness = _carrier_harness
+                pgid_observer = carrier_harness.register_process_group_observer(
+                    self.register_carrier_pgid, self.unregister_carrier_pgid)
+            except Exception:  # noqa: BLE001 - worktree cleanup still protects the leaf if observing is unavailable
+                carrier_harness = None
+                pgid_observer = None
             run_id = "execute-" + uuid.uuid4().hex[:10]
             result = controller_pipeline.run_pipeline(wt, node.objective, run_id,
                                                       max_parallel=self.max_parallel)
@@ -595,8 +692,9 @@ class TaskExecutor:
             }
             return VerifiedCommit(node.id, sha, evidence)
         finally:
-            self._git("worktree", "remove", "--force", str(wt))
-            shutil.rmtree(wt, ignore_errors=True)
+            if carrier_harness is not None:
+                carrier_harness.unregister_process_group_observer(pgid_observer)
+            self._cleanup_worktree(wt)
 
     def _default_integrate(self, node: TaskNode, base: str,
                            child_commits: list[VerifiedCommit]) -> tuple[str, str]:
@@ -609,19 +707,24 @@ class TaskExecutor:
             shutil.rmtree(wt, ignore_errors=True)
             raise TaskExecutorIntegrationError(
                 f"integration worktree add failed for {node.id}: {add.stderr.strip()}")
-        git_ops.ensure_identity(self.repo)
-        for cc in child_commits:
-            cp = self._git("cherry-pick", "--allow-empty", "--keep-redundant-commits",
-                           cc.commit_sha, cwd=wt)
-            if cp.returncode != 0:
-                self._git("cherry-pick", "--abort", cwd=wt)
-                self._git("worktree", "remove", "--force", str(wt))
-                shutil.rmtree(wt, ignore_errors=True)
-                raise TaskExecutorIntegrationError(
-                    f"integration conflict in {node.id} applying {cc.task_id} "
-                    f"({cc.commit_sha[:8]}): {cp.stderr.strip()}")
-        head = self._git("rev-parse", "HEAD", cwd=wt).stdout.strip()
-        return head, str(wt)
+        self._register_worktree(wt)
+        handed_off = False
+        try:
+            git_ops.ensure_identity(self.repo)
+            for cc in child_commits:
+                cp = self._git("cherry-pick", "--allow-empty", "--keep-redundant-commits",
+                               cc.commit_sha, cwd=wt)
+                if cp.returncode != 0:
+                    self._git("cherry-pick", "--abort", cwd=wt)
+                    raise TaskExecutorIntegrationError(
+                        f"integration conflict in {node.id} applying {cc.task_id} "
+                        f"({cc.commit_sha[:8]}): {cp.stderr.strip()}")
+            head = self._git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+            handed_off = True
+            return head, str(wt)
+        finally:
+            if not handed_off:
+                self._cleanup_worktree(wt)
 
     def _default_commit_integration(self, node: TaskNode, base: str, integrated_head: str,
                                     integ_wt, evidence: dict) -> str:
@@ -640,9 +743,7 @@ class TaskExecutor:
                                              f"{out.stderr.strip()}")
             return sha
         finally:
-            if integ_wt:
-                self._git("worktree", "remove", "--force", str(integ_wt))
-                shutil.rmtree(integ_wt, ignore_errors=True)
+            self._cleanup_worktree(integ_wt)
 
     def _default_verify(self, node: TaskNode, integrated_head: str,
                         child_commits: list[VerifiedCommit]) -> dict:
