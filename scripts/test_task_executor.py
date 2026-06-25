@@ -299,6 +299,65 @@ def test_serial_child_with_multiple_deps_resumes_from_integrated_head():
     print("ok  multi-dep child resumes from its dependencies' integrated head")
 
 
+def test_nested_parallel_composites_complete_under_timeout():
+    leaves_executed: list[str] = []
+    leaf_guard = threading.Lock()
+
+    def run_leaf(node):
+        time.sleep(0.02)
+        with leaf_guard:
+            leaves_executed.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    def verify(node, integrated_head, child_commits):
+        return {"verified": True, "node": node.id, "n_children": len(child_commits)}
+
+    def integrate(node, base, child_commits):
+        time.sleep(0.01)
+        return (f"integrated-head-{node.id}", None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        return f"integ-sha-{node.id}"
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="nested parallel", subtasks=[
+        S.TaskNode("A", kind=S.COMPOSITE, objective="compose A", subtasks=[
+            S.TaskNode("A1", kind=S.LEAF, objective="do A1"),
+            S.TaskNode("A2", kind=S.LEAF, objective="do A2"),
+        ]),
+        S.TaskNode("B", kind=S.COMPOSITE, objective="compose B", subtasks=[
+            S.TaskNode("B1", kind=S.LEAF, objective="do B1"),
+            S.TaskNode("B2", kind=S.LEAF, objective="do B2"),
+        ]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, max_parallel=2)
+    result_holder: dict[str, S.VerifiedCommit] = {}
+    error_holder: dict[str, BaseException] = {}
+
+    def run_execute():
+        try:
+            result_holder["result"] = task_executor.execute(root)
+        except BaseException as exc:  # noqa: BLE001 - relay worker failure to the test thread
+            error_holder["error"] = exc
+
+    thread = threading.Thread(target=run_execute, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "nested parallel composite execution hung"
+    if error_holder:
+        raise error_holder["error"]
+
+    assert result_holder["result"].commit_sha == "integ-sha-root", result_holder
+    assert sorted(leaves_executed) == ["A1", "A2", "B1", "B2"], leaves_executed
+    assert set(task_executor.recursion_edges) == {("root", "A"), ("root", "B"),
+                                                  ("A", "A1"), ("A", "A2"),
+                                                  ("B", "B1"), ("B", "B2")}, task_executor.recursion_edges
+    assert set(task_executor.calls) == {"root", "A", "B", "A1", "A2", "B1", "B2"}, task_executor.calls
+    assert task_executor.calls.index("A") < task_executor.calls.index("A1"), task_executor.calls
+    assert task_executor.calls.index("B") < task_executor.calls.index("B1"), task_executor.calls
+    print("ok  nested parallel composites complete under timeout with recursion trace intact")
+
+
 def test_default_max_depth_is_floor_when_env_unset():
     old = os.environ.pop("AI_ORG_MAX_DEPTH", None)
     try:
@@ -548,6 +607,7 @@ if __name__ == "__main__":
     test_real_git_integration()
     test_serial_child_inherits_dependency_output_commit()
     test_serial_child_with_multiple_deps_resumes_from_integrated_head()
+    test_nested_parallel_composites_complete_under_timeout()
     test_default_max_depth_is_floor_when_env_unset()
     test_root_decompose_result_sets_max_depth_once()
     test_failing_composite_verify_blocks_integration_commit()

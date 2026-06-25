@@ -390,7 +390,8 @@ class TaskExecutor:
         # edges followed when a composite recursed into its children.
         self.calls: list[str] = []
         self.recursion_edges: list[tuple[str, str]] = []
-        self._lock = threading.Lock()
+        self._trace_guard = threading.Lock()
+        self._resource_guard = threading.Lock()
         self._abort = threading.Event()
         self._active_worktrees: set[Path] = set()
         self._active_pgids: set[int] = set()
@@ -399,7 +400,7 @@ class TaskExecutor:
     def execute(self, node: TaskNode) -> VerifiedCommit:
         """Execute ANY node and return its VerifiedCommit. Leaf -> dialectic; composite -> recurse +
         integrate + verify + commit."""
-        with self._lock:
+        with self._trace_guard:
             self.calls.append(node.id)
         self._emit({"type": "leaf_start", "id": node.id, "kind": node.kind, "depth": node.depth})
         if node.subtasks:
@@ -531,7 +532,7 @@ class TaskExecutor:
             self._cleanup_worktree(integ_wt)
 
     def _record_edge(self, node: TaskNode, child: TaskNode) -> None:
-        with self._lock:
+        with self._trace_guard:
             self.recursion_edges.append((node.id, child.id))
 
     def _decompose_node(self, node: TaskNode) -> list[TaskNode]:
@@ -556,7 +557,7 @@ class TaskExecutor:
     # -- default git machinery (overridable for tests) --------------------------------------------
     def _register_worktree(self, wt) -> None:
         if wt:
-            with self._lock:
+            with self._resource_guard:
                 self._active_worktrees.add(Path(wt))
 
     def _cleanup_worktree(self, wt) -> None:
@@ -575,7 +576,7 @@ class TaskExecutor:
         except Exception:  # noqa: BLE001 - cleanup must be idempotent/fail-soft
             pass
         shutil.rmtree(path, ignore_errors=True)
-        with self._lock:
+        with self._resource_guard:
             self._active_worktrees.discard(path)
 
     def register_carrier_pgid(self, pgid: int | None) -> None:
@@ -588,7 +589,7 @@ class TaskExecutor:
             return
         if pgid <= 0:
             return
-        with self._lock:
+        with self._resource_guard:
             self._active_pgids.add(pgid)
 
     def unregister_carrier_pgid(self, pgid: int | None) -> None:
@@ -596,7 +597,7 @@ class TaskExecutor:
             pgid = int(pgid)
         except (TypeError, ValueError):
             return
-        with self._lock:
+        with self._resource_guard:
             self._active_pgids.discard(pgid)
 
     def _kill_carrier_pgid(self, pgid: int) -> None:
@@ -612,7 +613,7 @@ class TaskExecutor:
             pass
 
     def _cleanup_active_resources(self) -> None:
-        with self._lock:
+        with self._resource_guard:
             pgids = list(self._active_pgids)
             worktrees = list(self._active_worktrees)
         for pgid in pgids:
