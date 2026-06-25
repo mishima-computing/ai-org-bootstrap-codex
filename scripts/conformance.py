@@ -105,8 +105,12 @@ _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
 #   * the generic `is not available` clause was DROPPED (a real product failure can legitimately print
 #     "X is not available"). Only the two SPECIFIC, checker-emitted tool phrasings remain — `machinery is
 #     unavailable` (grpcio/protobuf absent, `_build_grpc_invoker`) and `jsonschema is not available`
-#     (`_json_schema_findings`). Other runners (tox/nox/jest/go test) are deliberately NOT whitelisted: they
-#     fall through to `code`, the SAFE (under-coverage) direction — a known limitation, not a leak.
+#     (`_json_schema_findings`).
+#   * the python-runner whitelist is `pytest|tox|nox|coverage|nose2|unittest` — a small EXPLICIT set of canonical
+#     `python -m <runner>` test/build-tool modules, each ANCHORED with a trailing `\b` exactly as `pytest` is, so a
+#     PRODUCT plugin extending a runner name (`tox_<plugin>`, `nox_<plugin>`, `coverage_<x>`, `unittest2`) keeps the
+#     runner adjacent to a word char and falls through to `code`. NON-python runners (jest/go test) are still NOT
+#     whitelisted (absent ones already exit 127 -> infra when invoked directly); they remain the SAFE direction.
 #
 # INVARIANT (executable guard, NOT just reviewer discipline): because this regex is consulted ABOVE `_CODE_TEXT_RE`
 # in `_failure_classification`, every clause here must match ONLY strings the CHECKER/RUNNER ITSELF emits about its
@@ -116,7 +120,12 @@ _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
 # `test_product_emittable_failures_stay_code_never_unsupported_env` (test_conformance.py) GREEN — that test asserts
 # product-emittable strings stay `code`, so whitelist drift becomes a test failure rather than a silent masked defect.
 _UNSUPPORTED_ENV_RE = re.compile(
-    r"(command not found|executable file not found|no module named pytest\b|"
+    r"(command not found|executable file not found|"
+    # KNOWN python test-runner / build-tool modules absent under `python -m <runner>` (exit 1, not 127). Each
+    # alternative is a CANONICAL runner module name, ANCHORED by a trailing `\b`, so a PRODUCT plugin whose name
+    # extends the runner (e.g. `pytest_asyncio`, `tox_<plugin>`, `coverage_<x>`) keeps the runner adjacent to a
+    # word char `_`/digit -> no boundary forms -> it falls through to `_CODE_TEXT_RE` -> code (a product defect).
+    r"no module named (?:pytest|tox|nox|coverage|nose2|unittest)\b|"
     r"machinery is unavailable|jsonschema is not available)",
     re.IGNORECASE,
 )

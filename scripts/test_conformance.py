@@ -2120,6 +2120,45 @@ def test_missing_pytest_runner_at_exit_1_is_unsupported_env_not_code():
     print("ok  fix: missing pytest runner at exit 1 -> unsupported-env/infra (not code, not implementer)")
 
 
+def test_other_known_python_runners_absent_at_exit_1_are_unsupported_env_not_code():
+    # EXTENSION of the known-runner whitelist (the SAFE under-coverage fix): OTHER canonical `python -m <runner>`
+    # modules that are absent (tox/nox/coverage/nose2/unittest) emit `No module named <runner>` in OUTPUT at exit 1
+    # (NOT 127, just like pytest). They are an absent VERIFICATION RUNNER, not a product defect -> infra/
+    # unsupported-env -> escalate, exactly as a missing pytest runner. Each name is anchored, so only the bare
+    # canonical module matches (the plugin-extension case is guarded below).
+    for runner in ("tox", "nox", "coverage", "nose2", "unittest"):
+        out = f"No module named {runner}\n"
+        assert conf._failure_classification(returncode=1, stderr=out) == "infra", out
+        # even an ORACLE/regression call site (default="code") must not flip a missing runner into code.
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra", out
+        f = conf._with_failure_classification(
+            {"passed": False, "returncode": 1,
+             "detail": "regression suite could not run; output tail: " + out}, False)
+        assert f["failure_classification"] == "infra", f
+        assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+        assert f["repair_route"] in ("escalate", "clean_retry") and f["repair_route"] != "implementer", f
+        assert not cp._finding_blocks_convergence(f), f            # an absent runner must NOT block as code
+    print("ok  fix: tox/nox/coverage/nose2/unittest absent at exit 1 -> unsupported-env/infra (not implementer)")
+
+
+def test_product_plugin_extending_known_runner_stays_code_not_infra():
+    # the OVER-REACH guard for the whitelist EXTENSION: a PRODUCT plugin whose name extends a runner module
+    # (`tox_someplugin`, `nox_fixtures`, `coverage_enable_subprocess`, `unittest2`) is the product's own undeclared
+    # dependency, NOT an absent runner. The trailing `\b` keeps the runner adjacent to a word char (`_`/digit) so no
+    # boundary forms and it falls through to `_CODE_TEXT_RE` -> code -> implementer (blocks). If it leaked to infra,
+    # a real dep defect would be parked at "unverified" forever (the dangerous code->infra masking direction).
+    for plugin in ("tox_someplugin", "nox_fixtures", "coverage_enable_subprocess", "nose2_html", "unittest2"):
+        out = f"Traceback (most recent call last):\nModuleNotFoundError: No module named '{plugin}'\n"
+        assert conf._failure_classification(returncode=1, stderr=out) == "code", out
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code", out
+        assert not conf._UNSUPPORTED_ENV_RE.search(out), out       # the anchored whitelist must NOT match a plugin
+        f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+        assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+        assert cp._finding_blocks_convergence(f), f                # a missing product plugin still blocks as code
+    print("ok  fix: `No module named tox_someplugin` (& peers) at exit 1 -> code/implementer (plugin gap, not runner)")
+
+
 def test_product_missing_dependency_at_exit_1_stays_code_not_infra():
     # the NARROW guard (ADR-0006): `No module named requests` is NOT a known runner -> it falls through the
     # whitelist to `_CODE_TEXT_RE` -> code. A product that forgot to declare its dependency is a code defect.
