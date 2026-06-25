@@ -107,6 +107,14 @@ _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
 #     unavailable` (grpcio/protobuf absent, `_build_grpc_invoker`) and `jsonschema is not available`
 #     (`_json_schema_findings`). Other runners (tox/nox/jest/go test) are deliberately NOT whitelisted: they
 #     fall through to `code`, the SAFE (under-coverage) direction — a known limitation, not a leak.
+#
+# INVARIANT (executable guard, NOT just reviewer discipline): because this regex is consulted ABOVE `_CODE_TEXT_RE`
+# in `_failure_classification`, every clause here must match ONLY strings the CHECKER/RUNNER ITSELF emits about its
+# OWN absence — never any string a PRODUCT or its TEST suite could produce. A too-broad clause would re-label a real
+# product defect as infra/unsupported-env and park it at "unverified" forever (the masking direction). Any NEW
+# clause must be ANCHORED (word boundaries, no generic phrase) AND must keep
+# `test_product_emittable_failures_stay_code_never_unsupported_env` (test_conformance.py) GREEN — that test asserts
+# product-emittable strings stay `code`, so whitelist drift becomes a test failure rather than a silent masked defect.
 _UNSUPPORTED_ENV_RE = re.compile(
     r"(command not found|executable file not found|no module named pytest\b|"
     r"machinery is unavailable|jsonschema is not available)",

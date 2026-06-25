@@ -2170,6 +2170,55 @@ def test_generic_is_not_available_in_product_output_stays_code_not_infra():
     print("ok  fix: a product `X is not available` -> code/undetermined, never unsupported-env (no masking)")
 
 
+def test_product_emittable_failures_stay_code_never_unsupported_env():
+    # STRUCTURAL REGRESSION GUARD (Mona walkthrough): `_UNSUPPORTED_ENV_RE` precedence sits ABOVE `_CODE_TEXT_RE`
+    # in `_failure_classification`, so a FUTURE too-broad clause added to the whitelist would silently re-label a
+    # real PRODUCT defect as infra/unsupported-env -> escalate/unverified (a MASKED defect, the dangerous
+    # code->infra direction). The narrowness guarantee currently rests on reviewer discipline; this converts it
+    # to an EXECUTABLE guard. Every string below is the kind a real PRODUCT or its TEST suite would print. The
+    # invariant the guard locks in: NONE of them may ever be classified infra/unsupported-env (the masking
+    # direction), and the whitelist regex must not match any of them. If anyone later broadens `_UNSUPPORTED_ENV_RE`
+    # enough to catch one of these, this test fails — making whitelist drift a visible test failure, not a silent
+    # masked defect.
+    product_emittable = [
+        # a missing PRODUCT dependency (real lib) raised by product/test code, not an absent runner:
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n",
+        # a missing pytest PLUGIN the product's own tests import (the `_` keeps `pytest` inside a word):
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'pytest_asyncio'\n",
+        # a made-up application module the product forgot to ship/declare:
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'acme_payments.core'\n",
+        # a plain assertion failure from the product's own test suite:
+        "AssertionError: expected 200 but got 503\n",
+        # a build/install failure a product emits when its wheel cannot be built:
+        "ERROR: Could not build wheels for cryptography, which is required to install pyproject.toml-based projects\n",
+        # generic `X is not available` phrasings a PRODUCT (not the checker) can legitimately print:
+        "AssertionError: feature flag 'fast_path' is not available in this build\n",
+        "RuntimeError: payment service is not available\n",
+    ]
+    for out in product_emittable:
+        # MASKING-DIRECTION GUARD (the core invariant): never infra/unsupported-env/timeout/resource, at a generic
+        # call site (default undetermined) AND at an ORACLE/BUILD/regression site (default code) alike. This is the
+        # assertion that breaks if the whitelist is broadened to swallow a product string.
+        for default in ("undetermined", "code"):
+            cls = conf._failure_classification(returncode=1, stderr=out, default=default)
+            assert cls not in ("infra", "timeout", "resource"), (out, default, cls)
+        # and the whitelist regex itself must NOT match any product-emittable string:
+        assert not conf._UNSUPPORTED_ENV_RE.search(out), out
+        # at an ORACLE/BUILD/regression gate (default="code"), where a nonzero is a positive product signal and
+        # masking is most dangerous, every product-emittable failure resolves to exactly `code` -> implementer.
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code", out
+    # the subset that carries an ESTABLISHED product signal (import/assertion) is `code` even at a generic site,
+    # and end-to-end routes to the implementer and BLOCKS convergence (never parked as unverified).
+    signal_bearing = [s for s in product_emittable if ("No module named" in s or "AssertionError" in s)]
+    for out in signal_bearing:
+        assert conf._failure_classification(returncode=1, stderr=out) == "code", out
+        f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+        assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+        assert cp._finding_blocks_convergence(f), f
+    print("ok  guard: product-emittable failures never infra/unsupported-env; whitelist drift would fail this test")
+
+
 def test_example_comparison_mismatch_is_code_and_blocks():
     # item #5: the stdout/exit oracle mismatch is the POSITIVE product signal -> code/implementer, and it BLOCKS.
     profile = {"entrypoint": {"invocation": "mytool"},
