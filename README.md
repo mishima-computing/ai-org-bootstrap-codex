@@ -25,6 +25,25 @@ python3 scripts/controller_goal.py --repo <repo> --goal "..."
 Optional run controls are `--budget`, `--goal-id`, and `--resume-from`. Use a goal id when you want a stable
 handle for deliberate resume or steering across runs.
 
+The command above is **self-hosted**: the org definition (registry / roles / schemas) is read from `--repo`
+itself. To run the org against an **external workspace** — a separate host repo the org should build rather
+than itself — point `AI_ORG_ROOT` at the org install and `--repo` at the workspace (the org_root / workspace
+split, below). This is exactly how a host (e.g. a cockpit) invokes the builder, and the canonical way to run
+the org against another repo:
+
+```sh
+AI_ORG_ROOT=/path/to/ai-org-bootstrap-codex \
+STREAM_LOG=/path/to/workspace/.agent-runs/stream.jsonl \
+python3 /path/to/ai-org-bootstrap-codex/scripts/controller_goal.py \
+  --repo /path/to/workspace --goal "..." --goal-id <id>
+```
+
+Run it from the org install (its `cwd`). `STREAM_LOG` points at the *workspace's* shared log so the run's
+events land where a watcher tails them, regardless of which worktree a leaf executes in (ADR-0009) — observe a
+run by tailing that file directly; no host process is needed to watch it. Do **not** import `controller_goal`
+and call `run_goal()` directly: that bypasses this entry contract (argv, cwd, `AI_ORG_ROOT`, `STREAM_LOG`) and
+will not behave like a real run.
+
 Observe progress through `STREAM_LOG` or its default path, `.agent-runs/stream.jsonl`. The stream is runtime
 history for watching and auditing a run; it is not committed output. Review the produced PR outputs before
 validation, delivery, or merge; complete the checks requested by the run, then merge only through
