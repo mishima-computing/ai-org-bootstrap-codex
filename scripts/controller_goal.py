@@ -318,8 +318,12 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
                      defer_merge: bool = False) -> dict:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off the leaf base, so parallel leaves
     never collide on the shared repo (per-run isolation, ADR-0009). Returns
-    {"outcome": "converged"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
-      - converged -> the leaf's changed files merge back into the shared repo.
+    {"outcome": "converged"|"unverified"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
+      - converged -> the leaf's changed files merge back into the shared repo (ONLY when the pipeline's
+        verification_status is "verified" — convergence alone never merges; see the fail-close below).
+      - unverified -> the pipeline converged but a required gate was NOT proven green
+        (verification_status != "verified"); TERMINAL and fail-closed — NOT merged, NOT done, never resumed
+        or re-split. Carries `unverified_gate_findings` (ADR-0011 / ADR-0016).
       - failed/"linon" -> Linon reviewed the diff and rejected it: a BAD REFERENCE. Its findings come back
         to carry as CONTEXT to a re-split (what was tried and rejected), never as a base to build on.
       - failed/"mechanical" -> it failed for a non-quality reason (carrier timeout/hang, scope, malformed
@@ -377,6 +381,22 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
                 return fail(reason="linon",
                             findings=lin.get("findings") if isinstance(lin, dict) else None)
             return fail(reason="mechanical", diff=_preserve_diff(repo, wt, task))   # resume-able
+        # CONSUMER FAIL-CLOSE (ADR-0011 unproven-never-passes / ADR-0016 never-fabricate-a-pass): the pipeline
+        # can report converged=True yet leave a required gate UNVERIFIED — e.g. a gate that could not RUN, so it
+        # is non-blocking-but-not-proven-green. The producer signals this on its result: verification_status
+        # ("verified" | "unverified" | "failed") + unverified_gate_findings (controller_pipeline.run_pipeline,
+        # controller_pipeline.py:1590/1598-1599). Convergence ALONE is not proof: only an explicit "verified"
+        # verdict earns outcome:"converged". Any explicit non-"verified" status returns the DISTINCT, terminal
+        # `unverified` outcome carrying the gate findings — which every caller treats as NOT mergeable, NOT done,
+        # and NOT a resume/re-split (implementer-repair) target: it is neither "mechanical" nor "linon". (Missing
+        # status only occurs in the legacy `{"converged": True}` test shorthand — the REAL producer ALWAYS emits
+        # it — so absence is honored as verified-by-convergence and never masks a truly-unverified leaf.) Flipping
+        # the producer's classification default is a SEPARATE, later increment; this only stops the consumer from
+        # fabricating a pass over a verdict the producer already reported honestly.
+        vstatus = result.get("verification_status")
+        if vstatus is not None and vstatus != "verified":
+            return {"outcome": "unverified", "verification_status": vstatus,
+                    "unverified_gate_findings": result.get("unverified_gate_findings") or {}}
         if defer_merge:
             handed_off = True                                  # the ONLY hand-off: the fold now owns + removes wt
             return {"outcome": "converged", "leaf_worktree": wt, "_cleanup_worktree": True,
@@ -1653,6 +1673,16 @@ def _run_goal_legacy(repo, goal, run_leaf=None, *, goal_id=None, resume_from=Non
                                 "no new wave is dispatched."})
                 plan = frontier.advance(plan, leaf["id"], "failed")
                 goal_aborted = res.get("error") or "leaf crash"
+                return
+            if res.get("outcome") == "unverified":
+                # FAIL-CLOSE (ADR-0011 / ADR-0016): the leaf converged but a required gate was left UNVERIFIED
+                # (default_run_leaf honored the producer's verification_status). An unproven leaf is TERMINAL:
+                # advance it "failed" — never resume it and never re-split it (that would send unproven work to
+                # implementer repair / decomposition and could fabricate a pass). The goal then reports
+                # partial/blocked rather than done, preserving goal-level outcome-honesty.
+                emit({"type": "leaf_unverified", "id": leaf["id"], "goal_id": goal_id,
+                      "unverified_gate_findings": res.get("unverified_gate_findings") or {}})
+                plan = frontier.advance(plan, leaf["id"], "failed")
                 return
             # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, malformed output — is not
             # a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.

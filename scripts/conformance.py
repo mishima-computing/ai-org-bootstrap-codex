@@ -30,11 +30,17 @@ import os
 import re
 import shlex
 import signal
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, NamedTuple, Optional
+
+try:
+    import controller_scope as _controller_scope
+except ImportError:  # pragma: no cover - direct reuse when scripts/ is importable; fallback stays local.
+    _controller_scope = None
 
 
 class RunResult(NamedTuple):
@@ -74,10 +80,65 @@ def _normalize(text: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
+_FAILURE_CLASSES = {"code", "infra", "timeout", "resource", "undetermined"}
+_INFRA_TEXT_RE = re.compile(
+    r"(command not found|executable file not found)",
+    re.IGNORECASE,
+)
+_ADDRESS_IN_USE_RE = re.compile(r"(Address already in use|Errno 48|Errno 98)", re.IGNORECASE)
+_RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
+
+
+def _stringify(value) -> str:
+    try:
+        return "" if value is None else str(value)
+    except Exception:
+        return ""
+
+
+def _failure_classification(*, returncode=None, stdout="", stderr="", error=None, detail: str = "") -> str:
+    """Classify whether a failed gate points at product code or at the host/runner that tried to verify it."""
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, FileNotFoundError):
+        return "infra"
+    if isinstance(error, OSError):
+        if getattr(error, "errno", None) in (48, 98) or _ADDRESS_IN_USE_RE.search(_stringify(error)):
+            return "infra"
+    text = "\n".join(_stringify(v) for v in (stdout, stderr, error, detail))
+    if _ADDRESS_IN_USE_RE.search(text):
+        return "infra"
+    try:
+        rc = int(returncode)
+    except (TypeError, ValueError):
+        rc = None
+    if rc == 124:
+        return "timeout"
+    if rc == 127:
+        return "infra"
+    if rc is not None and rc < 0:
+        return "resource"
+    if _INFRA_TEXT_RE.search(text):
+        return "infra"
+    if _RESOURCE_TEXT_RE.search(text):
+        return "resource"
+    if returncode is None and not any(_stringify(v) for v in (stdout, stderr, error, detail)):
+        return "undetermined"
+    return "code"
+
+
+def _with_failure_classification(finding: dict, passed: bool) -> dict:
+    if passed:
+        return finding
+    cls = finding.get("failure_classification", "code")
+    finding["failure_classification"] = cls if cls in _FAILURE_CLASSES else "undetermined"
+    return finding
+
+
 def _finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "cli-conformance", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 def _full_command(entrypoint: str, invocation: str) -> str:
@@ -94,11 +155,13 @@ def install_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
     for cmd in build.get("commands", []):
         res = runner(cmd, cwd=cwd)
         if res.returncode != 0:
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
             findings.append(_finding(
                 "build_and_install", "critical", False,
                 f"install command failed (exit {res.returncode}): {cmd}",
                 command=cmd, returncode=res.returncode,
                 stderr_tail=_normalize(res.stderr)[-800:],
+                failure_classification=cls,
             ))
             break  # a broken build invalidates every example; do not pile on derived failures
     return findings
@@ -114,11 +177,13 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
         res = runner(cmd, cwd=cwd, stdin=ex.get("stdin"))
 
         if "expected_status" in ex and res.returncode != ex["expected_status"]:
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
             findings.append(_finding(
                 "exit_status", "major", False,
                 f"example {i} `{cmd}`: expected exit {ex['expected_status']}, got {res.returncode}",
                 example=i, command=cmd, expected=ex["expected_status"], actual=res.returncode,
                 stderr_tail=_normalize(res.stderr)[-800:],
+                failure_classification=cls,
             ))
 
         for needle in ex.get("expected_stdout_contains", []):
@@ -262,18 +327,21 @@ def _library_probe_findings(res: RunResult, module: str, symbols: list) -> list[
     -> the declared public surface is absent (major)."""
     line = next((ln for ln in res.stdout.splitlines() if ln.startswith(_LIBRARY_PROBE_MARKER)), None)
     if line is None:
+        cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
         return [_finding(
             "library_probe", "critical", False,
             f"could not introspect the library: the import probe produced no result (exit {res.returncode})",
-            module=module, stderr_tail=_normalize(res.stderr)[-800:])]
+            module=module, stderr_tail=_normalize(res.stderr)[-800:], failure_classification=cls)]
     try:
         data = json.loads(line[len(_LIBRARY_PROBE_MARKER):])
     except ValueError:
         return [_finding("library_probe", "critical", False,
                          "the import probe emitted an unparseable result", module=module)]
     if data.get("import_error"):
+        cls = _failure_classification(detail=data["import_error"])
         return [_finding("library_import", "critical", False,
-                         f"module {module!r} failed to import: {data['import_error']}", module=module)]
+                         f"module {module!r} failed to import: {data['import_error']}", module=module,
+                         failure_classification=cls)]
     return [_finding(
         "exported_symbol", "major", False,
         f"declared export {sym!r} does not resolve on module {module!r}", module=module, symbol=sym)
@@ -366,7 +434,8 @@ def _json_schema_findings(data, schema: dict, path: str) -> list[dict]:
         from jsonschema import validators
     except ImportError:
         return [_finding("json_schema", "major", False,
-                         f"could not validate '{path}': jsonschema is not available", path=path)]
+                         f"could not validate '{path}': jsonschema is not available", path=path,
+                         failure_classification="infra")]
     try:
         validator_cls = validators.validator_for(schema)
         validator_cls.check_schema(schema)
@@ -448,7 +517,7 @@ class _RpcTransportUnavailable(Exception):
 def _rpc_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "rpc-conformance", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 def _rpc_profile_findings(profile: dict) -> list[dict]:
@@ -507,7 +576,8 @@ def _json_rpc_call_findings(profile: dict, http_request) -> list[dict]:
                                 timeout=_HTTP_REQUEST_TIMEOUT_SECONDS)
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             findings.append(_rpc_finding("request", "major", False, f"call {i} {method}: request failed",
-                                         call=i, method=method, error=type(exc).__name__))
+                                         call=i, method=method, error=type(exc).__name__,
+                                         failure_classification=_failure_classification(error=exc)))
             continue
         try:
             body = json.loads(_decode_http_body(resp.body))
@@ -569,7 +639,8 @@ def _grpc_call_findings(profile: dict, cwd: Optional[str], grpc_invoker=None) ->
         try:
             grpc_invoker = _build_grpc_invoker(profile, cwd)
         except _RpcTransportUnavailable as exc:
-            return [_rpc_finding("transport_unavailable", "major", False, str(exc), transport="grpc")]
+            return [_rpc_finding("transport_unavailable", "major", False, str(exc), transport="grpc",
+                                 failure_classification="infra")]
     findings: list[dict] = []
     for i, call in enumerate(profile.get("calls", [])):
         method = call.get("method")
@@ -578,7 +649,8 @@ def _grpc_call_findings(profile: dict, cwd: Optional[str], grpc_invoker=None) ->
         except Exception as exc:  # noqa: BLE001 — a failed invocation is a finding, not a gate crash
             findings.append(_rpc_finding("request", "major", False,
                                          f"call {i} {method}: invocation failed: {type(exc).__name__}: {exc}",
-                                         call=i, method=method))
+                                         call=i, method=method,
+                                         failure_classification=_failure_classification(error=exc)))
             continue
         findings += _check_rpc_result(i, method, call, result, error)
     return findings
@@ -604,6 +676,7 @@ def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional
     checks_run = 0
     handle = None
     try:
+        profile = _profile_with_ephemeral_service_port(profile)
         launcher = service_launcher or _launch_service
         handle = launcher(profile["start"]["command"], cwd=cwd, profile=profile)
         checks_run += 1
@@ -619,24 +692,28 @@ def run_rpc_service_conformance(contract: dict, runner: Runner, *, cwd: Optional
             checks_run += len(profile.get("calls", []))
     except _ServiceStartError as exc:
         result = exc.result
+        cls = _failure_classification(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
         findings.append(_rpc_finding(
             "lifecycle", "critical", False,
             f"service start command exited before readiness (exit {result.returncode})",
             command=exc.command, returncode=result.returncode,
             stdout_tail=_normalize(result.stdout)[-800:],
             stderr_tail=_normalize(result.stderr)[-800:],
+            failure_classification=cls,
         ))
     except Exception as exc:  # noqa: BLE001 — lifecycle failure is a finding
         findings.append(_rpc_finding("lifecycle", "critical", False,
                                      f"service lifecycle setup failed: {exc}",
-                                     error=type(exc).__name__))
+                                     error=type(exc).__name__,
+                                     failure_classification=_failure_classification(error=exc)))
     finally:
         if handle is not None:
             try:
                 handle.stop()
             except Exception as exc:  # noqa: BLE001
                 findings.append(_rpc_finding("lifecycle", "critical", False, "service lifecycle cleanup failed",
-                                             error=type(exc).__name__))
+                                             error=type(exc).__name__,
+                                             failure_classification=_failure_classification(error=exc)))
 
     return {
         "applicable": True,
@@ -663,11 +740,12 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
         res = runner(command, cwd=cwd)
         checks_run += 1
         if res.returncode != expected:
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
             findings.append(_finding(
                 "exit_status", "major", False,
                 f"batch job `{command}`: expected exit {expected}, got {res.returncode}",
                 command=command, expected=expected, actual=res.returncode,
-                stderr_tail=_normalize(res.stderr)[-800:]))
+                stderr_tail=_normalize(res.stderr)[-800:], failure_classification=cls))
         for art in profile.get("produced_artifacts", []):
             checks_run += 1
             probe = runner(f"test -e {shlex.quote(art)}", cwd=cwd)
@@ -696,10 +774,92 @@ _HTTP_REQUEST_TIMEOUT_SECONDS = 2.0
 _HTTP_POLL_INTERVAL_SECONDS = 0.05
 
 
+def _free_loopback_port(host: str) -> int:
+    """Reserve an OS-selected TCP port long enough to learn it, then release it for the service under test."""
+    bind_host = host
+    if host in ("localhost", "127.0.0.1", "::1"):
+        bind_host = host
+    elif not host:
+        bind_host = "127.0.0.1"
+    with socket.socket(socket.AF_INET6 if bind_host == "::1" else socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((bind_host, 0))
+        return int(sock.getsockname()[1])
+
+
+def _replace_url_port(url: str, port: int) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname
+    if not host:
+        return url
+    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    netloc += f":{port}"
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        netloc = f"{auth}@{netloc}"
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _rewrite_command_port(command: str, old_port: int, new_port: int, old_url: str, new_url: str) -> tuple[str, bool]:
+    """Rewrite the declared service command when the nominal port is present as an argument token."""
+    old = str(old_port)
+    new = str(new_port)
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return command, False
+    changed = False
+    rewritten: list[str] = []
+    previous = ""
+    for part in parts:
+        updated = part
+        if part == old or (previous in ("--port", "-p") and part == old):
+            updated = new
+        elif part == old_url:
+            updated = new_url
+        elif part.startswith("--port=") and part.split("=", 1)[1] == old:
+            updated = f"--port={new}"
+        elif part.startswith("-p=") and part.split("=", 1)[1] == old:
+            updated = f"-p={new}"
+        elif part == f":{old}":
+            updated = f":{new}"
+        if updated != part:
+            changed = True
+        rewritten.append(updated)
+        previous = part
+    return (shlex.join(rewritten) if changed else command), changed
+
+
+def _profile_with_ephemeral_service_port(profile: dict) -> dict:
+    """Use a fresh port for local HTTP service checks so a busy nominal contract port cannot fail lifecycle."""
+    base_url = str(profile.get("base_url") or "")
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme not in ("http", "https") or parsed.port is None:
+        return profile
+    host = parsed.hostname or "127.0.0.1"
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        return profile
+    new_port = _free_loopback_port(host)
+    if new_port == parsed.port:
+        return profile
+    new_url = _replace_url_port(base_url, new_port)
+    start = dict(profile.get("start") or {})
+    command = str(start.get("command") or "")
+    new_command, changed = _rewrite_command_port(command, parsed.port, new_port, base_url, new_url)
+    if not changed:
+        return profile
+    start["command"] = new_command
+    updated = dict(profile)
+    updated["start"] = start
+    updated["base_url"] = new_url
+    return updated
+
+
 def _http_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "http-conformance", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 def _decode_http_body(body: bytes, limit: int = _HTTP_BODY_LIMIT) -> str:
@@ -751,7 +911,8 @@ def _wait_for_http_readiness(profile: dict, http_request) -> Optional[dict]:
                 break
             time.sleep(min(_HTTP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
     detail = f"service did not become ready before timeout ({timeout:g}s)"
-    return _http_finding("lifecycle", "critical", False, detail, error=type(last_error).__name__)
+    return _http_finding("lifecycle", "critical", False, detail, error=type(last_error).__name__,
+                         failure_classification=_failure_classification(error=last_error, detail=detail))
 
 
 def _http_example_findings(profile: dict, http_request) -> list[dict]:
@@ -772,6 +933,7 @@ def _http_example_findings(profile: dict, http_request) -> list[dict]:
                 "request", "major", False,
                 f"example {i} {method} {path}: request failed",
                 example=i, method=method, path=path, error=type(exc).__name__,
+                failure_classification=_failure_classification(error=exc),
             ))
             continue
 
@@ -839,6 +1001,7 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
 
     handle = None
     try:
+        profile = _profile_with_ephemeral_service_port(profile)
         launcher = service_launcher or _launch_service
         handle = launcher(profile["start"]["command"], cwd=cwd, profile=profile)
         checks_run += 1
@@ -851,18 +1014,21 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
             checks_run += len(profile.get("examples", []))
     except _ServiceStartError as exc:
         result = exc.result
+        cls = _failure_classification(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
         findings.append(_http_finding(
             "lifecycle", "critical", False,
             f"service start command exited before readiness (exit {result.returncode})",
             command=exc.command, returncode=result.returncode,
             stdout_tail=_normalize(result.stdout)[-800:],
             stderr_tail=_normalize(result.stderr)[-800:],
+            failure_classification=cls,
         ))
     except Exception as exc:
         findings.append(_http_finding(
             "lifecycle", "critical", False,
             f"service lifecycle setup failed: {exc}",
             error=type(exc).__name__,
+            failure_classification=_failure_classification(error=exc),
         ))
     finally:
         if handle is not None:
@@ -873,6 +1039,7 @@ def run_http_service_conformance(contract: dict, runner: Runner, *, cwd: Optiona
                     "lifecycle", "critical", False,
                     "service lifecycle cleanup failed",
                     error=type(exc).__name__,
+                    failure_classification=_failure_classification(error=exc),
                 ))
 
     return {
@@ -961,6 +1128,7 @@ def _wait_for_goal_readiness(base_url: str, ready_path, timeout: float, http_req
         "lifecycle", "critical", False,
         f"composed goal artifact did not become ready before timeout ({timeout:g}s)",
         error=type(last_error).__name__ if last_error else None,
+        failure_classification=_failure_classification(error=last_error),
     )
 
 
@@ -986,7 +1154,7 @@ def _goal_probe_evidence(base_url: str, probe: dict, http_request, *, label: str
         evidence.update({"ok": False, "error": type(exc).__name__})
         findings.append(_http_finding(
             "request", "critical", False, f"{label} {method} {path}: request failed",
-            error=type(exc).__name__))
+            error=type(exc).__name__, failure_classification=_failure_classification(error=exc)))
         return evidence, findings
     decoded = _decode_http_body(resp.body)
     evidence.update({"status": resp.status, "body": decoded[:_GOAL_EVIDENCE_BODY_LIMIT]})
@@ -1057,15 +1225,17 @@ def run_goal_acceptance(profile: dict, composed_repo: str, *, http_request=None,
                         "green-only smoke and cannot discriminate the goal WHY", control_findings=fs))
     except _ServiceStartError as exc:
         result = exc.result
+        cls = _failure_classification(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
         findings.append(_http_finding(
             "lifecycle", "critical", False,
             f"composed goal artifact start command exited before readiness (exit {result.returncode})",
             command=exc.command, returncode=result.returncode,
-            stdout_tail=_normalize(result.stdout)[-800:], stderr_tail=_normalize(result.stderr)[-800:]))
+            stdout_tail=_normalize(result.stdout)[-800:], stderr_tail=_normalize(result.stderr)[-800:],
+            failure_classification=cls))
     except Exception as exc:                         # noqa: BLE001 — any boot failure is a non-verified result
         findings.append(_http_finding(
             "lifecycle", "critical", False, f"goal acceptance lifecycle setup failed: {exc}",
-            error=type(exc).__name__))
+            error=type(exc).__name__, failure_classification=_failure_classification(error=exc)))
     finally:
         if handle is not None:                       # GUARANTEE teardown — no leaked process/port, ever
             try:
@@ -1073,7 +1243,7 @@ def run_goal_acceptance(profile: dict, composed_repo: str, *, http_request=None,
             except Exception as exc:                 # noqa: BLE001
                 findings.append(_http_finding(
                     "lifecycle", "critical", False, "goal acceptance lifecycle cleanup failed",
-                    error=type(exc).__name__))
+                    error=type(exc).__name__, failure_classification=_failure_classification(error=exc)))
     verified = (not findings) and probes_run > 0
     return {"applicable": True, "verified": verified, "probes_run": probes_run,
             "evidence": evidence, "findings": findings}
@@ -1084,7 +1254,7 @@ def run_goal_acceptance(profile: dict, composed_repo: str, *, http_request=None,
 # whatever the deliverable is), so it folds into run_conformance alongside the kind-specific checker rather
 # than living on one profile. grep is a FACT (~0-FP); this moves a deterministically-catchable defect off the
 # expensive semantic reviewer (Linon), which previously had to read the regex to find it.
-_FORBIDDEN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".hg", ".svn", ".venv", "venv", ".mypy_cache"}
+_FORBIDDEN_SKIP_DIRS = {"node_modules", ".hg", ".svn", ".venv", "venv"}
 _FORBIDDEN_BINARY_SNIFF_BYTES = 8192
 _FORBIDDEN_MAX_HITS_REPORTED = 5     # cap the file:line evidence so a noisy match cannot flood the finding
 
@@ -1092,7 +1262,7 @@ _FORBIDDEN_MAX_HITS_REPORTED = 5     # cap the file:line evidence so a noisy mat
 def _forbidden_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "forbidden-pattern", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 def _is_probably_binary(path: str) -> bool:
@@ -1103,6 +1273,30 @@ def _is_probably_binary(path: str) -> bool:
             return b"\x00" in fh.read(_FORBIDDEN_BINARY_SNIFF_BYTES)
     except OSError:
         return True
+
+
+def _is_tree_scan_scratch(rel: str) -> bool:
+    rel = rel.replace(os.sep, "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    if not rel:
+        return False
+    if rel == ".agent-runs" or rel.startswith(".agent-runs/") or rel == ".git" or rel.startswith(".git/"):
+        return True
+    if "__pycache__" in rel.split("/"):
+        return True
+    if _controller_scope is not None:
+        return bool(_controller_scope._is_scratch(rel))
+    return False
+
+
+def _skip_forbidden_scan_rel(rel: str) -> bool:
+    rel = rel.replace(os.sep, "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    if _is_tree_scan_scratch(rel):
+        return True
+    return any(part in _FORBIDDEN_SKIP_DIRS for part in rel.split("/"))
 
 
 def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict]:
@@ -1128,10 +1322,15 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
         count = 0
         hits: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in _FORBIDDEN_SKIP_DIRS]
+            dirnames[:] = [
+                d for d in dirnames
+                if not _skip_forbidden_scan_rel(os.path.relpath(os.path.join(dirpath, d), root))
+            ]
             for fn in sorted(filenames):
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, root)
+                if _skip_forbidden_scan_rel(rel):
+                    continue
                 if any(fnmatch.fnmatch(rel, g) for g in excludes):
                     continue
                 if _is_probably_binary(full):
@@ -1199,7 +1398,7 @@ _REGRESSION_TAIL_CHARS = 1200          # bound the captured failure output so a 
 def _regression_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "regression", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 # Failing-test extraction for the actionable fix_hint: pytest (`FAILED path::test` / `path::test FAILED`) and
@@ -1263,7 +1462,16 @@ def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] =
         return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
 
     timeout = suite.get("timeout_seconds", _REGRESSION_DEFAULT_TIMEOUT_SECONDS)
-    res = runner(command, cwd=cwd, timeout=timeout)
+    try:
+        res = runner(command, cwd=cwd, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - runner failures are classified findings, not product regressions.
+        detail = f"regression suite `{command}` could not run: {type(exc).__name__}: {exc}"
+        return {"applicable": True, "passed": False,
+                "findings": [_regression_finding(
+                    "regression_suite", "major", False, detail,
+                    command=command, exit_code=None, timeout_seconds=timeout, output_tail="",
+                    failure_classification=_failure_classification(error=exc, detail=detail))],
+                "checks_run": 1}
     returncode = getattr(res, "returncode", None)              # garbled result -> None != 0 -> blocks, never crashes
     stdout = getattr(res, "stdout", "")
     stderr = getattr(res, "stderr", "")
@@ -1271,7 +1479,12 @@ def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] =
     findings: list[dict] = []
     if returncode != 0:
         tail = _regression_output_tail(stdout, stderr)
-        detail = f"regression suite `{command}`: expected exit 0, got {returncode} — the change broke previously-working code"
+        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr)
+        if cls == "code":
+            detail = (f"regression suite `{command}`: expected exit 0, got {returncode} — "
+                      "the change broke previously-working code")
+        else:
+            detail = f"regression suite `{command}` could not run cleanly (exit {returncode})"
         reason = suite.get("reason")
         if reason:
             detail += f" — {reason}"
@@ -1280,16 +1493,19 @@ def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] =
         # ACTIONABLE fix_hint (ADR-0016): tell the implementer exactly WHAT broke and WHAT NOT to do, so a
         # repair does not just re-run the same logic or (worse) edit the tests to pass. The command + exit code
         # are mechanically known; the failing test name(s) are added when parseable from the output.
-        failing = _parse_failing_tests(stdout, stderr)
-        fix_hint = (f"Your change broke the pre-existing suite `{command}` (exit {returncode}). "
-                    "Inspect the failing output below; revert or correct the logic affecting it — "
-                    "do not modify the tests to pass.")
-        if failing:
-            fix_hint += " Failing: " + ", ".join(failing) + "."
-        findings.append(_regression_finding(
-            "regression_suite", "major", False, detail,
-            command=command, exit_code=returncode, timeout_seconds=timeout, output_tail=tail,
-            fix_hint=fix_hint))
+        extra = {
+            "command": command, "exit_code": returncode, "timeout_seconds": timeout, "output_tail": tail,
+            "failure_classification": cls,
+        }
+        if cls == "code":
+            failing = _parse_failing_tests(stdout, stderr)
+            fix_hint = (f"Your change broke the pre-existing suite `{command}` (exit {returncode}). "
+                        "Inspect the failing output below; revert or correct the logic affecting it — "
+                        "do not modify the tests to pass.")
+            if failing:
+                fix_hint += " Failing: " + ", ".join(failing) + "."
+            extra["fix_hint"] = fix_hint
+        findings.append(_regression_finding("regression_suite", "major", False, detail, **extra))
     return {
         "applicable": True,
         "passed": all(f["passed"] for f in findings),
@@ -1312,7 +1528,7 @@ _STATIC_CHECK_TAIL_CHARS = 1200        # bound the captured analyzer output so a
 def _static_check_finding(check: str, severity: str, passed: bool, detail: str, **extra) -> dict:
     f = {"source": "static-check", "check": check, "severity": severity, "passed": passed, "detail": detail}
     f.update(extra)
-    return f
+    return _with_failure_classification(f, passed)
 
 
 def _static_check_output_tail(stdout, stderr, limit: int = _STATIC_CHECK_TAIL_CHARS) -> str:
@@ -1351,15 +1567,27 @@ def run_static_checks(contract: dict, runner: Runner, *, cwd: Optional[str] = No
     for check in runnable:
         command = check["command"]
         timeout = check.get("timeout_seconds", _STATIC_CHECK_DEFAULT_TIMEOUT_SECONDS)
-        res = runner(command, cwd=cwd, timeout=timeout)
+        try:
+            res = runner(command, cwd=cwd, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - analyzer runner failures are infra/resource findings.
+            detail = f"static check `{command}` could not run: {type(exc).__name__}: {exc}"
+            findings.append(_static_check_finding(
+                "static_checks", "major", False, detail,
+                command=command, exit_code=None, timeout_seconds=timeout, output_tail="",
+                failure_classification=_failure_classification(error=exc, detail=detail)))
+            continue
         returncode = getattr(res, "returncode", None)          # garbled result -> None != 0 -> blocks, never crashes
         if returncode == 0:
             continue
         stdout = getattr(res, "stdout", "")
         stderr = getattr(res, "stderr", "")
         tail = _static_check_output_tail(stdout, stderr)
-        detail = (f"static check `{command}`: expected exit 0, got {returncode} — the analyzer reported errors in "
-                  "the produced artifact (undefined names / unresolved imports / syntax)")
+        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr)
+        if cls == "code":
+            detail = (f"static check `{command}`: expected exit 0, got {returncode} — the analyzer reported errors in "
+                      "the produced artifact (undefined names / unresolved imports / syntax)")
+        else:
+            detail = f"static check `{command}` could not run cleanly (exit {returncode})"
         reason = check.get("reason")
         if reason:
             detail += f" — {reason}"
@@ -1368,12 +1596,14 @@ def run_static_checks(contract: dict, runner: Runner, *, cwd: Optional[str] = No
         # ACTIONABLE fix_hint (ADR-0016): tell the implementer exactly WHICH analyzer failed and WHAT NOT to do,
         # so a repair fixes the real defect instead of suppressing the linter. The command + exit code are
         # mechanically known facts, so the hint is concrete (never vague filler).
-        fix_hint = (f"Static check `{command}` failed (exit {returncode}) — fix the reported errors "
-                    "(undefined names / unresolved imports / syntax), do not silence the analyzer.")
-        findings.append(_static_check_finding(
-            "static_checks", "major", False, detail,
-            command=command, exit_code=returncode, timeout_seconds=timeout, output_tail=tail,
-            fix_hint=fix_hint))
+        extra = {
+            "command": command, "exit_code": returncode, "timeout_seconds": timeout, "output_tail": tail,
+            "failure_classification": cls,
+        }
+        if cls == "code":
+            extra["fix_hint"] = (f"Static check `{command}` failed (exit {returncode}) — fix the reported errors "
+                                 "(undefined names / unresolved imports / syntax), do not silence the analyzer.")
+        findings.append(_static_check_finding("static_checks", "major", False, detail, **extra))
     return {
         "applicable": True,
         "passed": all(f["passed"] for f in findings),

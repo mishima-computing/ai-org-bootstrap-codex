@@ -174,6 +174,50 @@ def test_default_run_leaf_surfaces_a_crash_not_silently():
     print("ok  default_run_leaf surfaces a crash (leaf_crash + reason=crash), never swallows it")
 
 
+def test_default_run_leaf_fails_closed_when_pipeline_verification_unverified():
+    # FALSIFIABLE (ADR-0011 unproven-never-passes / ADR-0016 never-fabricate-a-pass): a pipeline result that
+    # CONVERGED but left a required gate UNVERIFIED (the producer shape from controller_pipeline.run_pipeline:
+    # converged=True, verification_status="unverified", unverified_gate_findings={...} — e.g. a regression_suite
+    # whose `pytest` could not RUN, so the gate is non-blocking-but-not-proven-green) must NOT be accepted as
+    # converged. BEFORE the consumer fail-close, default_run_leaf returned outcome="converged" and the leaf
+    # merged + was marked done; AFTER, it returns the DISTINCT, terminal outcome="unverified", carries the gate
+    # findings, does NOT merge (HEAD unchanged, no commit), and is neither "mechanical" (resume) nor "linon"
+    # (re-split) — so it is never sent to implementer repair.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _temp_git_repo(d)
+        head_before = git("rev-parse", "HEAD").stdout.strip()
+        findings = {"regression_suite": [{"passed": False, "detail": "pytest not found -> gate could not run"}]}
+        pipeline = lambda wt, obj, run_id: {"converged": True, "verification_status": "unverified",
+                                            "unverified_gate_findings": findings}
+        res = cg.default_run_leaf(repo, {"id": "u", "objective": "o", "scope": ["x.py"]}, run_pipeline=pipeline)
+        head_after = git("rev-parse", "HEAD").stdout.strip()
+    assert res["outcome"] == "unverified", res                      # DISTINCT, terminal — not "converged"
+    assert res["outcome"] != "converged", res                       # the live bug: a pass fabricated without proof
+    assert res.get("unverified_gate_findings") == findings, res     # carries the unproven-gate evidence
+    assert res.get("reason") not in ("mechanical", "linon"), res    # NOT a resume / re-split (implementer-repair) target
+    assert "commit" not in res, res                                 # did NOT merge
+    assert head_after == head_before, (head_before, head_after)     # no merge commit landed on the shared repo
+    print("ok  default_run_leaf fails closed on an UNVERIFIED gate (terminal 'unverified', no merge, no repair)")
+
+
+def test_goal_does_not_mark_unverified_leaf_done_or_merge_it():
+    # The goal-level consumer must treat a terminal `unverified` leaf as NOT done and NOT merged — the goal
+    # reports failed/partial, never done (goal-level outcome-honesty, ADR-0016). Regression guard at the goal
+    # boundary for a leaf the producer reported as unverified.
+    split = lambda goal, ctx, carrier: [_leaf("u", ["x.py"])]
+    run_leaf = lambda r, t: {"outcome": "unverified",
+                             "unverified_gate_findings": {"regression_suite": [{"passed": False}]}}
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, emit=events.append)
+    assert _statuses(plan).get("u") != "done", _statuses(plan)      # NOT marked done
+    assert any(e.get("type") == "leaf_unverified" for e in events), events
+    assert not any(e.get("type") == "leaf_done" and e.get("id") == "u" for e in events), events
+    fin = [e for e in events if e["type"] == "goal_finished"]
+    assert fin and fin[0]["status"] != "done", events              # the goal is NOT done (no fabricated pass)
+    print("ok  goal does not mark/merge an unverified leaf done (fail-closed at the goal boundary)")
+
+
 def test_launch_precondition_fails_before_split_when_registry_missing():
     # A direct launch with the default leaf runner needs the org registry. If AI_ORG_ROOT is missing on a
     # cross-repo run, fail BEFORE the splitter/codex path starts, with a distinct precondition event.

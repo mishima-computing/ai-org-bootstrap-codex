@@ -858,13 +858,46 @@ def _repair_roles_for(findings: list[dict], repair_forward_roles: list[str]) -> 
 
 def _gate_error_report(source: str, detail: str) -> dict:
     """ADR-0009 P0 — a gate that ERRORED (could not complete) is NOT clean. The external review flagged that a
-    scanner crash was treated as "no findings" (a silent fail-open). This returns a FAILING report whose
-    critical `gate_error` finding folds in `block` mode (fail-closed) and merely streams in `shadow` (telemetry).
-    A gate ERROR is a gate/runtime problem, not a product defect — repair routing (P0 #6) should send it to the
-    gate, not loop the implementer; until then it at least blocks instead of passing silently."""
+    scanner crash was treated as "no findings" (a silent fail-open). This returns a non-passing report whose
+    critical `gate_error` finding is classified as infra: surfaced to the stream, but not fed to the implementer
+    as a product-code repair."""
     return {"applicable": True, "passed": False, "error": True, "checks_run": 0,
             "findings": [{"source": source, "check": "gate_error", "severity": "critical", "passed": False,
-                          "detail": f"gate could not complete (fail-closed in block): {detail}"}]}
+                          "detail": f"gate could not complete: {detail}",
+                          "failure_classification": "infra"}]}
+
+
+def _finding_blocks_convergence(finding: dict) -> bool:
+    if not isinstance(finding, dict) or finding.get("passed"):
+        return False
+    return finding.get("failure_classification") == "code"
+
+
+def _advisory_gate_findings(report: dict | None) -> list[dict]:
+    if not report:
+        return []
+    return [f for f in report.get("findings", [])
+            if isinstance(f, dict) and not f.get("passed") and not _finding_blocks_convergence(f)]
+
+
+def _stream_advisory_gate_findings(repo, source: str, run_id: str, findings: list[dict]) -> None:
+    for finding in findings:
+        cls = finding.get("failure_classification", "undetermined")
+        _stream_append(repo, {"source": source, "type": "infra_finding", "run_id": run_id,
+                              "failure_classification": cls, "finding": finding, "ts": _iso8601_utc()})
+
+
+def _unverified_gate_findings(gate_ctx: dict | None) -> dict:
+    """Non-blocking gate failures still mean that verification dimension is not proven green."""
+    if not isinstance(gate_ctx, dict):
+        return {}
+    out = {}
+    for name, findings in gate_ctx.items():
+        advisory = [f for f in (findings or [])
+                    if isinstance(f, dict) and not f.get("passed") and not _finding_blocks_convergence(f)]
+        if advisory:
+            out[name] = advisory
+    return out
 
 
 def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
@@ -892,6 +925,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
                                   "run_id": run_id, "slot": report["slot"],
                                   "status": report.get("status"), "ts": _iso8601_utc()})
         return report
+    _stream_advisory_gate_findings(repo, "cli-conformance", run_id, _advisory_gate_findings(report))
     _stream_append(repo, {
         "source": "cli-conformance",
         "type": "shadow_findings" if CONFORMANCE_GATE_MODE != "block" else "findings",
@@ -1110,7 +1144,7 @@ def _apply_conformance_gate(findings: list[dict], report: dict | None, mode: str
     one-line, auditable flip from shadow to blocking (ADR-0009 / Tricorder shadow-first)."""
     if mode != "block" or not report or report.get("passed"):
         return findings
-    return findings + [f for f in report.get("findings", []) if not f.get("passed")]
+    return findings + [f for f in report.get("findings", []) if _finding_blocks_convergence(f)]
 
 
 def _iteration_record(kind: str, iteration: int, started_at: datetime, finished_at: datetime,
@@ -1552,12 +1586,17 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                                             repair_stages, len(findings)))
 
     converged = bool(required_ok.get("linon")) and not findings
+    unverified_gate_findings = _unverified_gate_findings(gate_ctx)
+    verification_status = "verified" if converged and not unverified_gate_findings else (
+        "unverified" if converged else "failed")
     manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
     manifest_path = _write_manifest(repo, run_id, manifest)
     return {"summary": summary, "required_ok": required_ok, "order": list(summary),
             "fatal_ok": fatal_ok,
             "reports": reports, "results": results, "manifest": manifest,
             "manifest_path": str(manifest_path), "converged": converged,
+            "verification_status": verification_status,
+            "unverified_gate_findings": unverified_gate_findings,
             "repair_iterations": repair_iterations,
             "max_repair_iterations": max_repair_iterations,
             "linon_findings_count": len(findings),
