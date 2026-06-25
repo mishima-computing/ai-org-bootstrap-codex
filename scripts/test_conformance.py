@@ -1498,6 +1498,7 @@ def test_forbidden_pattern_skips_controller_artifacts_regardless_of_scan_root():
         (stage / "result.json").write_text(json.dumps({"role_id": "genius", "repo_evidence": [token]}),
                                            encoding="utf-8")
         (stage / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "change-intent-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
         (stage / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
         (stage / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
         (root / "result.json").write_text(json.dumps({"role_id": "linon", "findings": [token]}),
@@ -1505,6 +1506,7 @@ def test_forbidden_pattern_skips_controller_artifacts_regardless_of_scan_root():
         copied_artifacts = root / "carrier-output"
         copied_artifacts.mkdir()
         (copied_artifacts / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "change-intent-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
         (copied_artifacts / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
         (copied_artifacts / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
 

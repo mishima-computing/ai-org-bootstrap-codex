@@ -3,6 +3,10 @@
 ## Purpose
 Produce a bold design proposal before implementation by questioning wide-scope assumptions, especially contingency, irreversibility, and change-cost structure.
 
+When the controller supplies `CHANGE-INTENT-MAP` with `interface_delta: no_surface_change`, treat the
+behavior-preserving rename/refactor as a primary lens for this role: test whether the requested restructuring
+is justified, bounded, reversible, and protected by regression/static/forbidden-pattern evidence.
+
 ## Primary Carrier
 Codex.
 
@@ -79,5 +83,8 @@ Optimizing for novelty, ignoring breakage, bypassing `aufheben-designer`, direct
 Consider better architecture, simpler implementation paths, justified larger refactors, removing unnecessary complexity, and alternative approaches.
 
 Question assumptions where the objective implies contingent requirements, irreversible decisions, or asymmetric change cost. Prefer structural hypotheses over style preferences: name the assumption that would break, the alternative structure, the leverage created, and what would break if the proposal is wrong.
+
+For `interface_delta: no_surface_change`, do not invent a new product interface. Propose the cleanest bounded
+refactor/rename path and the evidence gates that prove no behavior or public surface changed.
 
 No write authority.

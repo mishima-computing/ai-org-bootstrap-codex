@@ -1,16 +1,18 @@
-"""Deterministic deliverable-kind classifier (shared, ADR-0014 operability extension).
+"""Deterministic existing-repo-surface-kind classifier (shared, ADR-0014 operability extension).
 
 The conservative-designer runs BEFORE the aufheben-designer declares `deliverable_kind`, so at design time
-there is no contract to read. This module INFERS the likely kind from the operability surface the scan
-collected — advisory only — using the same first-match-under-precedence + evidence + refuse-don't-guess shape
-that production source-to-deploy systems use (Cloud Native Buildpacks detect, Heroku bin/detect, Nixpacks /
-Railpack start-command precedence). It never fabricates certainty: ambiguous → `unknown_service_like`,
-unclassifiable-but-executable → `undetermined` (the same vocabulary conformance.py already uses).
+there is no contract to read. This module infers the existing repo surface kind from the operability surface
+the scan collected — advisory only — using the same first-match-under-precedence + evidence +
+refuse-don't-guess shape that production source-to-deploy systems use (Cloud Native Buildpacks detect,
+Heroku bin/detect, Nixpacks / Railpack start-command precedence). It never fabricates certainty:
+ambiguous → `unknown_service_like`, unclassifiable-but-executable → `undetermined` (the same vocabulary
+conformance.py already uses).
 
 Two uses of ONE vocabulary (ADR-0009 boundary — the designer chooses+encodes, deterministic systems verify):
-  - design-time:   classify_kind(surface) → advisory candidate, gates which operability checks are required.
+  - design-time:   classify_kind(surface) → advisory existing_repo_surface_kind candidate, gates which
+                   operability checks are relevant to the current repo surface.
   - post-aufheben: contract.deliverable_kind stays AUTHORITATIVE (contract_preflight / conformance); the
-                   classifier can re-run on the surface as a declared-vs-inferred *consistency* check.
+                   classifier can re-run on the surface as a declared-vs-existing-surface consistency check.
 
 `required_operability(kind)` is the kind→required-check map: health/readiness is mandatory only for the
 service kinds; a CLI's "readiness" is a clean exit, a Job's is completion (Kubernetes draws this line).
@@ -46,7 +48,7 @@ def required_operability(kind: str) -> set:
 
 
 def classify_kind(surface: dict) -> dict:
-    """Infer the deliverable kind from the operability surface. Returns:
+    """Infer the existing repo surface kind from the operability surface. Returns:
         {kind, confidence: high|medium|low|unknown, evidence: [...], candidates: [{kind,evidence}],
          advisory_only: True}
     Precedence is first-match over strongest-evidence-first (CNB/Heroku/Nixpacks); a runner-up that also

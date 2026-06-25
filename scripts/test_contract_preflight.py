@@ -7,6 +7,7 @@ after a wasted build + review. These tests pin the deterministic checks; the las
 wiring (streams before the implementer, shadow never blocks, block folds into the repair findings)."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,7 +15,11 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import contract_preflight as pf
+import controller_output
 import controller_pipeline as cp
+
+REPO = Path(__file__).resolve().parents[1]
+IMPLEMENTATION_SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
 
 
 def _complete_cli_contract():
@@ -33,6 +38,30 @@ def _complete_cli_contract():
                 {"invocation": "", "expected_status": 2},
             ],
         }},
+    }
+
+
+def _schema_complete_none_contract():
+    return {
+        "role_id": "aufheben-designer",
+        "contract_id": "c1",
+        "objective": "Rename internal helper without behavior change.",
+        "selected_direction": "Behavior-preserving rename with deterministic regression gates.",
+        "rejected_parts": [],
+        "implementation_summary": "Rename the internal helper without changing public behavior.",
+        "acceptance_criteria": ["existing tests still pass"],
+        "files_allowed_to_change": ["tool.py"],
+        "files_not_allowed_to_change": [],
+        "required_checks": ["python3 -m py_compile tool.py"],
+        "security_requirements": [],
+        "nonfunctional_requirements": [],
+        "non_goals": ["no public interface change"],
+        "risks": [],
+        "fallback_plan": "revert the rename",
+        "handoff_to_implementer": "Perform only the rename and run the stated check.",
+        "deliverable_kind": "none",
+        "regression_suite": {"command": "python3 -m py_compile tool.py",
+                             "reason": "no-surface refactor must preserve importability"},
     }
 
 
@@ -113,6 +142,17 @@ def test_deliverable_kind_none_passes():
     assert "deliverable_kind" not in checks and "conformance_profile" not in checks, rep
     assert rep["passed"], rep
     print("ok  deliverable_kind 'none' explicitly discharges the interface obligation -> passes")
+
+
+def test_change_intent_cannot_leak_into_implementation_contract_schema():
+    c = _schema_complete_none_contract()
+    ok = controller_output.gate_output(json.dumps(c), str(IMPLEMENTATION_SCHEMA))
+    assert ok["output_ok"], ok
+    c["change_intent"] = {"interface_delta": "no_surface_change"}
+    leaked = controller_output.gate_output(json.dumps(c), str(IMPLEMENTATION_SCHEMA))
+    assert not leaked["output_ok"], leaked
+    assert any("additional" in e.lower() and "change_intent" in e for e in leaked["errors"]), leaked
+    print("ok  implementation contract schema rejects leaked change_intent (advisory substrate only)")
 
 
 def test_interface_kind_without_profile_is_flagged():

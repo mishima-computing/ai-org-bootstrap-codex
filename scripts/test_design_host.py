@@ -19,6 +19,7 @@ import controller_output    # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 GENIUS_SCHEMA = REPO / "schemas" / "genius-packet.schema.json"
 DESIGN_SCHEMA = REPO / "schemas" / "design-proposal.schema.json"
+IMPL_SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
 
 
 def make_clay_repo(tmp: Path) -> Path:
@@ -39,6 +40,17 @@ def make_clay_repo(tmp: Path) -> Path:
     return tmp
 
 
+def make_service_repo(tmp: Path) -> Path:
+    (tmp / "Dockerfile").write_text(
+        "FROM python:3.12\nEXPOSE 8080\nCMD [\"uvicorn\", \"app:app\", \"--port\", \"8080\"]\n",
+        encoding="utf-8")
+    (tmp / "app.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/healthz')\ndef healthz(): return {'ok': True}\n",
+        encoding="utf-8")
+    (tmp / "requirements.txt").write_text("fastapi==0.111.0\nuvicorn==0.30.0\n", encoding="utf-8")
+    return tmp
+
+
 def valid_genius():
     return {"role_id": "genius", "objective": "o", "substrate_inputs": [], "official_spec_evidence": [],
             "repo_evidence": [], "kept_hypotheses": [], "refuted_hypotheses": [], "unverified_hypotheses": [],
@@ -50,6 +62,18 @@ def valid_design(role="aggressive-designer"):
             "expected_benefits": [], "risks": [], "assumptions": [], "constraints": [], "things_to_avoid": [],
             "handoff_notes": "h", "confidence": {"overall_posture": "grounded", "grounded_claims": [],
                                                  "speculative_claims": []}}
+
+
+def valid_aufheben():
+    return {"role_id": "aufheben-designer", "contract_id": "c1", "objective": "o",
+            "selected_direction": "d", "rejected_parts": [],
+            "implementation_summary": "s", "acceptance_criteria": ["a"],
+            "files_allowed_to_change": ["app.py"], "files_not_allowed_to_change": [],
+            "required_checks": ["python3 -m py_compile app.py"], "security_requirements": [],
+            "nonfunctional_requirements": [], "non_goals": [], "risks": [],
+            "fallback_plan": "revert", "handoff_to_implementer": "h", "deliverable_kind": "none",
+            "regression_suite": {"command": "python3 -m py_compile app.py",
+                                 "reason": "no-surface refactor must preserve importability"}}
 
 
 class StubCarrier:
@@ -108,7 +132,7 @@ class OperabilityCarriageTest(unittest.TestCase):
         # else determinism produces a packet the schema gate rejects every retry (the BLOCKER fix).
         op_map = {"summary": "s", "missing_safety_checks": [],
                   "continuity_prefill": {"version_constraints": ["x" * 300],
-                                         "ecosystem_facts_used": ["inferred deliverable_kind=cli"],
+                                         "ecosystem_facts_used": ["existing_repo_surface_kind=cli"],
                                          "forbidden_expansions": ["do not clobber " + "y" * 300],
                                          "missing_safety_checks": ["z" * 300]}}
         pkt = design_host.inject_operability_evidence(valid_design("conservative-designer"),
@@ -119,6 +143,23 @@ class OperabilityCarriageTest(unittest.TestCase):
         self.assertEqual(set(pkt["continuity"]),
                          set(design_host._CONTINUITY_FACTUAL) | set(design_host._CONTINUITY_JUDGMENT))
         self.assertTrue(controller_output.gate_output(json.dumps(pkt), str(DESIGN_SCHEMA))["output_ok"])
+
+    def test_change_intent_injection_stays_schema_valid(self):
+        ci = {"interface_delta": "no_surface_change", "advisory_only": True,
+              "objective_signals": [], "localized_scope": [],
+              "existing_repo_surface_kind": {"kind": "http_service"},
+              "deliverable_kind_advice": "none",
+              "contract_design_advice": ["prefer regression_suite"]}
+        genius = design_host.inject_change_intent_evidence(valid_genius(), ci, ".agent-runs/x/change-intent-map.json",
+                                                           "genius")
+        self.assertTrue(any(e.get("locator", "").endswith("change-intent-map.json")
+                            for e in genius["substrate_inputs"]))
+        self.assertTrue(controller_output.gate_output(json.dumps(genius), str(GENIUS_SCHEMA))["output_ok"])
+        designer = design_host.inject_change_intent_evidence(valid_design("aggressive-designer"), ci,
+                                                             ".agent-runs/x/change-intent-map.json",
+                                                             "aggressive-designer")
+        self.assertTrue(any("interface_delta=no_surface_change" in x for x in designer["constraints"]))
+        self.assertTrue(controller_output.gate_output(json.dumps(designer), str(DESIGN_SCHEMA))["output_ok"])
 
 
 class RunnerTest(unittest.TestCase):
@@ -185,7 +226,7 @@ class ConservativeOperabilityTest(unittest.TestCase):
             repo = make_clay_repo(Path(d))
             carrier = StubCarrier([valid_design("conservative-designer")])
             runner = design_host.make_design_carrier_runner(repo, "conservative-designer", str(DESIGN_SCHEMA),
-                                                            "make the cockpit deployable and operable", carrier=carrier)
+                                                            "add a status endpoint to the cockpit", carrier=carrier)
             out_dir = Path(repo) / ".agent-runs" / "r"
             cr = runner(repo, "## Contract\no", "read-only", out_dir=out_dir)
             self.assertTrue(cr["ok"])
@@ -197,7 +238,7 @@ class ConservativeOperabilityTest(unittest.TestCase):
             cont = packet["continuity"]
             self.assertEqual(set(cont) >= set(design_host._CONTINUITY_FACTUAL) | set(design_host._CONTINUITY_JUDGMENT), True)
             self.assertTrue(cont["version_constraints"])             # deterministically filled
-            self.assertTrue(any("deliverable_kind=" in f for f in cont["ecosystem_facts_used"]))
+            self.assertTrue(any("existing_repo_surface_kind=" in f for f in cont["ecosystem_facts_used"]))
             # still schema-valid against the real design-proposal schema
             self.assertTrue(controller_output.gate_output(json.dumps(packet), str(DESIGN_SCHEMA))["output_ok"])
 
@@ -208,6 +249,94 @@ class ConservativeOperabilityTest(unittest.TestCase):
             runner = design_host.make_design_carrier_runner(repo, "genius", str(GENIUS_SCHEMA), "x", carrier=carrier)
             runner(repo, "## Contract\no", "read-only", out_dir=Path(repo) / ".agent-runs" / "g")
             self.assertNotIn(design_host.OPERABILITY_MAP_HEADER, carrier.prompts[0])  # guard-only, unchanged
+
+
+class ChangeIntentRoutingTest(unittest.TestCase):
+    def _run_role(self, repo, role, objective):
+        if role == "genius":
+            schema = GENIUS_SCHEMA
+            packet = valid_genius()
+        elif role == "aufheben-designer":
+            schema = IMPL_SCHEMA
+            packet = valid_aufheben()
+        else:
+            schema = DESIGN_SCHEMA
+            packet = valid_design(role)
+        carrier = StubCarrier([packet])
+        runner = design_host.make_design_carrier_runner(repo, role, str(schema), objective, carrier=carrier)
+        out_dir = Path(repo) / ".agent-runs" / role
+        cr = runner(repo, "## Contract\no", "read-only", out_dir=out_dir)
+        self.assertTrue(cr["ok"], cr)
+        return carrier.prompts[0], out_dir, json.loads((Path(repo) / "result.json").read_text())
+
+    def test_conservative_operability_routing_by_interface_delta(self):
+        self.assertFalse(design_host.role_receives_operability(
+            "conservative-designer", {"interface_delta": "no_surface_change"}))
+        self.assertFalse(design_host.role_receives_operability(
+            "conservative-designer", {"interface_delta": "unknown"}))
+        for delta in ("adds_new_interface", "modifies_existing_interface", "removes_interface"):
+            self.assertTrue(design_host.role_receives_operability(
+                "conservative-designer", {"interface_delta": delta}))
+        self.assertTrue(design_host.role_receives_operability("conservative-designer", None))
+        self.assertFalse(design_host.role_receives_operability(
+            "aggressive-designer", {"interface_delta": "adds_new_interface"}))
+
+    def test_no_surface_change_routes_away_from_conservative_operability(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_service_repo(Path(d))
+            objective = "rename/refactor internal app plumbing, no behavior change"
+            aggressive_prompt, aggressive_out, aggressive_packet = self._run_role(repo, "aggressive-designer", objective)
+            genius_prompt, genius_out, genius_packet = self._run_role(repo, "genius", objective)
+            conservative_prompt, conservative_out, conservative_packet = self._run_role(
+                repo, "conservative-designer", objective)
+            aufheben_prompt, aufheben_out, aufheben_packet = self._run_role(repo, "aufheben-designer", objective)
+
+            self.assertIn(design_host.CHANGE_INTENT_MAP_HEADER, aggressive_prompt)
+            self.assertIn(design_host.CHANGE_INTENT_MAP_HEADER, genius_prompt)
+            self.assertIn(design_host.CHANGE_INTENT_MAP_HEADER, aufheben_prompt)
+            self.assertNotIn(design_host.CHANGE_INTENT_MAP_HEADER, conservative_prompt)
+            self.assertNotIn(design_host.OPERABILITY_MAP_HEADER, conservative_prompt)
+            self.assertTrue((aggressive_out / "change-intent-map.json").is_file())
+            self.assertTrue((genius_out / "change-intent-map.json").is_file())
+            self.assertTrue((aufheben_out / "change-intent-map.json").is_file())
+            self.assertFalse((conservative_out / "change-intent-map.json").exists())
+            self.assertFalse((conservative_out / "operability-map.json").exists())
+            ci = json.loads((aufheben_out / "change-intent-map.json").read_text())
+            self.assertEqual(ci["existing_repo_surface_kind"]["kind"], "http_service")
+            self.assertEqual(ci["deliverable_kind_advice"], "none")
+            self.assertIn("interface_delta=no_surface_change", " ".join(aggressive_packet["constraints"]))
+            self.assertTrue(any(e.get("locator", "").endswith("change-intent-map.json")
+                                for e in genius_packet["substrate_inputs"]))
+            self.assertNotIn("change_intent", aufheben_packet)
+            self.assertEqual(aufheben_packet["deliverable_kind"], "none")
+
+    def test_new_interface_routes_conservative_operability_and_existing_surface_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_service_repo(Path(d))
+            prompt, out_dir, packet = self._run_role(repo, "conservative-designer", "add /metrics endpoint")
+            self.assertIn(design_host.CHANGE_INTENT_MAP_HEADER, prompt)
+            self.assertIn(design_host.OPERABILITY_MAP_HEADER, prompt)
+            self.assertIn("existing_repo_surface_kind", prompt)
+            self.assertNotIn("inferred deliverable_kind", prompt)
+            self.assertTrue((out_dir / "change-intent-map.json").is_file())
+            self.assertTrue((out_dir / "operability-map.json").is_file())
+            ci = json.loads((out_dir / "change-intent-map.json").read_text())
+            self.assertEqual(ci["interface_delta"], "adds_new_interface")
+            self.assertEqual(ci["deliverable_kind_advice"], "http_service")
+            self.assertIn("continuity", packet)
+            self.assertTrue(controller_output.gate_output(json.dumps(packet), str(DESIGN_SCHEMA))["output_ok"])
+
+    def test_unknown_interface_delta_withholds_conservative_operability_prompt(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_service_repo(Path(d))
+            prompt, out_dir, packet = self._run_role(repo, "conservative-designer", "fix reliability")
+            self.assertIn(design_host.CHANGE_INTENT_MAP_HEADER, prompt)
+            self.assertNotIn(design_host.OPERABILITY_MAP_HEADER, prompt)
+            self.assertTrue((out_dir / "change-intent-map.json").is_file())
+            self.assertFalse((out_dir / "operability-map.json").exists())
+            ci = json.loads((out_dir / "change-intent-map.json").read_text())
+            self.assertEqual(ci["interface_delta"], "unknown")
+            self.assertNotIn("continuity", packet)
 
 
 if __name__ == "__main__":

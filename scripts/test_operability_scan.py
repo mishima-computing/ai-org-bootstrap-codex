@@ -39,6 +39,7 @@ class OperabilityScanTest(unittest.TestCase):
             repo = http_repo(Path(d))
             m = ops.OperabilityScan(repo).build()
             self.assertEqual(m["kind_verdict"]["kind"], "http_service")
+            self.assertEqual(m["existing_repo_surface_kind"], m["kind_verdict"])
             self.assertTrue(m["surface"].get("health_routes"))
             # health is REQUIRED for a service and IS present -> not in missing
             self.assertFalse(any("absent: health" in x for x in m["missing_safety_checks"]))
@@ -61,8 +62,8 @@ class OperabilityScanTest(unittest.TestCase):
             self.assertEqual(set(pre), {"version_constraints", "ecosystem_facts_used",
                                         "forbidden_expansions", "missing_safety_checks"})
             self.assertNotIn("selected_profiles", pre)   # Codex correction: profile ids are authorization-validated
-            # the inferred kind rides in ecosystem_facts_used, not selected_profiles
-            self.assertTrue(any("deliverable_kind=" in f for f in pre["ecosystem_facts_used"]))
+            # the existing repo surface kind rides in ecosystem_facts_used, not selected_profiles
+            self.assertTrue(any("existing_repo_surface_kind=" in f for f in pre["ecosystem_facts_used"]))
 
     def test_report_text_does_not_make_a_library_a_service(self):
         with tempfile.TemporaryDirectory() as d:
@@ -81,6 +82,46 @@ class OperabilityScanTest(unittest.TestCase):
                   "governing_adrs": [{"doc": "docs/ADR-1.md", "governs": ["mytool"]}]}
             m = ops.OperabilityScan(repo, guard_map=gm).build()
             self.assertTrue(any("mytool/cli.py" in f for f in m["forbidden_expansions"]))
+
+    def test_change_intent_no_surface_refactor_in_service_repo_advises_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = http_repo(Path(d))
+            candidates = pre_localizer.PreLocalizer(repo).candidates("rename/refactor internal app plumbing, no behavior change")
+            m = ops.ChangeIntentScan(repo, "rename/refactor internal app plumbing, no behavior change",
+                                     candidates).build()
+            self.assertEqual(m["interface_delta"], "no_surface_change")
+            self.assertTrue(m["advisory_only"])
+            self.assertEqual(m["existing_repo_surface_kind"]["kind"], "http_service")
+            self.assertEqual(m["deliverable_kind_advice"], "none")
+            self.assertTrue(any("regression_suite" in x for x in m["contract_design_advice"]))
+
+    def test_change_intent_add_endpoint_preserves_existing_surface_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = http_repo(Path(d))
+            m = ops.ChangeIntentScan(repo, "add /metrics endpoint").build()
+            self.assertEqual(m["interface_delta"], "adds_new_interface")
+            self.assertEqual(m["existing_repo_surface_kind"]["kind"], "http_service")
+            self.assertEqual(m["deliverable_kind_advice"], "http_service")
+
+    def test_change_intent_weak_or_conflicting_falls_back_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = http_repo(Path(d))
+            weak = ops.ChangeIntentScan(repo, "improve support").build()
+            self.assertEqual(weak["interface_delta"], "unknown")
+            self.assertIsNone(weak["deliverable_kind_advice"])
+            conflicting = ops.ChangeIntentScan(repo, "add and remove endpoint support").build()
+            self.assertEqual(conflicting["interface_delta"], "unknown")
+            self.assertIsNone(conflicting["deliverable_kind_advice"])
+
+    def test_change_intent_removes_and_modifies_interfaces(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = http_repo(Path(d))
+            removes = ops.ChangeIntentScan(repo, "remove /healthz endpoint").build()
+            self.assertEqual(removes["interface_delta"], "removes_interface")
+            self.assertEqual(removes["deliverable_kind_advice"], "http_service")
+            modifies = ops.ChangeIntentScan(repo, "change existing /healthz endpoint response").build()
+            self.assertEqual(modifies["interface_delta"], "modifies_existing_interface")
+            self.assertEqual(modifies["deliverable_kind_advice"], "http_service")
 
 
 if __name__ == "__main__":

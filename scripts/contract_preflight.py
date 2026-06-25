@@ -30,7 +30,7 @@ def _is_substantive_profile(profile) -> bool:
 
 def _finding(check: str, severity: str, detail: str, **extra) -> dict:
     return {"source": "contract-preflight", "check": check, "severity": severity,
-            "passed": False, "detail": detail, **extra}
+            "passed": False, "detail": detail, "failure_classification": "code", **extra}
 
 
 def _http_has_e2e_example(profile) -> bool:

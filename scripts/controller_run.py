@@ -106,18 +106,18 @@ def run(repo, contract: dict, run_id: str, *, cache=True,
         schema_path = str(org_root(repo) / info["schema"])   # schema lives in the org install
         kwargs["output_schema"] = schema_path
         kwargs["output_path"] = OUTPUT_FILE
-        # DESIGN roles get a deterministic guard-map folded into the prompt BEFORE the carrier runs
-        # (ADR-0014, PLAN A): the host is a carrier_runner, so run_contract keeps owning the cache,
-        # the output_gate, journaling, and the ControllerRunReport — the producer contract is unchanged.
+        # Design roles get deterministic guard/change-intent/operability substrate folded into the prompt
+        # BEFORE the carrier runs (ADR-0014/0015). Aufheben gets change-intent prompt-only substrate. The host
+        # is a carrier_runner, so run_contract keeps owning the output_gate, journaling, and report shape.
         import design_host
-        if role in design_host.DESIGN_ROLES:
+        if role in design_host.CHANGE_INTENT_PROMPT_ROLES:
             kwargs["carrier_runner"] = design_host.make_design_carrier_runner(
                 repo, role, schema_path, objective)
-            # Cache is OFF for design roles: run_contract's content-addressed cache stores BEFORE the
+            # Cache is OFF for substrate-injected producer roles: run_contract's content-addressed cache stores BEFORE the
             # output_gate (so a schema-failed packet would be replayed as a success), and on replay it
             # neither carries the codex session_id (breaking repair session-reuse) nor materialises the
-            # guard-map.json artifact the injected evidence points at. Re-enable once the cache bundle
-            # carries session_id + the guard-map artifact and stores only post-gate. (ADR-0014 follow-up.)
+            # run artifacts the injected evidence/prompt points at. Re-enable once the cache bundle
+            # carries session_id + substrate artifacts and stores only post-gate. (ADR-0014 follow-up.)
             kwargs["cache_enabled"] = False
     if is_implementer:
         import implement_host

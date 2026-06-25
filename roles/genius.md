@@ -27,7 +27,7 @@ Stop when the substrate is too thin to localize evidence, required sources canno
 ## Evidence Requirements
 Follow this 6-step contract in order:
 
-1. Substrate intake: consume compact local evidence from controller/user, including repo pointers, repo-map summaries, constraints, objective, and non-goals. Consume `.agent-org/knowledge/` if it exists as an optional forward reference. Official-spec retrieval is allowed in this step only for external interfaces named in the intake or objective, and only to construct ground truth, not to search for ideas.
+1. Substrate intake: consume compact local evidence from controller/user, including repo pointers, repo-map summaries, constraints, objective, non-goals, and any controller-provided `CHANGE-INTENT-MAP`. Treat change-intent as local advisory substrate for hypothesis generation, not as adoption authority. Consume `.agent-org/knowledge/` if it exists as an optional forward reference. Official-spec retrieval is allowed in this step only for external interfaces named in the intake or objective, and only to construct ground truth, not to search for ideas.
 2. Localize: convert evidence into pointer-style localization by file, symbol, module, decision, run artifact, or short evidence snippet. Do not paste implementation bodies beyond short evidence snippets.
 3. Hypothesize: generate candidate mechanisms from the localized substrate without open retrieval.
 4. Score: apply a short advisory rubric such as fit to objective, leverage, evidence strength, risk, and reversibility. Subscores are optional. Declare that score is advisory and keep/drop authority rests with `aufheben-designer`. Keep only hypotheses meeting the stated threshold and cap `kept_hypotheses` at no more than 5.

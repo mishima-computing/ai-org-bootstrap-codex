@@ -1474,6 +1474,7 @@ _TREE_SCAN_SCRATCH_DIRS = {".agent-runs", ".git", "__pycache__"}
 _CONTROLLER_ARTIFACT_NAMES = {
     "build-map.json",
     "carrier-report.json",
+    "change-intent-map.json",
     "codex-review.log",
     "guard-map.json",
     "journal.jsonl",
@@ -1584,7 +1585,7 @@ def _looks_like_controller_artifact_dir(root: str) -> bool:
         return False
     artifact_names = {n for n in names if _is_controller_artifact_name(n)}
     carrier_logs = {n for n in names if n.startswith("carrier-attempt") and n.endswith(".log")}
-    map_files = {"build-map.json", "guard-map.json", "operability-map.json"}.intersection(names)
+    map_files = {"build-map.json", "change-intent-map.json", "guard-map.json", "operability-map.json"}.intersection(names)
     if carrier_logs and (map_files or "result.json" in names or "carrier-report.json" in names):
         return True
     return len(map_files) >= 2 or len(artifact_names - {"result.json"}) >= 2
