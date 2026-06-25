@@ -93,9 +93,23 @@ _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
 # otherwise a missing runner is blamed on the product. Kept deliberately NARROW (ADR-0006): ONLY the known
 # runner/tool names match here, so a missing PRODUCT dependency (e.g. `No module named requests`, not a known
 # runner) still falls through to `_CODE_TEXT_RE` and stays a product defect (an undeclared dependency, incr #3).
+#
+# PRECISION (the masking direction, ADR-0006/0011): every clause must be an UNAMBIGUOUS absence of a KNOWN
+# external runner/tool, never a generic phrase a product could emit — otherwise a genuine product failure whose
+# output happens to contain the phrase is re-labeled infra and a real bug is parked at "unverified", never
+# repaired. Two such seams were closed:
+#   * `no module named pytest` is ANCHORED with a trailing `\b` so it matches the RUNNER `pytest` ONLY. The
+#     plugin module `pytest_asyncio` (an `_`-suffixed name the PRODUCT's own test code imports) keeps `pytest`
+#     adjacent to a word char `_`, so no boundary forms and it falls through to `_CODE_TEXT_RE` -> code: a
+#     product's missing pytest-plugin dependency is the product's defect, not a missing runner.
+#   * the generic `is not available` clause was DROPPED (a real product failure can legitimately print
+#     "X is not available"). Only the two SPECIFIC, checker-emitted tool phrasings remain — `machinery is
+#     unavailable` (grpcio/protobuf absent, `_build_grpc_invoker`) and `jsonschema is not available`
+#     (`_json_schema_findings`). Other runners (tox/nox/jest/go test) are deliberately NOT whitelisted: they
+#     fall through to `code`, the SAFE (under-coverage) direction — a known limitation, not a leak.
 _UNSUPPORTED_ENV_RE = re.compile(
-    r"(command not found|executable file not found|no module named pytest|"
-    r"is not available|machinery is unavailable|jsonschema is not available)",
+    r"(command not found|executable file not found|no module named pytest\b|"
+    r"machinery is unavailable|jsonschema is not available)",
     re.IGNORECASE,
 )
 # Established CODE signals in the OUTPUT of a command that actually RAN (we have already returned `infra` for a

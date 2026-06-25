@@ -2133,6 +2133,43 @@ def test_product_missing_dependency_at_exit_1_stays_code_not_infra():
     print("ok  fix: product `No module named requests` at exit 1 -> still code/implementer (blocks)")
 
 
+def test_pytest_plugin_gap_at_exit_1_stays_code_not_infra():
+    # the MASKING seam (over-reach of the unsupported-env whitelist): `No module named pytest_asyncio` is the
+    # PRODUCT's own missing pytest-PLUGIN dependency raised BY its test code, NOT an absent runner. The anchored
+    # `no module named pytest\b` must NOT match `pytest_asyncio` (the `_` keeps `pytest` inside a word), so it
+    # falls through to `_CODE_TEXT_RE` -> code -> implementer. If it leaked to infra, a real dep defect would be
+    # parked at "unverified" and never repaired (the dangerous code->infra direction).
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'pytest_asyncio'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    # the bare runner-absence phrasing (no plugin suffix) also stays code-free of the anchor's word char:
+    assert conf._failure_classification(returncode=1, stderr="No module named pytest_asyncio\n") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f                   # a missing product plugin still blocks as code
+    print("ok  fix: `No module named pytest_asyncio` at exit 1 -> code/implementer (plugin gap, not runner)")
+
+
+def test_generic_is_not_available_in_product_output_stays_code_not_infra():
+    # the SECOND masking seam: the generic `is not available` clause was dropped. A real product failure can
+    # legitimately print "X is not available" — matching it as unsupported-env would re-label a genuine defect as
+    # an infra gap and never repair it. With an established product signal in the same output it must stay code.
+    out = "AssertionError: feature flag 'fast_path' is not available in this build\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f
+    # and even a bare ambiguous nonzero with a generic "is not available" no longer routes to unsupported-env:
+    bare = conf._with_failure_classification(
+        {"passed": False, "returncode": 1, "detail": "the requested codec is not available"}, False)
+    assert bare["gate_state"] != "COULD_NOT_RUN_UNSUPPORTED_ENV", bare
+    assert bare["repair_route"] != "escalate", bare
+    print("ok  fix: a product `X is not available` -> code/undetermined, never unsupported-env (no masking)")
+
+
 def test_example_comparison_mismatch_is_code_and_blocks():
     # item #5: the stdout/exit oracle mismatch is the POSITIVE product signal -> code/implementer, and it BLOCKS.
     profile = {"entrypoint": {"invocation": "mytool"},
