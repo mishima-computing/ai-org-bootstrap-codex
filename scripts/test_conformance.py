@@ -2103,6 +2103,36 @@ def test_module_not_found_in_ran_output_is_still_code():
     print("ok  incr#3: ModuleNotFoundError in ran output (exit 1) -> still code/implementer (blocks)")
 
 
+def test_missing_pytest_runner_at_exit_1_is_unsupported_env_not_code():
+    # the MIRROR of a fabricated pass: a `python -m pytest` invocation whose RUNNER is missing emits
+    # "No module named pytest" in OUTPUT at exit 1 (NOT 127). The known-runner-absence whitelist must win over
+    # the generic `No module named` CODE clause -> infra/unsupported-env, NOT a product defect blamed on the impl.
+    out = "No module named pytest\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "infra"
+    # even an ORACLE/regression call site (default="code") must not flip a missing runner into code.
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra"
+    f = conf._with_failure_classification(
+        {"passed": False, "returncode": 1, "detail": "regression suite could not run; output tail: " + out}, False)
+    assert f["failure_classification"] == "infra", f
+    assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+    assert f["repair_route"] in ("escalate", "clean_retry") and f["repair_route"] != "implementer", f
+    assert not cp._finding_blocks_convergence(f), f               # a missing runner must NOT block as code
+    print("ok  fix: missing pytest runner at exit 1 -> unsupported-env/infra (not code, not implementer)")
+
+
+def test_product_missing_dependency_at_exit_1_stays_code_not_infra():
+    # the NARROW guard (ADR-0006): `No module named requests` is NOT a known runner -> it falls through the
+    # whitelist to `_CODE_TEXT_RE` -> code. A product that forgot to declare its dependency is a code defect.
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f                   # product missing dep still blocks
+    print("ok  fix: product `No module named requests` at exit 1 -> still code/implementer (blocks)")
+
+
 def test_example_comparison_mismatch_is_code_and_blocks():
     # item #5: the stdout/exit oracle mismatch is the POSITIVE product signal -> code/implementer, and it BLOCKS.
     profile = {"entrypoint": {"invocation": "mytool"},

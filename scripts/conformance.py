@@ -87,8 +87,20 @@ _INFRA_TEXT_RE = re.compile(
 )
 _ADDRESS_IN_USE_RE = re.compile(r"(Address already in use|Errno 48|Errno 98)", re.IGNORECASE)
 _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
+# A NARROW whitelist of host/runner-absence text: a known TEST RUNNER or TOOL is missing. `python -m pytest`
+# reports an absent pytest as `No module named pytest` on exit 1 (NOT 127), so this MUST be recognized as a
+# verification-environment gap (infra/unsupported-env) BEFORE the generic `No module named` CODE clause below —
+# otherwise a missing runner is blamed on the product. Kept deliberately NARROW (ADR-0006): ONLY the known
+# runner/tool names match here, so a missing PRODUCT dependency (e.g. `No module named requests`, not a known
+# runner) still falls through to `_CODE_TEXT_RE` and stays a product defect (an undeclared dependency, incr #3).
+_UNSUPPORTED_ENV_RE = re.compile(
+    r"(command not found|executable file not found|no module named pytest|"
+    r"is not available|machinery is unavailable|jsonschema is not available)",
+    re.IGNORECASE,
+)
 # Established CODE signals in the OUTPUT of a command that actually RAN (we have already returned `infra` for a
-# 127 command-not-found above, so an import/assertion failure here is the product's own defect, not a host gap).
+# 127 command-not-found / a known-runner-absence above, so an import/assertion failure here is the product's own
+# defect, not a host gap — a `No module named X` for a NON-runner X is the product's undeclared dependency).
 _CODE_TEXT_RE = re.compile(r"(ModuleNotFoundError|ImportError|No module named|AssertionError)", re.IGNORECASE)
 # A POSIX shell reports a child that died on a signal as a POSITIVE exit 128+N (the in-process runner reports it
 # as a NEGATIVE rc; both are could-not-run, not a product defect). SIGKILL/OOM (137), SIGABRT (134), SIGSEGV
@@ -133,6 +145,13 @@ def _failure_classification(*, returncode=None, stdout="", stderr="", error=None
         return "timeout"
     if rc == 127:
         return "infra"
+    # A known RUNNER/TOOL is absent (e.g. `python -m pytest` -> "No module named pytest" on exit 1, not 127). That
+    # is a verification-environment gap, decided HERE — in the host/runner-absent group, BEFORE signal/resource
+    # deaths and BEFORE the generic `No module named` CODE clause — so a missing runner reroutes to escalate/
+    # clean_retry and is never reported to the implementer as a product defect. NARROW: only the known
+    # runner/tool names; a missing PRODUCT dependency falls through to `_CODE_TEXT_RE` -> code (incr #3).
+    if _UNSUPPORTED_ENV_RE.search(text):
+        return "infra"
     if rc is not None and rc < 0:
         return "resource"
     if rc in _SIGNAL_EXIT_RESOURCE:
@@ -171,12 +190,8 @@ _ROUTING_BY_CLASS = {
 }
 # An infra failure a clean retry will NOT fix because the HOST lacks a required interpreter/tool/library: route
 # it to ESCALATE (unsupported env), not the implementer and not an indefinite retry. Kept as `infra` for
-# back-compat; only the routing view distinguishes it.
-_UNSUPPORTED_ENV_RE = re.compile(
-    r"(command not found|executable file not found|no module named pytest|"
-    r"is not available|machinery is unavailable|jsonschema is not available)",
-    re.IGNORECASE,
-)
+# back-compat; only the routing view distinguishes it. The matching whitelist `_UNSUPPORTED_ENV_RE` is defined
+# above (near `_CODE_TEXT_RE`) because `_failure_classification` now consults it in the host/runner-absent group.
 
 
 # example/oracle checks whose failure means the artifact RAN and produced the wrong answer — the failure
