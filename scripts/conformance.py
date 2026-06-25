@@ -87,6 +87,14 @@ _INFRA_TEXT_RE = re.compile(
 )
 _ADDRESS_IN_USE_RE = re.compile(r"(Address already in use|Errno 48|Errno 98)", re.IGNORECASE)
 _RESOURCE_TEXT_RE = re.compile(r"\b(killed|out of memory|oom)\b", re.IGNORECASE)
+# Established CODE signals in the OUTPUT of a command that actually RAN (we have already returned `infra` for a
+# 127 command-not-found above, so an import/assertion failure here is the product's own defect, not a host gap).
+_CODE_TEXT_RE = re.compile(r"(ModuleNotFoundError|ImportError|No module named|AssertionError)", re.IGNORECASE)
+# A POSIX shell reports a child that died on a signal as a POSITIVE exit 128+N (the in-process runner reports it
+# as a NEGATIVE rc; both are could-not-run, not a product defect). SIGKILL/OOM (137), SIGABRT (134), SIGSEGV
+# (139) are a resource death; SIGTERM (143) / SIGINT (130) are an external terminate/interrupt (infra).
+_SIGNAL_EXIT_RESOURCE = {137, 134, 139}
+_SIGNAL_EXIT_INFRA = {143, 130}
 
 
 def _stringify(value) -> str:
@@ -96,8 +104,17 @@ def _stringify(value) -> str:
         return ""
 
 
-def _failure_classification(*, returncode=None, stdout="", stderr="", error=None, detail: str = "") -> str:
-    """Classify whether a failed gate points at product code or at the host/runner that tried to verify it."""
+def _failure_classification(*, returncode=None, stdout="", stderr="", error=None, detail: str = "",
+                            default: str = "undetermined") -> str:
+    """Classify whether a failed gate points at product code or at the host/runner that tried to verify it.
+
+    `default` is what a *genuinely ambiguous* nonzero exit resolves to. It is `undetermined` for generic call
+    sites (ADR-0011/0016: a could-not-tell outcome is UNVERIFIED, never a hidden product pass), and `code` for
+    ORACLE/ANALYZER/BUILD gates whose contract makes a plain nonzero a positive product signal (a build/install
+    that fails — the artifact cannot even be built — an example exit-code mismatch, a once-green regression suite
+    that now fails, a static analyzer that ran and reports errors). Could-not-run
+    signals (127 / 124 / signal-death codes / addr-in-use) and established code signals (import/assertion in the
+    output) are decided BEFORE the default, so they hold regardless of which default a call site passes."""
     if isinstance(error, TimeoutError):
         return "timeout"
     if isinstance(error, FileNotFoundError):
@@ -118,20 +135,112 @@ def _failure_classification(*, returncode=None, stdout="", stderr="", error=None
         return "infra"
     if rc is not None and rc < 0:
         return "resource"
+    if rc in _SIGNAL_EXIT_RESOURCE:
+        return "resource"
+    if rc in _SIGNAL_EXIT_INFRA:
+        return "infra"
     if _INFRA_TEXT_RE.search(text):
         return "infra"
     if _RESOURCE_TEXT_RE.search(text):
         return "resource"
+    if _CODE_TEXT_RE.search(text):
+        return "code"
     if returncode is None and not any(_stringify(v) for v in (stdout, stderr, error, detail)):
         return "undetermined"
-    return "code"
+    return default
+
+
+# ── incr #3: the producer FINDINGS-ROUTER. Each non-passing finding carries a small, EXPLICIT routing model so
+# the gate decision (controller_pipeline._finding_blocks_convergence) reads an intent, not a back-compat label.
+# `failure_classification` is kept verbatim for back-compat; the routing fields are derived from it + signals.
+_GATE_STATE_PASS = "VERIFIED_PASS"
+_GATE_STATE_PRODUCT_FAILURE = "VERIFIED_PRODUCT_FAILURE"
+_GATE_STATE_INFRA = "COULD_NOT_RUN_INFRA"
+_GATE_STATE_UNSUPPORTED = "COULD_NOT_RUN_UNSUPPORTED_ENV"
+_GATE_STATE_INDETERMINATE = "INDETERMINATE"
+
+# failure_classification -> (gate_state, repair_route, retryable, confidence). Only `code` routes to the
+# implementer repair loop; could-not-run/inconclusive route to the incr-#2 clean retry (or escalate), never the
+# implementer — so an ambiguous outcome can no longer masquerade as a product defect (nor, post-#1, as a pass).
+_ROUTING_BY_CLASS = {
+    "code":         (_GATE_STATE_PRODUCT_FAILURE, "implementer", False, "high"),
+    "infra":        (_GATE_STATE_INFRA,           "clean_retry", True,  "medium"),
+    "timeout":      (_GATE_STATE_INFRA,           "clean_retry", True,  "medium"),
+    "resource":     (_GATE_STATE_INFRA,           "clean_retry", True,  "medium"),
+    "undetermined": (_GATE_STATE_INDETERMINATE,   "clean_retry", True,  "low"),
+}
+# An infra failure a clean retry will NOT fix because the HOST lacks a required interpreter/tool/library: route
+# it to ESCALATE (unsupported env), not the implementer and not an indefinite retry. Kept as `infra` for
+# back-compat; only the routing view distinguishes it.
+_UNSUPPORTED_ENV_RE = re.compile(
+    r"(command not found|executable file not found|no module named pytest|"
+    r"is not available|machinery is unavailable|jsonschema is not available)",
+    re.IGNORECASE,
+)
+
+
+# example/oracle checks whose failure means the artifact RAN and produced the wrong answer — the failure
+# surfaced in the call phase, not the report phase.
+_CALL_PHASE_CHECKS = {"exit_status", "stdout_contains", "stderr_contains", "stdout_exact", "request", "response"}
+
+
+def _derive_phase(text: str, returncode, check: str = "") -> str:
+    """Best-effort: which PHASE of the gate did the failure surface in, from the signal we have. The `check`
+    name is the most reliable signal (a `build_and_install` finding is a build-phase failure regardless of its
+    text); free-text regexes refine the rest. NOT a blanket 'report' — that is only the genuine fallback."""
+    try:
+        rc = int(returncode)
+    except (TypeError, ValueError):
+        rc = None
+    if rc == 127 or _INFRA_TEXT_RE.search(text):
+        return "launch"
+    if check == "build_and_install" or re.search(r"could not build wheel|failed building wheel|compile", text, re.IGNORECASE):
+        return "build"
+    if re.search(r"ModuleNotFoundError|ImportError|No module named", text, re.IGNORECASE):
+        return "dependency"
+    if re.search(r"during collection|collection error", text, re.IGNORECASE):
+        return "collection"
+    if _ADDRESS_IN_USE_RE.search(text):
+        return "setup"
+    if check in _CALL_PHASE_CHECKS or rc == 124:
+        return "call"
+    return "report"
 
 
 def _with_failure_classification(finding: dict, passed: bool) -> dict:
+    """Normalize `failure_classification` and attach the explicit routing model (incr #3). A passed finding is a
+    VERIFIED_PASS that needs no repair. Routing fields use `setdefault`, so a producer that KNOWS the route (an
+    example/oracle product mismatch) may pin it explicitly and this never overrides it."""
     if passed:
+        finding.setdefault("gate_state", _GATE_STATE_PASS)
+        finding.setdefault("repair_route", "none")
+        finding.setdefault("phase", "report")
+        finding.setdefault("confidence", "high")
+        finding.setdefault("retryable", False)
         return finding
-    cls = finding.get("failure_classification", "code")
-    finding["failure_classification"] = cls if cls in _FAILURE_CLASSES else "undetermined"
+    cls = finding.get("failure_classification")
+    if cls is None:
+        # incr #3 (narrowed flip): a finding with NO explicit class is NOT blindly `undetermined` — first
+        # recognize any ESTABLISHED product-failure / infra / resource signal in the finding's OWN evidence
+        # (returncode + output: a signal-death exit, an import/assertion in the output, an addr-in-use). Only a
+        # genuinely unrecognizable nonzero falls through to `undetermined`. An established signal is never swallowed.
+        cls = _failure_classification(
+            returncode=finding.get("returncode"),
+            stdout=finding.get("stdout_tail", ""),
+            stderr=finding.get("stderr_tail", ""),
+            detail=finding.get("detail", ""),
+        )
+    cls = cls if cls in _FAILURE_CLASSES else "undetermined"
+    finding["failure_classification"] = cls
+    gate_state, repair_route, retryable, confidence = _ROUTING_BY_CLASS[cls]
+    text = " ".join(_stringify(finding.get(k)) for k in ("detail", "stderr_tail", "stdout_tail", "check"))
+    if cls == "infra" and _UNSUPPORTED_ENV_RE.search(text):
+        gate_state, repair_route, retryable, confidence = (_GATE_STATE_UNSUPPORTED, "escalate", False, "medium")
+    finding.setdefault("gate_state", gate_state)
+    finding.setdefault("repair_route", repair_route)
+    finding.setdefault("phase", _derive_phase(text, finding.get("returncode"), finding.get("check", "")))
+    finding.setdefault("confidence", confidence)
+    finding.setdefault("retryable", retryable)
     return finding
 
 
@@ -155,7 +264,12 @@ def install_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
     for cmd in build.get("commands", []):
         res = runner(cmd, cwd=cwd)
         if res.returncode != 0:
-            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+            # incr #3 (build/install path): a build/install/compile gate that RAN and failed is an ESTABLISHED
+            # product-failure signal — the artifact cannot even be built, which is the product's own defect
+            # (`default="code"`). A could-not-run exit (127 / signal-death / addr-in-use) is still recognized
+            # BEFORE the default, so a missing toolchain stays `infra`, not a false product defect.
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr,
+                                          default="code")
             findings.append(_finding(
                 "build_and_install", "critical", False,
                 f"install command failed (exit {res.returncode}): {cmd}",
@@ -177,12 +291,15 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
         res = runner(cmd, cwd=cwd, stdin=ex.get("stdin"))
 
         if "expected_status" in ex and res.returncode != ex["expected_status"]:
-            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+            # incr #3 (item #5): an example exit-code mismatch is the positive PRODUCT signal (`default="code"`),
+            # but a could-not-run exit (127/124/137/...) still wins — the artifact never produced an answer.
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr,
+                                          default="code")
             findings.append(_finding(
                 "exit_status", "major", False,
                 f"example {i} `{cmd}`: expected exit {ex['expected_status']}, got {res.returncode}",
                 example=i, command=cmd, expected=ex["expected_status"], actual=res.returncode,
-                stderr_tail=_normalize(res.stderr)[-800:],
+                stderr_tail=_normalize(res.stderr)[-800:], returncode=res.returncode,
                 failure_classification=cls,
             ))
 
@@ -193,6 +310,7 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
                     f"example {i} `{cmd}`: stdout missing expected substring {needle!r}",
                     example=i, command=cmd, expected=needle,
                     actual=_normalize(res.stdout)[-800:],
+                    failure_classification="code",        # incr #3 (item #5): the artifact RAN and produced wrong output
                 ))
 
         for needle in ex.get("expected_stderr_contains", []):
@@ -202,6 +320,7 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
                     f"example {i} `{cmd}`: stderr missing expected substring {needle!r}",
                     example=i, command=cmd, expected=needle,
                     actual=_normalize(res.stderr)[-800:],
+                    failure_classification="code",        # incr #3 (item #5): output-oracle mismatch -> product defect
                 ))
 
         if "expected_stdout" in ex:
@@ -211,6 +330,7 @@ def example_findings(profile: dict, runner: Runner, *, cwd: Optional[str] = None
                     "stdout_exact", "major", False,
                     f"example {i} `{cmd}`: normalized stdout did not match",
                     example=i, command=cmd, expected=want, actual=got,
+                    failure_classification="code",        # incr #3 (item #5): output-oracle mismatch -> product defect
                 ))
     return findings
 
@@ -260,7 +380,7 @@ def run_cli_conformance(contract: dict, runner: Runner, *, cwd: Optional[str] = 
             "artifact_missing", "critical", False,
             f"the entrypoint artifact '{missing}' is not present in the workspace — nothing was "
             f"built/delivered to verify (the implementer wrote no file, or it did not merge back)",
-            artifact=missing))
+            artifact=missing, failure_classification="code"))   # incr #3: a delivery defect -> implementer
     elif not build_broke:
         findings += example_findings(profile, runner, cwd=cwd)
 
@@ -338,13 +458,16 @@ def _library_probe_findings(res: RunResult, module: str, symbols: list) -> list[
         return [_finding("library_probe", "critical", False,
                          "the import probe emitted an unparseable result", module=module)]
     if data.get("import_error"):
-        cls = _failure_classification(detail=data["import_error"])
+        # the module the contract declares does not import: a product defect (default="code"), unless the text
+        # carries a could-not-run signal that _failure_classification recognizes first.
+        cls = _failure_classification(detail=data["import_error"], default="code")
         return [_finding("library_import", "critical", False,
                          f"module {module!r} failed to import: {data['import_error']}", module=module,
                          failure_classification=cls)]
     return [_finding(
         "exported_symbol", "major", False,
-        f"declared export {sym!r} does not resolve on module {module!r}", module=module, symbol=sym)
+        f"declared export {sym!r} does not resolve on module {module!r}", module=module, symbol=sym,
+        failure_classification="code")        # incr #3: a missing declared export is a product defect
         for sym in data.get("missing", [])]
 
 
@@ -442,12 +565,14 @@ def _json_schema_findings(data, schema: dict, path: str) -> list[dict]:
         validator = validator_cls(schema)
     except Exception as exc:  # noqa: BLE001 — an invalid declared schema is a contract defect; surface it
         return [_finding("json_schema", "major", False,
-                         f"the declared JSON Schema for '{path}' is itself invalid: {exc}", path=path)]
+                         f"the declared JSON Schema for '{path}' is itself invalid: {exc}", path=path,
+                         failure_classification="code")]
     findings = []
     for err in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):
         loc = "/".join(str(p) for p in err.path) or "(root)"
         findings.append(_finding("json_schema", "major", False,
-                                 f"'{path}' violates its schema at {loc}: {err.message}", path=path, location=loc))
+                                 f"'{path}' violates its schema at {loc}: {err.message}", path=path, location=loc,
+                                 failure_classification="code"))   # incr #3: a schema violation is a product defect
     return findings
 
 
@@ -471,11 +596,13 @@ def run_json_conformance(contract: dict, runner: Runner = None, *, cwd: Optional
                 data = json.load(fh)
         except FileNotFoundError:
             findings.append(_finding("json_missing", "critical", False,
-                                     f"declared JSON file '{path}' is not present in the workspace", path=path))
+                                     f"declared JSON file '{path}' is not present in the workspace", path=path,
+                                     failure_classification="code"))   # incr #3: undelivered output -> product defect
             continue
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             findings.append(_finding("json_parse", "critical", False,
-                                     f"'{path}' is not valid JSON: {exc}", path=path))
+                                     f"'{path}' is not valid JSON: {exc}", path=path,
+                                     failure_classification="code"))   # incr #3: malformed output -> product defect
             continue
 
         schema = spec.get("schema")
@@ -496,7 +623,8 @@ def run_json_conformance(contract: dict, runner: Runner = None, *, cwd: Optional
             if not _resolve_json_path(data, rp):
                 findings.append(_finding("json_required_path", "major", False,
                                          f"'{path}' is missing the required key path '{rp}'",
-                                         path=path, key_path=rp))
+                                         path=path, key_path=rp,
+                                         failure_classification="code"))   # incr #3: missing required field -> product defect
 
     return {
         "applicable": True,
@@ -528,9 +656,10 @@ def _rpc_profile_findings(profile: dict) -> list[dict]:
         findings.append(_rpc_finding(
             "transport", "critical", False,
             f"unsupported rpc transport {transport!r} (supported: {', '.join(_RPC_TRANSPORTS)})",
-            transport=transport))
+            transport=transport, failure_classification="code"))
     if not profile.get("calls"):
-        findings.append(_rpc_finding("calls", "major", False, "rpc contract declares no calls to verify"))
+        findings.append(_rpc_finding("calls", "major", False, "rpc contract declares no calls to verify",
+                                     failure_classification="code"))
     return findings
 
 
@@ -545,11 +674,13 @@ def _check_rpc_result(i: int, method, call: dict, result, error) -> list[dict]:
             findings.append(_rpc_finding(
                 "error_code", "major", False,
                 f"call {i} {method}: expected error code {call['expected_error_code']}, got {code!r}",
-                call=i, method=method, expected=call["expected_error_code"], actual=code))
+                call=i, method=method, expected=call["expected_error_code"], actual=code,
+                failure_classification="code"))   # incr #3: the call RAN and returned the wrong code -> product defect
         return findings
     if error is not None:
         findings.append(_rpc_finding("error", "major", False,
-                                     f"call {i} {method}: unexpected error {error!r}", call=i, method=method))
+                                     f"call {i} {method}: unexpected error {error!r}", call=i, method=method,
+                                     failure_classification="code"))   # incr #3: an unexpected error -> product defect
         return findings
     result_text = json.dumps(result, default=str)
     for needle in call.get("expected_result_contains", []):
@@ -557,7 +688,8 @@ def _check_rpc_result(i: int, method, call: dict, result, error) -> list[dict]:
             findings.append(_rpc_finding(
                 "result_contains", "major", False,
                 f"call {i} {method}: result missing expected substring {needle!r}",
-                call=i, method=method, expected=needle))
+                call=i, method=method, expected=needle,
+                failure_classification="code"))   # incr #3: result-oracle mismatch -> product defect
     return findings
 
 
@@ -583,7 +715,8 @@ def _json_rpc_call_findings(profile: dict, http_request) -> list[dict]:
             body = json.loads(_decode_http_body(resp.body))
         except ValueError:
             findings.append(_rpc_finding("response", "major", False,
-                                         f"call {i} {method}: response is not valid JSON-RPC", call=i, method=method))
+                                         f"call {i} {method}: response is not valid JSON-RPC", call=i, method=method,
+                                         failure_classification="code"))   # incr #3: malformed response -> product defect
             continue
         findings += _check_rpc_result(i, method, call, body.get("result"), body.get("error"))
     return findings
@@ -740,11 +873,14 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
         res = runner(command, cwd=cwd)
         checks_run += 1
         if res.returncode != expected:
-            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+            # incr #3: a job exit-code mismatch is the positive PRODUCT signal (`default="code"`); a could-not-run
+            # exit (127/124/137/...) still wins, so an OOM-killed job is not mistaken for a wrong answer.
+            cls = _failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr,
+                                          default="code")
             findings.append(_finding(
                 "exit_status", "major", False,
                 f"batch job `{command}`: expected exit {expected}, got {res.returncode}",
-                command=command, expected=expected, actual=res.returncode,
+                command=command, expected=expected, actual=res.returncode, returncode=res.returncode,
                 stderr_tail=_normalize(res.stderr)[-800:], failure_classification=cls))
         for art in profile.get("produced_artifacts", []):
             checks_run += 1
@@ -752,7 +888,8 @@ def run_batch_job_conformance(contract: dict, runner: Runner, *, cwd: Optional[s
             if probe.returncode != 0:
                 findings.append(_finding(
                     "produced_artifact", "major", False,
-                    f"batch job did not produce the declared artifact '{art}'", artifact=art))
+                    f"batch job did not produce the declared artifact '{art}'", artifact=art,
+                    failure_classification="code"))   # incr #3: a missing declared output -> product defect
 
     return {
         "applicable": True,
@@ -942,6 +1079,7 @@ def _http_example_findings(profile: dict, http_request) -> list[dict]:
                 "status", "major", False,
                 f"example {i} {method} {path}: expected status {ex.get('expected_status')}, got {resp.status}",
                 example=i, method=method, path=path, expected=ex.get("expected_status"), actual=resp.status,
+                failure_classification="code",        # incr #3 (item #5): the service ANSWERED with the wrong status
             ))
 
         decoded = None
@@ -953,6 +1091,7 @@ def _http_example_findings(profile: dict, http_request) -> list[dict]:
                     "body_contains", "major", False,
                     f"example {i} {method} {path}: response body missing expected substring {needle!r}",
                     example=i, method=method, path=path, expected=needle, actual=decoded,
+                    failure_classification="code",    # incr #3 (item #5): body-oracle mismatch -> product defect
                 ))
     return findings
 
@@ -977,7 +1116,7 @@ def _http_profile_findings(profile) -> list[dict]:
     return [_http_finding(
         "profile", "critical", False,
         "http_service conformance profile is missing required fields",
-        missing=missing,
+        missing=missing, failure_classification="code",   # incr #3: a malformed contract is a defect to fix, not a retry
     )]
 
 
@@ -1365,7 +1504,8 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
                 fix_hint += f" {reason}."
             findings.append(_forbidden_finding(
                 "forbidden_pattern", "major", False, detail,
-                pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint))
+                pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint,
+                failure_classification="code"))   # incr #3: a grep hit in delivered source is a fact -> product defect
     return findings
 
 
@@ -1479,7 +1619,9 @@ def run_regression_suite(contract: dict, runner: Runner, *, cwd: Optional[str] =
     findings: list[dict] = []
     if returncode != 0:
         tail = _regression_output_tail(stdout, stderr)
-        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr)
+        # incr #3: a once-green suite that now exits nonzero is a real regression (`default="code"`); a
+        # could-not-run exit (missing pytest=127, timeout=124, OOM=137, ...) is still classified could-not-run.
+        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr, default="code")
         if cls == "code":
             detail = (f"regression suite `{command}`: expected exit 0, got {returncode} — "
                       "the change broke previously-working code")
@@ -1582,7 +1724,9 @@ def run_static_checks(contract: dict, runner: Runner, *, cwd: Optional[str] = No
         stdout = getattr(res, "stdout", "")
         stderr = getattr(res, "stderr", "")
         tail = _static_check_output_tail(stdout, stderr)
-        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr)
+        # incr #3: an analyzer that exits nonzero reported real errors in the artifact (`default="code"`); a
+        # could-not-run exit (analyzer not installed=127, timeout=124, ...) stays could-not-run.
+        cls = _failure_classification(returncode=returncode, stdout=stdout, stderr=stderr, default="code")
         if cls == "code":
             detail = (f"static check `{command}`: expected exit 0, got {returncode} — the analyzer reported errors in "
                       "the produced artifact (undefined names / unresolved imports / syntax)")

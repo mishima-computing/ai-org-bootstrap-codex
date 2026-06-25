@@ -163,8 +163,14 @@ def test_build_failure_is_critical_and_skips_examples():
     (f,) = rep["findings"]
     assert f["check"] == "build_and_install" and f["severity"] == "critical", f
     assert "could not build wheel" in f["stderr_tail"], f
+    # incr #3 (narrowed flip): a build/install that RAN and failed is an ESTABLISHED product-failure signal —
+    # a package that cannot be built is the artifact's own defect, NOT a genuinely-ambiguous nonzero. It stays
+    # `code` / VERIFIED_PRODUCT_FAILURE / implementer (a could-not-run exit like 127 would still win first).
     assert f["failure_classification"] == "code", f
-    print("ok  build failure -> single critical finding, examples skipped (no derived noise)")
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert f["repair_route"] == "implementer", f
+    assert f["phase"] == "build", f
+    print("ok  build failure -> single critical CODE finding (implementer), examples skipped (no derived noise)")
 
 
 def test_normalization_tolerates_volatile_output():
@@ -1335,7 +1341,10 @@ def test_http_service_start_failure_reports_exit_and_captured_stderr():
     assert not rep["passed"] and finding["check"] == "lifecycle", rep
     assert finding["returncode"] == 7 and "boot exploded" in finding["stderr_tail"], finding
     assert finding.get("error") != "AttributeError", finding
-    assert finding["failure_classification"] == "code", finding
+    # incr #3 safe flip: a service that exits nonzero on boot is GENUINELY AMBIGUOUS (a code/config bug vs a
+    # missing host dependency), so it is `undetermined` -> clean-retry/unverified (#1/#2), not blamed as `code`.
+    assert finding["failure_classification"] == "undetermined", finding
+    assert finding["repair_route"] != "implementer", finding
     print("ok  http_service: failed start reports real exit code and captured stderr")
 
 
@@ -2044,6 +2053,99 @@ def test_goal_acceptance_profile_validation_and_no_boot_on_invalid():
     assert bad["verified"] is False and bad["probes_run"] == 0, bad
     assert any(f["check"] == "profile" for f in bad["findings"]), bad
     print("ok  goal acceptance: profile shape-checked; invalid contract -> no boot, verified False")
+
+
+# ── incr #3: the producer FINDINGS-ROUTER (explicit routing model + the SAFE flip of the ambiguous default) ──
+
+def test_ambiguous_nonzero_exit_is_undetermined_not_code():
+    # the safe flip: a plain nonzero exit with NO could-not-run signal and NO established code signal is
+    # GENUINELY AMBIGUOUS -> `undetermined` (NOT `code`). Safe only because #1 fail-closes it as unverified.
+    assert conf._failure_classification(returncode=1, stdout="some output", stderr="boom") == "undetermined"
+    # the routing model then keeps it OFF the implementer repair loop (could-not-run/inconclusive).
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": "boom"}, False)
+    assert f["failure_classification"] == "undetermined", f
+    assert f["gate_state"] == "INDETERMINATE" and f["repair_route"] != "implementer", f
+    assert f["repair_route"] == "clean_retry" and f["retryable"] is True, f
+    assert not cp._finding_blocks_convergence(f), f               # ambiguous never blocks-as-code
+    # an ORACLE/ANALYZER call site may opt a plain nonzero INTO `code` (its contract makes nonzero a product
+    # signal) — the flip moves the DEFAULT, it does not remove the deliberate-code path.
+    assert conf._failure_classification(returncode=1, stdout="", stderr="", default="code") == "code"
+    print("ok  incr#3: an ambiguous nonzero exit -> undetermined (unverified), not blamed as code")
+
+
+def test_positive_signal_exit_codes_are_resource_or_infra_not_code():
+    # the RESOURCE HOLE: a shell reports a signal death as POSITIVE 128+N. 137 (SIGKILL/OOM), 134 (SIGABRT),
+    # 139 (SIGSEGV) -> resource; 143 (SIGTERM), 130 (SIGINT) -> infra. None is a product `code` defect.
+    assert conf._failure_classification(returncode=137) == "resource"   # 128+9 OOM-kill
+    assert conf._failure_classification(returncode=134) == "resource"   # 128+6 SIGABRT
+    assert conf._failure_classification(returncode=139) == "resource"   # 128+11 SIGSEGV
+    assert conf._failure_classification(returncode=143) == "infra"      # 128+15 SIGTERM
+    assert conf._failure_classification(returncode=130) == "infra"      # 128+2 SIGINT
+    # even when the call site asks for default="code" (an oracle gate), a signal death still wins as could-not-run.
+    assert conf._failure_classification(returncode=137, default="code") == "resource"
+    f = conf._with_failure_classification({"passed": False, "returncode": 137}, False)
+    assert f["gate_state"] == "COULD_NOT_RUN_INFRA" and f["repair_route"] == "clean_retry", f
+    assert not cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: positive 137/134/139 -> resource, 143/130 -> infra (signal death, never code)")
+
+
+def test_module_not_found_in_ran_output_is_still_code():
+    # an established CODE signal must SURVIVE the flip: a ModuleNotFoundError in the OUTPUT of a command that
+    # actually RAN (exit != 127) is the product's own missing import -> `code` -> implementer.
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    # but the SAME text at exit 127 is command-not-found -> infra (the host gap wins; checked before code).
+    assert conf._failure_classification(returncode=127, stderr="No module named pytest") == "infra"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE" and f["phase"] == "dependency", f
+    assert cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: ModuleNotFoundError in ran output (exit 1) -> still code/implementer (blocks)")
+
+
+def test_example_comparison_mismatch_is_code_and_blocks():
+    # item #5: the stdout/exit oracle mismatch is the POSITIVE product signal -> code/implementer, and it BLOCKS.
+    profile = {"entrypoint": {"invocation": "mytool"},
+               "examples": [{"invocation": "run", "expected_status": 0,
+                             "expected_stdout_contains": ["DONE"]}]}
+    runner = fake_runner({"mytool run": R(3, "nope\n", "")})       # wrong exit AND wrong stdout, plain exit 3
+    rep = conf.run_cli_conformance(_cli_contract(profile), runner)
+    assert not rep["passed"], rep
+    by_check = {f["check"]: f for f in rep["findings"]}
+    for check in ("exit_status", "stdout_contains"):
+        f = by_check[check]
+        assert f["failure_classification"] == "code", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE" and f["repair_route"] == "implementer", f
+        assert cp._finding_blocks_convergence(f), f
+    assert cp._apply_conformance_gate([], rep, "block") == rep["findings"], "oracle mismatch must block"
+    print("ok  incr#3: an example-comparison mismatch -> code/implementer (blocks convergence)")
+
+
+def test_finding_blocks_convergence_routes_on_repair_route_with_legacy_code_fallback():
+    # the gate decision moves onto repair_route, KEEPING the legacy failure_classification=="code" fallback.
+    assert cp._finding_blocks_convergence({"passed": False, "repair_route": "implementer"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "clean_retry"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "escalate"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "none"})
+    # legacy findings (predating the routing model, NO repair_route) still block on the code class.
+    assert cp._finding_blocks_convergence({"passed": False, "failure_classification": "code"})
+    assert not cp._finding_blocks_convergence({"passed": False, "failure_classification": "infra"})
+    assert not cp._finding_blocks_convergence({"passed": False, "failure_classification": "undetermined"})
+    # a passed finding never blocks, regardless of route.
+    assert not cp._finding_blocks_convergence({"passed": True, "repair_route": "implementer"})
+    print("ok  incr#3: _finding_blocks_convergence routes on repair_route; legacy ==code path still works")
+
+
+def test_unsupported_env_infra_routes_to_escalate_not_retry():
+    # a could-not-run that a clean retry will NOT fix (the host lacks the tool) routes to ESCALATE, not the
+    # implementer and not an indefinite retry — kept as `infra` for back-compat, distinguished only in routing.
+    f = conf._with_failure_classification(
+        {"passed": False, "failure_classification": "infra",
+         "detail": "static check `pyflakes .`: command not found"}, False)
+    assert f["failure_classification"] == "infra", f               # back-compat label unchanged
+    assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV" and f["repair_route"] == "escalate", f
+    assert f["retryable"] is False and not cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: an unsupported-env infra -> escalate (not implementer, not retried)")
 
 
 if __name__ == "__main__":

@@ -869,9 +869,15 @@ def _gate_error_report(source: str, detail: str) -> dict:
 
 
 def _finding_blocks_convergence(finding: dict) -> bool:
+    """A finding drives the implementer repair loop (and blocks convergence) iff its EXPLICIT routing model
+    (incr #3) sends it to the implementer — i.e. a VERIFIED product/code defect. A could-not-run / inconclusive
+    finding (`clean_retry` / `escalate` / `none`) does NOT: it routes to the incr-#2 clean retry and, if it
+    reproduces, fails closed as terminally UNVERIFIED (incr #1) — it never masquerades as a product defect.
+    LEGACY FALLBACK during migration: findings predating the routing model still block on
+    `failure_classification == "code"`, so nothing regresses while producers are migrated."""
     if not isinstance(finding, dict) or finding.get("passed"):
         return False
-    return finding.get("failure_classification") == "code"
+    return finding.get("repair_route") == "implementer" or finding.get("failure_classification") == "code"
 
 
 def _advisory_gate_findings(report: dict | None) -> list[dict]:
