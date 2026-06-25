@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import conformance as conf
 import controller_pipeline as cp
+import runner_factory
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
@@ -882,7 +883,7 @@ def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
                "findings": [{"check": "exit_status", "severity": "major", "passed": False,
                              "failure_classification": "code"}]}
     saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_GATE_MODE)
-    cp._shadow_conformance = lambda repo, results, run_id: failing
+    cp._shadow_conformance = lambda repo, results, run_id, runner=None: failing
     cp._secret_scan = lambda repo, run_id: None
     cp._fuzz_cli = lambda repo, results, run_id: None
     try:
@@ -2301,6 +2302,177 @@ def test_unsupported_env_infra_routes_to_escalate_not_retry():
     assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV" and f["repair_route"] == "escalate", f
     assert f["retryable"] is False and not cp._finding_blocks_convergence(f), f
     print("ok  incr#3: an unsupported-env infra -> escalate (not implementer, not retried)")
+
+
+# ── runner_factory: the box-backed conformance runner (host-injectable execution via AI_ORG_RUNNER_CMD) ──────
+# These tests drive a FAKE shim script (a tiny stand-in for a box CLI wrapper) and assert conformance runs
+# THROUGH it, that the transport boundary is honest (a shim that can't run -> infra/could-not-run, never a
+# fabricated pass and never product blame), and that the unset path is the plain subprocess runner unchanged.
+
+# A shim that EXECUTES the framed command (mirroring a box) and frames the result back over stdout.
+_EXEC_SHIM = r'''#!/usr/bin/env python3
+import sys, subprocess
+MAGIC = b"AOBRUN1"
+def read_block(buf):
+    len_line, rest = buf.split(b"\n", 1)
+    n = int(len_line)
+    return rest[:n], rest[n:]
+cwd = sys.argv[1] if len(sys.argv) > 1 else ""
+buf = sys.stdin.buffer.read()
+magic, rest = buf.split(b"\n", 1)
+assert magic == MAGIC, magic
+cmd_b, rest = read_block(rest)
+stdin_b, rest = read_block(rest)
+proc = subprocess.run(cmd_b.decode(), shell=True, cwd=(cwd or None), input=stdin_b,
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+out, err = proc.stdout or b"", proc.stderr or b""
+sys.stdout.buffer.write(b"".join([MAGIC, b"\n", str(proc.returncode).encode(), b"\n",
+                                  str(len(out)).encode(), b"\n", out,
+                                  str(len(err)).encode(), b"\n", err]))
+'''
+
+# A shim that FAILS at the transport layer: it never produces a frame and exits nonzero (box unavailable).
+_FAILING_SHIM = "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('box unavailable\\n')\nsys.exit(3)\n"
+
+# A shim that exits 0 but emits a MALFORMED (non-AOBRUN1) body — a corrupt/garbage frame.
+_MALFORMED_SHIM = "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('not a frame at all')\n"
+
+
+def _install_shim(d, body):
+    p = Path(d) / "shim.py"
+    p.write_text(body)
+    return f"{sys.executable} {shlex.quote(str(p))}"
+
+
+from contextlib import contextmanager  # noqa: E402 — local to the runner_factory tests below
+
+
+@contextmanager
+def _runner_env(**updates):
+    old = {k: os.environ.get(k) for k in updates}
+    try:
+        for k, v in updates.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_runner_factory_routes_through_shim_passing_rc_stdout_stderr():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("python3 -c \"import sys; sys.stdout.write('OUT-data'); "
+                         "sys.stderr.write('ERR-data'); sys.exit(7)\"", cwd=d)
+    assert res.returncode == 7, res                            # the COMMAND's exit, surfaced through the frame
+    assert res.stdout == "OUT-data" and res.stderr == "ERR-data", res
+    print("ok  runner_factory: conformance runs THROUGH the shim; gates see its rc/stdout/stderr")
+
+
+def test_runner_factory_framing_survives_newlines_and_sentinel_in_output():
+    # length-prefixed framing must carry output that contains newlines AND the sentinel string itself.
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _EXEC_SHIM)
+        payload = "line1\nAOBRUN1\nline3\n"
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("printf %s " + shlex.quote(payload), cwd=d)
+    assert res.returncode == 0 and res.stdout == payload, res
+    print("ok  runner_factory: length-prefixed framing carries newlines + the sentinel verbatim")
+
+
+def test_runner_factory_passes_cwd_and_stdin_through_the_shim():
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "marker.txt").write_text("INSIDE-CWD")
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            cwd_res = runner("cat marker.txt", cwd=d)           # relative path -> proves cwd was applied
+            stdin_res = runner("cat", cwd=d, stdin="piped-payload")
+    assert cwd_res.stdout == "INSIDE-CWD", cwd_res
+    assert stdin_res.stdout == "piped-payload", stdin_res
+    print("ok  runner_factory: cwd + command stdin are delivered to the shim")
+
+
+def test_runner_factory_unset_uses_subprocess_runner_unchanged():
+    sentinel = object()
+    saved = conf.subprocess_runner
+    try:
+        conf.subprocess_runner = lambda *a, **k: sentinel
+        with _runner_env(AI_ORG_RUNNER_CMD=None):
+            got = runner_factory.get_conformance_runner()
+        with _runner_env(AI_ORG_RUNNER_CMD="   "):              # blank/whitespace also means "no shim"
+            got_blank = runner_factory.get_conformance_runner()
+    finally:
+        conf.subprocess_runner = saved
+    assert got is sentinel and got_blank is sentinel, (got, got_blank)
+    print("ok  runner_factory: AI_ORG_RUNNER_CMD unset -> conformance.subprocess_runner unchanged")
+
+
+def test_runner_factory_shim_transport_failure_is_infra_not_product_not_pass():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _FAILING_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("echo should-not-matter", cwd=d)
+    assert res.returncode == 127 and res.returncode != 0, res   # could-not-run, NOT a fabricated pass (0)
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert cls == "infra", (cls, res)                           # routes to escalate/clean-retry/unverified
+    assert cls != "code", res                                  # NEVER blamed on product code
+    print("ok  runner_factory: a shim that can't run (nonzero transport exit) -> infra/could-not-run")
+
+
+def test_runner_factory_unrunnable_shim_is_infra():
+    with _runner_env(AI_ORG_RUNNER_CMD="/no/such/runner-shim-xyz", AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+        runner = runner_factory.get_conformance_runner()
+        res = runner("echo hi")
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert res.returncode == 127 and cls == "infra", (cls, res)
+    print("ok  runner_factory: an unrunnable/missing shim -> infra (the isolation did not happen, honestly)")
+
+
+def test_runner_factory_malformed_frame_is_infra():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _MALFORMED_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("echo hi", cwd=d)
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert res.returncode == 127 and cls == "infra", (cls, res)
+    print("ok  runner_factory: a malformed/absent result frame -> infra (not a silent pass)")
+
+
+def test_runner_factory_fallback_opt_in_runs_locally_on_transport_failure():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _FAILING_SHIM)                   # shim can't run -> would be infra...
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS="1"):
+            runner = runner_factory.get_conformance_runner()   # ...but the explicit opt-in runs it locally
+            res = runner("python3 -c \"print('local-ran')\"", cwd=d)
+    assert res.returncode == 0 and res.stdout.strip() == "local-ran", res
+    print("ok  runner_factory: AI_ORG_RUNNER_FALLBACK_SUBPROCESS opt-in runs locally when the box is absent")
+
+
+def test_runner_factory_shim_drives_real_conformance_gate_end_to_end():
+    # End-to-end: a real CLI contract + artifact, with conformance executing every check THROUGH the shim.
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "mytool").write_text("#!/bin/sh\necho ok\n")
+        os.chmod(Path(d) / "mytool", 0o755)
+        profile = {"entrypoint": {"invocation": "./mytool"}, "examples": [
+            {"invocation": "", "expected_status": 0, "expected_stdout_contains": ["ok"]}]}
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            rep = conf.run_cli_conformance(_cli_contract(profile), runner, cwd=d)
+    assert rep["applicable"] and rep["passed"], rep
+    print("ok  runner_factory: conformance passes a real artifact when executed end-to-end through the shim")
 
 
 if __name__ == "__main__":

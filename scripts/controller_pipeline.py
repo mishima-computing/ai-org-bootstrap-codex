@@ -27,6 +27,7 @@ import controller_run  # noqa: E402
 from controller_evidence import RunJournal, sha256_file  # noqa: E402
 from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # noqa: E402
 import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
+import runner_factory  # noqa: E402  — host-injectable conformance runner (box isolation via AI_ORG_RUNNER_CMD)
 import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
 import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
 import fuzz_cli  # noqa: E402  — ADR-0009 #3: black-box CLI property fuzzing (robustness oracle)
@@ -977,7 +978,7 @@ def _stream_retry_evidence(repo, run_id: str, dimension: str, attempt: int, repo
         "ts": _iso8601_utc()})
 
 
-def _rerun_dimension(repo, dimension: str, results: dict, run_id: str) -> dict | None:
+def _rerun_dimension(repo, dimension: str, results: dict, run_id: str, runner=None) -> dict | None:
     """Re-run ONE verification dimension's FULL gate in a FRESH execution context (ADR-0006: the SAME check, not a
     narrowed one). `preflight` is contract-only (no workspace, no subprocess) so it re-runs in place; the
     workspace-reading gates (conformance / secret / fuzz) re-run with a FRESH subprocess on a FRESH git worktree
@@ -997,11 +998,21 @@ def _rerun_dimension(repo, dimension: str, results: dict, run_id: str) -> dict |
         cwd = Path(repo)                               # worktree unavailable -> fresh subprocess only
     try:
         if dimension == "conformance":
-            return _shadow_conformance(cwd, results, run_id, runner=conformance.subprocess_runner())
+            # Prefer the caller-threaded conformance runner (the box-backed executor an entry handed
+            # run_pipeline) so the clean retry runs conformance through the SAME boundary the first pass used;
+            # fall back to the factory (local subprocess OR an AI_ORG_RUNNER_CMD box shim) only when none was
+            # supplied. The runner spawns a FRESH subprocess per call, so reusing the object still gives the
+            # retry the fresh execution context ADR-0006 wants — the engine never imports host code either way.
+            return _shadow_conformance(cwd, results, run_id,
+                                       runner=runner or runner_factory.get_conformance_runner())
         if dimension == "secret":
             return _secret_scan(cwd, run_id)
         if dimension == "fuzz":
-            return _fuzz_cli(cwd, results, run_id, runner=conformance.subprocess_runner(timeout=15))
+            # Fuzz keeps its OWN short-timeout runner (15s default — fuzz_cli calls the runner without an
+            # explicit per-iteration timeout, so the runner's default IS the per-iteration bound; the threaded
+            # conformance runner's 60s default would silently relax it). Box isolation still holds via the
+            # factory when AI_ORG_RUNNER_CMD is set. The threaded `runner` is conformance's, not fuzz's.
+            return _fuzz_cli(cwd, results, run_id, runner=runner_factory.get_conformance_runner(timeout=15))
         return None
     finally:
         if add.returncode == 0:
@@ -1010,7 +1021,7 @@ def _rerun_dimension(repo, dimension: str, results: dict, run_id: str) -> dict |
         shutil.rmtree(wt, ignore_errors=True)
 
 
-def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict) -> tuple[dict, list[dict]]:
+def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict, runner=None) -> tuple[dict, list[dict]]:
     """incr #2 orchestrator — for each dimension left UNVERIFIED by a non-code could-not-run, re-run its full
     gate in a fresh context up to a bounded number of retries (1 by default; 2 for a known-transient infra
     class). Returns (updated gate_ctx, code_findings): a CLEARED dimension's findings become clean (it drops out
@@ -1025,7 +1036,8 @@ def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict) ->
     for dimension, advisory in unverified.items():
         cap = CLEAN_RETRY_TRANSIENT_CAP if _is_transient_infra(advisory) else CLEAN_RETRY_DEFAULT_CAP
         for attempt in range(1, cap + 1):
-            report = _rerun_dimension(repo, dimension, results, f"{run_id}-retry{attempt}-{dimension}")
+            report = _rerun_dimension(repo, dimension, results, f"{run_id}-retry{attempt}-{dimension}",
+                                      runner=runner)
             verdict = _retry_verdict(report)
             _stream_retry_evidence(repo, run_id, dimension, attempt, report, verdict)
             gate_ctx[dimension] = list((report or {}).get("findings") or [])
@@ -1040,9 +1052,10 @@ def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict) ->
 
 def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
     """Run the CLI conformance gate over the implemented artifact and stream the result. Returns the report
-    (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
-    a fake. Fail-soft: any error is logged to the stream and swallowed — a verification gate must never break
-    the build it observes."""
+    (or None when not applicable / disabled). `runner` defaults to runner_factory.get_conformance_runner() —
+    the local bounded subprocess, OR a host-injected box shim when AI_ORG_RUNNER_CMD is set (the engine never
+    imports host code); tests inject a fake. Fail-soft: any error is logged to the stream and swallowed — a
+    verification gate must never break the build it observes."""
     if CONFORMANCE_GATE_MODE == "off":
         return None
     contract = results.get(AUFHEBEN_ROLE)
@@ -1050,7 +1063,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
         return None
     try:
         report = conformance.run_conformance(
-            contract, runner or conformance.subprocess_runner(), cwd=str(repo))
+            contract, runner or runner_factory.get_conformance_runner(), cwd=str(repo))
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "conformance", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
@@ -1206,7 +1219,7 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
                    or (os.path.join(os.path.dirname(stream_log), "regressions.jsonl") if stream_log else None)
                    or regression_corpus.default_path(repo))
     try:
-        report = fuzz_cli.fuzz(profile, runner or conformance.subprocess_runner(timeout=15),
+        report = fuzz_cli.fuzz(profile, runner or runner_factory.get_conformance_runner(timeout=15),
                                cwd=str(repo), corpus_path=corpus_path)
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "cli-fuzz", "type": "gate_error", "run_id": run_id, "detail": repr(exc)})
@@ -1223,7 +1236,7 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
     return report
 
 
-def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
+def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dict | None, runner=None):
     """gate-behind — RE-RUN ONLY the CHEAP deterministic gates (conformance / preflight / secret / fuzz) on the
     CURRENT artifact, with NO linon contribution. Returns (findings, gate_ctx, blocked_by):
       * `findings`   — the CURRENT-ITERATION BLOCKING cheap-gate findings (empty iff every cheap gate is clean).
@@ -1236,7 +1249,7 @@ def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dic
     A non-empty `blocked_by` lets the caller SKIP the expensive linon verifier on a diff that repairs no matter
     what linon says — saving its tokens AND its wall-clock. preflight is contract-bound, so the caller re-runs
     it on the (possibly repaired) contract and passes its report in."""
-    conf = _shadow_conformance(repo, results, run_id)
+    conf = _shadow_conformance(repo, results, run_id, runner=runner)
     secret = _secret_scan(repo, run_id)
     fuzz = _fuzz_cli(repo, results, run_id)
     findings: list[dict] = []
@@ -1480,7 +1493,11 @@ def _has_valid_producer_for_aufheben(predecessors: dict[str, list[str]], produce
 
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                  max_repair_iterations: int = 3, max_parallel: int = 1,
-                 goal_context=None) -> dict:
+                 goal_context=None, runner=None) -> dict:
+    # `runner` is the conformance executor (a conformance.Runner). None -> each gate site falls back to
+    # runner_factory.get_conformance_runner(), which is the local bounded subprocess OR a host-injected box
+    # shim when AI_ORG_RUNNER_CMD is set. An entry (controller_goal) may supply one explicitly; the engine
+    # never imports host code either way.
     if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
@@ -1534,10 +1551,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
                 break
             inputs = {u: results[u] for u in predecessors[role] if u in results}
-            runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
-                      else _execute_stage)
-            outcomes[role] = runner(repo, role, entries[role], objective, inputs,
-                                    f"{run_id}-{role}", cache, goal_context=goal_context)
+            stage_runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
+                            else _execute_stage)               # NB: not the conformance `runner` param below
+            outcomes[role] = stage_runner(repo, role, entries[role], objective, inputs,
+                                          f"{run_id}-{role}", cache, goal_context=goal_context)
         if pipeline_failed:
             break
         for role in wave:                              # record deterministically in wave order
@@ -1582,7 +1599,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     gate_ctx: dict = {}
     findings: list[dict] = _linon_findings(results.get("linon"))
     if not pipeline_failed:
-        cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report)
+        cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report,
+                                                                    runner=runner)
         if blocked_by:
             _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": run_id,
                                   "iteration": 0, "reason": blocked_by, "ts": _iso8601_utc()})
@@ -1688,7 +1706,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             repair_run_id = f"{run_id}-repair{repair_iterations}"
             repair_preflight = _contract_preflight(repo, results, repair_run_id)
             cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, repair_run_id,
-                                                                        repair_preflight)
+                                                                        repair_preflight, runner=runner)
             if blocked_by:
                 _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": repair_run_id,
                                       "iteration": repair_iterations, "reason": blocked_by,
@@ -1730,7 +1748,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     # a blocking finding (block/repair as normal). Skipped when the pipeline already failed for a non-gate reason
     # (no proven artifact to retry against). ADR-0011/0016: a retry that still cannot verify NEVER passes.
     if not pipeline_failed and _unverified_gate_findings(gate_ctx):
-        gate_ctx, retry_code_findings = _clean_retry_unverified(repo, results, run_id, gate_ctx)
+        gate_ctx, retry_code_findings = _clean_retry_unverified(repo, results, run_id, gate_ctx, runner=runner)
         findings = findings + retry_code_findings
 
     converged = bool(required_ok.get("linon")) and not findings

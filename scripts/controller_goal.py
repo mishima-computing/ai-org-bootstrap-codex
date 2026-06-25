@@ -257,7 +257,7 @@ def _max_parallel() -> int:
     return max(1, max_parallel)
 
 
-def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
+def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None, runner=None):
     """Call run_pipeline with goal_context AND design-wave parallelism when the implementation accepts them.
 
     The goal path historically called run_pipeline with the serial default (max_parallel=1), so per-leaf design
@@ -279,6 +279,10 @@ def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
             kwargs["goal_context"] = goal_context
         if "max_parallel" in params or has_var_kw:
             kwargs["max_parallel"] = max_parallel
+        # Forward a host-injected conformance runner ONLY when explicitly supplied (default None stays out of
+        # kwargs, so run_pipeline's own None-default -> runner_factory wins for the common box/local path).
+        if runner is not None and ("runner" in params or has_var_kw):
+            kwargs["runner"] = runner
         if kwargs:
             return run_pipeline(wt, objective, run_id, **kwargs)
     except (TypeError, ValueError):
@@ -315,7 +319,7 @@ def _out_of_scope(changed, scope) -> list:
 
 
 def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_context=None,
-                     defer_merge: bool = False) -> dict:
+                     defer_merge: bool = False, runner=None) -> dict:
     """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off the leaf base, so parallel leaves
     never collide on the shared repo (per-run isolation, ADR-0009). Returns
     {"outcome": "converged"|"unverified"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
@@ -358,7 +362,7 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
     handed_off = False
     try:
         try:
-            result = _call_run_pipeline(run_pipeline, wt, task["objective"], run_id, goal_context)
+            result = _call_run_pipeline(run_pipeline, wt, task["objective"], run_id, goal_context, runner=runner)
         except Exception as exc:                               # noqa: BLE001 — a run_pipeline CRASH (a harness/
             # setup error, NOT carrier work): the registry/imports/worktree, e.g. AI_ORG_ROOT unset -> the
             # registry yaml missing. Surface it LOUDLY and classify it "crash"; NEVER swallow it. A swallowed

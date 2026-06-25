@@ -141,7 +141,7 @@ def test_infra_gate_result_is_unverified_not_clean_green():
             [], {"conformance": [infra_finding]}, [])
         # incr #2: the clean-retry now runs before the verdict — make it REPRODUCE the infra (the could-not-run
         # is not a one-shot transient here), so the dimension stays terminally unverified as #1 intends.
-        cp._rerun_dimension = lambda repo, dimension, results, run_id: {
+        cp._rerun_dimension = lambda repo, dimension, results, run_id, runner=None: {
             "applicable": True, "passed": False, "findings": [infra_finding], "checks_run": 1}
         with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
             result = cp.run_pipeline(tmp, "demo objective", "r-infra-unverified", cache=False, max_parallel=1)
@@ -190,7 +190,7 @@ def test_infra_conformance_finding_streams_but_does_not_block_gate_behind():
 
     events = []
     saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp._stream_append, cp.CONFORMANCE_GATE_MODE)
-    cp._shadow_conformance = lambda repo, results, run_id: infra
+    cp._shadow_conformance = lambda repo, results, run_id, runner=None: infra
     cp._secret_scan = lambda repo, run_id: None
     cp._fuzz_cli = lambda repo, results, run_id: None
     cp._stream_append = lambda repo, event: events.append(event)
@@ -271,7 +271,7 @@ def _run_with_clean_retry(*, gate_ctx, rerun, max_repair_iterations=3, run_id="r
     tmp = Path(tempfile.mkdtemp(prefix="cp-clean-retry-"))
     calls = []
 
-    def counted_rerun(repo, dimension, results, run_id):
+    def counted_rerun(repo, dimension, results, run_id, runner=None):
         calls.append(dimension)
         return rerun(dimension, len([d for d in calls if d == dimension]))
 
@@ -366,6 +366,89 @@ def test_is_transient_infra_and_retry_verdict_classifiers():
     assert cp._retry_verdict({"applicable": True, "passed": False,
                               "findings": [_code_finding()]}) == "code"
     print("ok  transient-infra + retry-verdict classifiers behave as specified")
+
+
+def test_runner_param_threads_cheap_gate_to_shadow_conformance():
+    # The conformance runner injected at _cheap_gate_findings must reach _shadow_conformance verbatim — the
+    # clean-boundary thread that lets a box host provide isolated execution without the engine importing it.
+    sentinel = object()
+    captured = {}
+    saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli)
+    try:
+        def fake_shadow(repo, results, run_id, runner=None):
+            captured["runner"] = runner
+            return None
+        cp._shadow_conformance = fake_shadow
+        cp._secret_scan = lambda repo, run_id: None
+        cp._fuzz_cli = lambda repo, results, run_id: None
+        cp._cheap_gate_findings("/tmp/leaf", {"linon": {"findings": []}}, "run-thread", None, runner=sentinel)
+    finally:
+        cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli = saved
+    assert captured.get("runner") is sentinel, captured
+    print("ok  runner threads _cheap_gate_findings -> _shadow_conformance verbatim")
+
+
+def test_runner_param_threads_run_pipeline_to_cheap_gate_findings():
+    # And the runner threads the whole way from the run_pipeline entry down to _cheap_gate_findings, so an
+    # entry (controller_goal) can hand the engine a box-backed runner with default None everywhere else.
+    sentinel = object()
+    captured = {}
+    tmp = Path(tempfile.mkdtemp(prefix="cp-runner-thread-"))
+
+    def fake_execute(repo, role, entry, objective, inputs, stage_run_id, cache, **kwargs):
+        result = {"role_id": role}
+        if role == cp.AUFHEBEN_ROLE:
+            result = {"role_id": cp.AUFHEBEN_ROLE, "files_allowed_to_change": ["demo.txt"],
+                      "files_not_allowed_to_change": []}
+        elif role == "linon":
+            result = {"role_id": "linon", "findings": []}
+        return True, result, {"ok": True, "attempts": [], "changed_files": []}, {
+            "role": role, "run_id": stage_run_id, "ok": True}
+
+    def fake_cheap(repo, results, run_id, preflight_report, runner=None):
+        captured["runner"] = runner
+        return [], {}, []
+
+    saved = (cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings)
+    try:
+        cp._execute_stage = fake_execute
+        cp._preflight_gate = lambda *a, **k: (None, False)
+        cp._cheap_gate_findings = fake_cheap
+        with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+            cp.run_pipeline(tmp, "demo objective", "r-runner", cache=False, max_parallel=1, runner=sentinel)
+    finally:
+        cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings = saved
+    assert captured.get("runner") is sentinel, captured
+    print("ok  runner threads run_pipeline -> _cheap_gate_findings (default None elsewhere)")
+
+
+def test_runner_param_threads_run_pipeline_to_clean_retry_rerun():
+    # And the SAME runner reaches the bounded clean-retry's per-dimension re-run: a dimension left unverified by
+    # a non-code could-not-run is re-run via _rerun_dimension, which must use the caller-threaded conformance
+    # runner (not a fresh factory one), so a box-backed runner an entry injected isolates the retry too.
+    sentinel = object()
+    captured = {}
+    tmp = Path(tempfile.mkdtemp(prefix="cp-runner-retry-"))
+
+    def capturing_rerun(repo, dimension, results, run_id, runner=None):
+        captured["runner"] = runner
+        return _infra_report()                              # reproduce -> stays unverified, bounded as usual
+
+    # cheap gates: no BLOCKING findings (linon runs, loop converges) but a non-clean gate_ctx -> exactly the
+    # "converged but a dimension could not be proven green" state the clean retry exists to resolve.
+    saved = (cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings, cp._rerun_dimension)
+    try:
+        cp._execute_stage = _fake_clean_execute
+        cp._preflight_gate = lambda *a, **k: (None, False)
+        cp._cheap_gate_findings = lambda *a, **k: ([], {"conformance": [_infra_finding()]}, [])
+        cp._rerun_dimension = capturing_rerun
+        with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+            cp.run_pipeline(tmp, "demo objective", "r-runner-retry", cache=False, max_parallel=1,
+                            runner=sentinel)
+    finally:
+        (cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings, cp._rerun_dimension) = saved
+    assert captured.get("runner") is sentinel, captured
+    print("ok  runner threads run_pipeline -> _clean_retry_unverified -> _rerun_dimension verbatim")
 
 
 if __name__ == "__main__":
