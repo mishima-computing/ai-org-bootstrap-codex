@@ -11,6 +11,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -900,6 +901,137 @@ def _unverified_gate_findings(gate_ctx: dict | None) -> dict:
     return out
 
 
+# ── incr #2: BOUNDED AUTONOMOUS CLEAN-RETRY of an UNVERIFIED dimension ──────────────────────────────────────
+# With the #1 consumer fail-close, a single TRANSIENT infra hiccup (a one-shot environment failure) would now
+# terminally fail an otherwise-good leaf. So before a dimension is declared terminally unverified, RE-RUN THAT
+# DIMENSION ONLY — its FULL gate (ADR-0006: the SAME check, never narrowed), not the whole leaf and not the
+# code-repair loop — in a FRESH execution context: a fresh subprocess and, where the gate reads the workspace, a
+# fresh git worktree on the SAME commit. Autonomous SLA (NO human in the loop mid-run):
+#   cleared    -> the dimension now executes AND passes: it is verified, the leaf proceeds normally.
+#   reproduced -> the SAME non-code could-not-run recurs: the dimension stays terminally unverified (the #1
+#                 fail-close then applies — terminal unverified leaf, not done, not merged).
+#   code       -> the retry reveals a real product defect: it is classified `code` and folds into the blocking
+#                 findings (it blocks/repairs as normal, never papered over as infra).
+# Bounded: 1 clean retry by default; 2 ONLY for known-transient infra classes (image-pull / DNS / runner
+# eviction / a transient port or connection error). NEVER unbounded. Code defects already fold into `findings`
+# during the loop (the normal repair path) and are filtered out of the unverified set, so they never enter this
+# retry path — only non-code "could-not-run" dimensions do. (busy-port is solved at the source —
+# conformance._profile_with_ephemeral_service_port — so the retry is for the RESIDUAL transient infra only.)
+CLEAN_RETRY_DEFAULT_CAP = int(os.environ.get("CLEAN_RETRY_CAP", "1"))             # retries beyond the first run
+CLEAN_RETRY_TRANSIENT_CAP = int(os.environ.get("CLEAN_RETRY_TRANSIENT_CAP", "2"))  # known-transient infra only
+_TRANSIENT_INFRA_RE = re.compile(
+    r"(image ?pull|errimagepull|imagepullbackoff|"                                   # image-pull
+    r"could not resolve host|temporary failure in name resolution|getaddrinfo|name or service not known|"  # DNS
+    r"runner (?:eviction|evicted|preempt|terminated)|node (?:eviction|evicted)|"     # runner-eviction
+    r"connection (?:refused|reset|timed out)|broken pipe|"                           # transient connection
+    r"address already in use|errno 48|errno 98)",                                    # transient port bind
+    re.IGNORECASE)
+
+
+def _is_transient_infra(findings: list[dict]) -> bool:
+    """A KNOWN-transient infra class (image-pull / DNS / runner-eviction / a transient port or connection error)
+    earns the extra retry. Matched over each finding's human text + stderr tail; conservative — an unrecognized
+    infra failure gets the default single retry, never the larger budget."""
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        text = " ".join(str(f.get(k) or "") for k in ("detail", "stderr_tail", "check"))
+        if _TRANSIENT_INFRA_RE.search(text):
+            return True
+    return False
+
+
+def _retry_verdict(report: dict | None) -> str:
+    """Classify a clean-retry's FRESH gate report against the autonomous SLA: 'cleared' (the dimension now passes
+    — verified), 'code' (a real product defect surfaced — block/repair as normal), or 'reproduced' (the same
+    non-code could-not-run recurred — stays unverified)."""
+    if not report or report.get("applicable") is False or report.get("passed"):
+        return "cleared"
+    failed = [f for f in report.get("findings", []) if isinstance(f, dict) and not f.get("passed")]
+    if not failed:
+        return "cleared"
+    if any(_finding_blocks_convergence(f) for f in failed):
+        return "code"
+    return "reproduced"
+
+
+def _stream_retry_evidence(repo, run_id: str, dimension: str, attempt: int, report: dict | None,
+                           verdict: str) -> None:
+    """Persist per-attempt evidence so the run is auditable: attempt index, phase, exit code, signal,
+    stderr-tail, classification, and the SLA verdict. Drawn from the representative failing finding (a cleared
+    attempt carries no finding, so its evidence is the verdict alone)."""
+    failed = [f for f in (report or {}).get("findings", []) if isinstance(f, dict) and not f.get("passed")]
+    rep = failed[0] if failed else {}
+    rc = rep.get("returncode")
+    signal = -rc if isinstance(rc, int) and rc < 0 else None
+    _stream_append(repo, {
+        "source": "clean-retry", "type": "dimension_retry", "run_id": run_id, "dimension": dimension,
+        "attempt": attempt, "verdict": verdict, "phase": rep.get("check"), "exit_code": rc, "signal": signal,
+        "stderr_tail": rep.get("stderr_tail"), "classification": rep.get("failure_classification"),
+        "ts": _iso8601_utc()})
+
+
+def _rerun_dimension(repo, dimension: str, results: dict, run_id: str) -> dict | None:
+    """Re-run ONE verification dimension's FULL gate in a FRESH execution context (ADR-0006: the SAME check, not a
+    narrowed one). `preflight` is contract-only (no workspace, no subprocess) so it re-runs in place; the
+    workspace-reading gates (conformance / secret / fuzz) re-run with a FRESH subprocess on a FRESH git worktree
+    checked out at the SAME commit (HEAD) and overlaid with the leaf's CURRENT artifact — so a transient
+    half-written / lock / port-bound state left by the first run cannot recur. The worktree is ALWAYS removed
+    (leak-free, per the #3/#4 worktree-lifecycle discipline); if one cannot be created we still re-run with a
+    fresh subprocess in-place rather than skip the retry."""
+    if dimension == "preflight":
+        return _contract_preflight(repo, results, run_id)
+    wt = Path(tempfile.mkdtemp(prefix=f"pl-retry-{dimension}-"))
+    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), "HEAD"],
+                         capture_output=True, text=True)
+    if add.returncode == 0:
+        _copy_plain_snapshot(Path(repo), wt)           # overlay the CURRENT working-tree artifact onto the checkout
+        cwd = wt
+    else:
+        cwd = Path(repo)                               # worktree unavailable -> fresh subprocess only
+    try:
+        if dimension == "conformance":
+            return _shadow_conformance(cwd, results, run_id, runner=conformance.subprocess_runner())
+        if dimension == "secret":
+            return _secret_scan(cwd, run_id)
+        if dimension == "fuzz":
+            return _fuzz_cli(cwd, results, run_id, runner=conformance.subprocess_runner(timeout=15))
+        return None
+    finally:
+        if add.returncode == 0:
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                           capture_output=True)
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict) -> tuple[dict, list[dict]]:
+    """incr #2 orchestrator — for each dimension left UNVERIFIED by a non-code could-not-run, re-run its full
+    gate in a fresh context up to a bounded number of retries (1 by default; 2 for a known-transient infra
+    class). Returns (updated gate_ctx, code_findings): a CLEARED dimension's findings become clean (it drops out
+    of the unverified set); a REPRODUCED one keeps its could-not-run finding (stays unverified); a retry that
+    reveals CODE has its blocking findings returned so the caller folds them into `findings` (block/repair as
+    normal). Each attempt streams auditable evidence. Bounded — never unbounded."""
+    unverified = _unverified_gate_findings(gate_ctx)
+    if not unverified:
+        return gate_ctx, []
+    gate_ctx = dict(gate_ctx)
+    code_findings: list[dict] = []
+    for dimension, advisory in unverified.items():
+        cap = CLEAN_RETRY_TRANSIENT_CAP if _is_transient_infra(advisory) else CLEAN_RETRY_DEFAULT_CAP
+        for attempt in range(1, cap + 1):
+            report = _rerun_dimension(repo, dimension, results, f"{run_id}-retry{attempt}-{dimension}")
+            verdict = _retry_verdict(report)
+            _stream_retry_evidence(repo, run_id, dimension, attempt, report, verdict)
+            gate_ctx[dimension] = list((report or {}).get("findings") or [])
+            if verdict == "cleared":
+                break
+            if verdict == "code":
+                code_findings += [f for f in gate_ctx[dimension] if _finding_blocks_convergence(f)]
+                break
+            # reproduced -> retry again within the bound, else fall through to terminally-unverified
+    return gate_ctx, code_findings
+
+
 def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
     """Run the CLI conformance gate over the implemented artifact and stream the result. Returns the report
     (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
@@ -1584,6 +1716,16 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         repair_finished_at = _utc_now()
         iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
                                             repair_stages, len(findings)))
+
+    # incr #2 — BOUNDED AUTONOMOUS CLEAN-RETRY: before any dimension is declared TERMINALLY unverified, re-run it
+    # in a fresh context (fresh subprocess + fresh worktree on the SAME commit). A retry that CLEARS verifies the
+    # dimension (it drops out of the unverified set, the leaf proceeds); one that REPRODUCES the could-not-run
+    # leaves it unverified (the #1 fail-close then applies); one that reveals a real CODE defect folds in here as
+    # a blocking finding (block/repair as normal). Skipped when the pipeline already failed for a non-gate reason
+    # (no proven artifact to retry against). ADR-0011/0016: a retry that still cannot verify NEVER passes.
+    if not pipeline_failed and _unverified_gate_findings(gate_ctx):
+        gate_ctx, retry_code_findings = _clean_retry_unverified(repo, results, run_id, gate_ctx)
+        findings = findings + retry_code_findings
 
     converged = bool(required_ok.get("linon")) and not findings
     unverified_gate_findings = _unverified_gate_findings(gate_ctx)
