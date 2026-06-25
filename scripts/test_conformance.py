@@ -1488,6 +1488,52 @@ def test_forbidden_pattern_skips_runtime_scratch_but_blocks_delivered_source():
     print("ok  forbidden-pattern: runtime scratch is skipped; delivered-source hit still blocks")
 
 
+def test_forbidden_pattern_skips_controller_artifacts_regardless_of_scan_root():
+    token = "SHAGIRI_SCAFFOLD"
+    contract = _fp_contract([{"pattern": token}])
+    with _ws({}) as d:
+        root = Path(d)
+        stage = root / ".agent-runs" / "controller" / "goal-7e142439ee-genius"
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "result.json").write_text(json.dumps({"role_id": "genius", "repo_evidence": [token]}),
+                                           encoding="utf-8")
+        (stage / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
+        (root / "result.json").write_text(json.dumps({"role_id": "linon", "findings": [token]}),
+                                          encoding="utf-8")
+        copied_artifacts = root / "carrier-output"
+        copied_artifacts.mkdir()
+        (copied_artifacts / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
+
+        from_repo_root = conf.run_conformance(contract, fake_runner({}), cwd=d)
+        from_stage_root = conf.run_conformance(contract, fake_runner({}), cwd=str(stage))
+        from_copied_artifact_root = conf.run_conformance(contract, fake_runner({}), cwd=str(copied_artifacts))
+
+    assert from_repo_root["applicable"] and from_repo_root["passed"] and from_repo_root["findings"] == [], \
+        from_repo_root
+    assert from_stage_root["applicable"] and from_stage_root["passed"] and from_stage_root["findings"] == [], \
+        from_stage_root
+    assert from_copied_artifact_root["applicable"] and from_copied_artifact_root["passed"] \
+        and from_copied_artifact_root["findings"] == [], from_copied_artifact_root
+    print("ok  forbidden-pattern: controller artifacts are skipped even when cwd is the stage scratch root")
+
+
+def test_forbidden_pattern_does_not_skip_product_result_json_by_name_only():
+    token = "SHAGIRI_SCAFFOLD"
+    with _ws({}) as d:
+        product = Path(d) / "src" / "result.json"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text(json.dumps({"value": token}), encoding="utf-8")
+        rep = conf.run_conformance(_fp_contract([{"pattern": token}]), fake_runner({}), cwd=d)
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert not rep["passed"] and f["hits"] == ["src/result.json:1"], rep
+    assert f["count"] == 1, f
+    print("ok  forbidden-pattern: product result.json is still scanned when it is not a controller packet")
+
+
 def test_forbidden_pattern_folds_alongside_cli_checker():
     # the gate is kind-agnostic: it rides ALONGSIDE a per-kind (cli) checker, not instead of it. A clean CLI
     # run with a forbidden straggler still blocks, and checks_run sums both gates.

@@ -1470,6 +1470,27 @@ def run_goal_acceptance(profile: dict, composed_repo: str, *, http_request=None,
 # than living on one profile. grep is a FACT (~0-FP); this moves a deterministically-catchable defect off the
 # expensive semantic reviewer (Linon), which previously had to read the regex to find it.
 _FORBIDDEN_SKIP_DIRS = {"node_modules", ".hg", ".svn", ".venv", "venv"}
+_TREE_SCAN_SCRATCH_DIRS = {".agent-runs", ".git", "__pycache__"}
+_CONTROLLER_ARTIFACT_NAMES = {
+    "build-map.json",
+    "carrier-report.json",
+    "codex-review.log",
+    "guard-map.json",
+    "journal.jsonl",
+    "operability-map.json",
+    "result.json",
+    "stream.jsonl",
+}
+_CONTROLLER_ARTIFACT_PREFIXES = ("carrier-attempt", "linon-", "stefan-")
+_CONTROLLER_RESULT_ROLES = {
+    "aggressive-designer",
+    "aufheben-designer",
+    "conservative-designer",
+    "genius",
+    "implementer",
+    "linon",
+    "stefan",
+}
 _FORBIDDEN_BINARY_SNIFF_BYTES = 8192
 _FORBIDDEN_MAX_HITS_REPORTED = 5     # cap the file:line evidence so a noisy match cannot flood the finding
 
@@ -1490,15 +1511,24 @@ def _is_probably_binary(path: str) -> bool:
         return True
 
 
+def _scan_rel_parts(rel: str) -> list[str]:
+    rel = rel.replace(os.sep, "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return [p for p in rel.split("/") if p and p != "."]
+
+
+def _path_has_tree_scratch_segment(path: str) -> bool:
+    return any(p in _TREE_SCAN_SCRATCH_DIRS for p in _scan_rel_parts(path))
+
+
 def _is_tree_scan_scratch(rel: str) -> bool:
     rel = rel.replace(os.sep, "/")
     if rel.startswith("./"):
         rel = rel[2:]
     if not rel:
         return False
-    if rel == ".agent-runs" or rel.startswith(".agent-runs/") or rel == ".git" or rel.startswith(".git/"):
-        return True
-    if "__pycache__" in rel.split("/"):
+    if _path_has_tree_scratch_segment(rel):
         return True
     if _controller_scope is not None:
         return bool(_controller_scope._is_scratch(rel))
@@ -1512,6 +1542,76 @@ def _skip_forbidden_scan_rel(rel: str) -> bool:
     if _is_tree_scan_scratch(rel):
         return True
     return any(part in _FORBIDDEN_SKIP_DIRS for part in rel.split("/"))
+
+
+def _is_controller_artifact_name(name: str) -> bool:
+    if name in _CONTROLLER_ARTIFACT_NAMES:
+        return True
+    return (
+        (name.startswith("carrier-attempt") and name.endswith(".log"))
+        or any(name.startswith(prefix) and name.endswith((".json", ".jsonl", ".log"))
+               for prefix in _CONTROLLER_ARTIFACT_PREFIXES)
+    )
+
+
+def _looks_like_controller_result(path: str) -> bool:
+    """Root result.json is scratch only when it is shaped like a controller carrier packet.
+
+    A product file named result.json must still be scanned; this avoids excluding by filename alone.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    role = data.get("role_id") or data.get("role")
+    if isinstance(role, str) and role in _CONTROLLER_RESULT_ROLES:
+        return True
+    if data.get("profile_id") == "linon-review" and (
+        "criterion_verdicts" in data or "diff_artifact" in data or "implementation_contract" in data):
+        return True
+    if {"candidate", "instrument", "verdict", "findings"}.issubset(data):
+        return True
+    return False
+
+
+def _looks_like_controller_artifact_dir(root: str) -> bool:
+    try:
+        names = set(os.listdir(root))
+    except OSError:
+        return False
+    artifact_names = {n for n in names if _is_controller_artifact_name(n)}
+    carrier_logs = {n for n in names if n.startswith("carrier-attempt") and n.endswith(".log")}
+    map_files = {"build-map.json", "guard-map.json", "operability-map.json"}.intersection(names)
+    if carrier_logs and (map_files or "result.json" in names or "carrier-report.json" in names):
+        return True
+    return len(map_files) >= 2 or len(artifact_names - {"result.json"}) >= 2
+
+
+def _skip_tree_scan_file(rel: str, full: str, root: str) -> bool:
+    """Skip controller-owned carrier records without hiding real deliverables with common filenames."""
+    if _skip_forbidden_scan_rel(rel):
+        return True
+    name = os.path.basename(rel)
+    if not _is_controller_artifact_name(name):
+        return False
+    # If the scan starts inside `.agent-runs/...`, rel no longer carries that segment. Use the absolute path
+    # too so carrier-local artifacts are still recognized after cwd/root changes.
+    full_abs = os.path.abspath(full)
+    root_abs = os.path.abspath(root)
+    if _path_has_tree_scratch_segment(full_abs) or _path_has_tree_scratch_segment(root_abs):
+        return True
+    if (_looks_like_controller_artifact_dir(root_abs)
+            or _looks_like_controller_artifact_dir(os.path.dirname(full_abs))):
+        return True
+    # The controller captures producing/verifying carrier packets as root-level result.json. Bound this special
+    # case to packet-shaped JSON so product result.json files are still scanned.
+    rel_parts = _scan_rel_parts(rel)
+    if rel_parts == ["result.json"] and _looks_like_controller_result(full):
+        return True
+    return False
 
 
 def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict]:
@@ -1544,7 +1644,7 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
             for fn in sorted(filenames):
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, root)
-                if _skip_forbidden_scan_rel(rel):
+                if _skip_tree_scan_file(rel, full, root):
                     continue
                 if any(fnmatch.fnmatch(rel, g) for g in excludes):
                     continue
