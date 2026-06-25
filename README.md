@@ -49,8 +49,16 @@ history for watching and auditing a run; it is not committed output. Review the 
 validation, delivery, or merge; complete the checks requested by the run, then merge only through
 `aob merge-gate` or `scripts/merge-gate.py`.
 
-It is now a **complete autonomous builder**: a GOAL goes in, PRs come out. Three layers stack, each a
-deterministic harness wrapped around a semantic (LLM) core:
+**Delivery (goal → PR).** By default a verified goal is merged into the run's LOCAL main and stops there
+(no remote touched) — `goal_merged`, `pr_url: null`. Pass `--deliver` to push the goal branch and open a
+GitHub PR for the verified result (fail-soft: it reports `committed_no_remote` / `pushed_pr_failed` /
+`pr_opened` truthfully and only sets `pr_url` when `gh pr create` actually succeeds — an UNVERIFIED goal is
+never delivered). Add `--auto-merge` to then run the merge-gate, which merges the PR ONLY if its required
+checks pass (otherwise the PR is left open for human review). A host (e.g. a cockpit) may instead own
+delivery and call the engine without these flags; the engine never fabricates a PR either way.
+
+It is now a **complete autonomous builder**: a GOAL goes in, a verified local merge comes out — and, with
+`--deliver`, a Git PR. Three layers stack, each a deterministic harness wrapped around a semantic (LLM) core:
 
 | Layer | Entry | Unit in → out |
 | --- | --- | --- |

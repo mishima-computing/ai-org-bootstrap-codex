@@ -19,6 +19,7 @@ import tempfile
 import uuid
 import concurrent.futures
 import inspect
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,6 +63,37 @@ def _shared_state_repo(repo) -> str:
 FLOOR_MAX_DEPTH = 3
 MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
 LINON_RESPLIT_CAP = 2  # Linon rejections may refine granularity only this many times per branch
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    args: tuple[str, ...]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+def _default_command_runner(args, cwd):
+    r = subprocess.run(list(args), cwd=str(cwd), capture_output=True, text=True)
+    return CommandResult(tuple(str(a) for a in args), r.returncode, r.stdout, r.stderr)
+
+
+def _run_command(runner, args, cwd) -> CommandResult:
+    try:
+        raw = (runner or _default_command_runner)(list(args), Path(cwd))
+    except Exception as exc:  # noqa: BLE001 - delivery is fail-soft; command errors become records.
+        return CommandResult(tuple(str(a) for a in args), 127, "", f"{type(exc).__name__}: {exc}")
+    if isinstance(raw, CommandResult):
+        return raw
+    if isinstance(raw, subprocess.CompletedProcess):
+        raw_args = raw.args if isinstance(raw.args, (list, tuple)) else [raw.args]
+        return CommandResult(tuple(str(a) for a in raw_args), int(raw.returncode),
+                             str(raw.stdout or ""), str(raw.stderr or ""))
+    if isinstance(raw, dict):
+        return CommandResult(tuple(str(a) for a in raw.get("args", args)),
+                             int(raw.get("exit_code", raw.get("returncode", 0))),
+                             str(raw.get("stdout", "")), str(raw.get("stderr", "")))
+    return CommandResult(tuple(str(a) for a in args), 0, str(raw or ""), "")
 
 
 class LaunchPreconditionError(RuntimeError):
@@ -915,6 +947,125 @@ def _merge_goal_to_main(repo, branch, base_head, main_branch):
     return False
 
 
+def _command_error(res: CommandResult) -> str:
+    text = (res.stderr or res.stdout or "").strip().splitlines()
+    return text[0] if text else f"exit {res.exit_code}"
+
+
+def _pr_url(stdout: str) -> str | None:
+    for token in str(stdout or "").replace("\n", " ").split():
+        if token.startswith("http://") or token.startswith("https://"):
+            return token.strip()
+    return None
+
+
+def _default_branch(git) -> str | None:
+    head = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if head.exit_code == 0 and head.stdout.strip():
+        value = head.stdout.strip()
+        return value.split("/", 1)[1] if value.startswith("origin/") else value
+    for candidate in ("main", "master"):
+        if git("rev-parse", "--verify", "--quiet", f"origin/{candidate}").exit_code == 0:
+            return candidate
+    return None
+
+
+def _deliver_goal_branch(repo, branch, goal, goal_id, *, git_runner=None, gh_runner=None) -> dict:
+    """Push a verified goal branch and open a PR. Fail-soft and honest: pr_url is set only after gh succeeds."""
+    repo_path = Path(repo).expanduser().resolve()
+    record = {"status": "started", "ok": False, "goal_id": goal_id, "branch": branch, "pr_url": None}
+
+    def git(*args):
+        return _run_command(git_runner, ["git", "-C", str(repo_path), *args], repo_path)
+
+    def gh(*args):
+        return _run_command(gh_runner, ["gh", *args], repo_path)
+
+    if not branch:
+        record.update(status="pushed_pr_skipped", reason="no goal branch was available to deliver")
+        return record
+    if git("rev-parse", "--verify", "--quiet", branch).exit_code != 0:
+        record.update(status="pushed_pr_skipped", reason="goal branch was not found")
+        return record
+    default_branch = _default_branch(git)
+    if not default_branch:
+        record.update(status="pushed_pr_skipped", reason="default branch could not be determined")
+        return record
+    record["default_branch"] = default_branch
+    if branch == default_branch:
+        record.update(status="pushed_pr_skipped", reason="refusing to deliver the default branch")
+        return record
+    remote = git("remote", "get-url", "origin")
+    if remote.exit_code != 0:
+        record.update(status="committed_no_remote", reason="origin remote is unavailable")
+        return record
+    push = git("push", "-u", "origin", branch)
+    if push.exit_code != 0:
+        record.update(status="pushed_push_failed", reason=_command_error(push), push_exit=push.exit_code)
+        return record
+    record["pushed"] = True
+    title = (" ".join(str(goal or f"AI Org goal {goal_id or branch}").split()) or f"AI Org goal {goal_id or branch}")
+    if len(title) > 80:
+        title = title[:77] + "..."
+    body = "\n".join([
+        f"Goal-ID: {goal_id or ''}",
+        f"Branch: {branch}",
+        "",
+        "Opened by AI Org engine delivery after the goal verified green.",
+    ])
+    pr = gh("pr", "create", "--base", default_branch, "--head", branch, "--title", title, "--body", body)
+    if pr.exit_code != 0:
+        record.update(status="pushed_pr_failed", reason=_command_error(pr), pr_exit=pr.exit_code)
+        return record
+    url = _pr_url(pr.stdout)
+    if not url:
+        record.update(status="pushed_pr_failed", reason="gh pr create did not return a PR URL", pr_exit=0)
+        return record
+    record.update(status="pr_opened", ok=True, pr_url=url)
+    return record
+
+
+def _run_merge_gate_for_pr(repo, pr_url, goal_id, *, runner=None) -> dict:
+    """Invoke the sole merge path for an opened PR; non-zero leaves the PR open and is reported."""
+    out = Path(repo) / ".agent-runs" / "goals" / f"{goal_id or 'goal'}-merge-gate.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "merge-gate.py"),
+           str(pr_url), "--out", str(out)]
+    res = _run_command(runner, cmd, Path(repo).expanduser().resolve())
+    return {"status": "merged" if res.exit_code == 0 else "left_open",
+            "ok": res.exit_code == 0, "exit_code": res.exit_code,
+            "evidence": str(out), "reason": None if res.exit_code == 0 else _command_error(res)}
+
+
+def _maybe_deliver_goal(repo, goal, goal_id, branch, status, goal_acc, emit, store, *,
+                        deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                        merge_gate_runner=None) -> dict | None:
+    if not deliver:
+        return None
+    verified = status == "done" and isinstance(goal_acc, dict) and goal_acc.get("status") == "verified"
+    if not verified:
+        rec = {"status": "skipped_unverified", "ok": False, "goal_id": goal_id, "branch": branch,
+               "reason": "goal was not verified green; delivery requires goal_acceptance.status=verified"}
+        emit({"type": "goal_delivery", **rec})
+        if store is not None:
+            store.update(goal_id, delivery=rec)
+        return rec
+    try:
+        rec = _deliver_goal_branch(repo, branch, goal, goal_id, git_runner=git_runner, gh_runner=gh_runner)
+    except Exception as exc:  # noqa: BLE001 - delivery cannot crash a verified run.
+        rec = {"status": "delivery_failed", "ok": False, "goal_id": goal_id, "branch": branch,
+               "error": f"{type(exc).__name__}: {exc}"}
+    if auto_merge and rec.get("status") == "pr_opened" and rec.get("pr_url"):
+        rec["merge_gate"] = _run_merge_gate_for_pr(repo, rec["pr_url"], goal_id, runner=merge_gate_runner)
+    emit({"type": "goal_delivery", **rec})
+    if store is not None:
+        update = {"delivery": rec}
+        if rec.get("status") == "pr_opened" and rec.get("pr_url"):
+            update["pr_url"] = rec["pr_url"]
+        store.update(goal_id, **update)
+    return rec
+
+
 def _cleanup_goal_worktree(repo, worktree, branch, *, delete_branch) -> None:
     """Remove the goal worktree (and, on success, its now-merged branch). Worktree first — a branch checked
     out in a worktree cannot be deleted. Fail-soft: cleanup never breaks the goal's reported outcome."""
@@ -937,15 +1088,21 @@ def _goal_acceptance_profile(context):
 
 
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
-             refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
+             refine=None, context=None, carrier=None, budget=None, emit=None,
+             deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+             merge_gate_runner=None) -> list:
     """Run a goal through the live recursive TaskExecutor path, or the legacy frontier path when disabled."""
     if not _use_taskexecutor():
         return _run_goal_legacy(repo, goal, run_leaf=run_leaf, goal_id=goal_id, resume_from=resume_from,
                                 split=split, refine=refine, context=context, carrier=carrier,
-                                budget=budget, emit=emit)
+                                budget=budget, emit=emit, deliver=deliver, auto_merge=auto_merge,
+                                git_runner=git_runner, gh_runner=gh_runner,
+                                merge_gate_runner=merge_gate_runner)
     return _run_goal_taskexecutor(repo, goal, run_leaf=run_leaf, goal_id=goal_id, resume_from=resume_from,
                                   split=split, refine=refine, context=context, carrier=carrier,
-                                  budget=budget, emit=emit)
+                                  budget=budget, emit=emit, deliver=deliver, auto_merge=auto_merge,
+                                  git_runner=git_runner, gh_runner=gh_runner,
+                                  merge_gate_runner=merge_gate_runner)
 
 
 def _repo_head(repo) -> str:
@@ -1198,7 +1355,9 @@ def _make_taskexecutor_steering(store, goal_id, steering_goal_ids, asks, root, c
 
 
 def _run_goal_taskexecutor(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
-                           refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
+                           refine=None, context=None, carrier=None, budget=None, emit=None,
+                           deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                           merge_gate_runner=None) -> list:
     """Live goal path: intake/refine -> recursive TaskExecutor -> root CI -> goal acceptance -> merge."""
     if not os.environ.get("STREAM_LOG"):
         os.environ["STREAM_LOG"] = str(Path(repo).resolve() / ".agent-runs" / "stream.jsonl")
@@ -1318,12 +1477,15 @@ def _run_goal_taskexecutor(repo, goal, run_leaf=None, *, goal_id=None, resume_fr
     return _finalize_taskexecutor_goal(repo, goal, plan, context_ref["value"], store, goal_id, asks, execution_ok, emit,
                                        iso_wt=iso_wt, orig_repo=orig_repo, goal_branch=goal_branch,
                                        orig_head=orig_head, orig_branch_name=orig_branch_name,
-                                       final_verified=final_verified)
+                                       final_verified=final_verified, deliver=deliver, auto_merge=auto_merge,
+                                       git_runner=git_runner, gh_runner=gh_runner,
+                                       merge_gate_runner=merge_gate_runner)
 
 
 def _finalize_taskexecutor_goal(repo, goal, final_plan, context, store, goal_id, asks, execution_ok, emit, *,
                                 iso_wt=None, orig_repo=None, goal_branch=None, orig_head=None,
-                                orig_branch_name=None, final_verified=None):
+                                orig_branch_name=None, final_verified=None, deliver=False, auto_merge=False,
+                                git_runner=None, gh_runner=None, merge_gate_runner=None):
     done = bool(final_plan) and execution_ok and all(frontier.node_status(t) == "done" for t in final_plan)
     status = "done" if done else "failed"
     sg = (context or {}).get("structured_goal") if isinstance(context, dict) else None
@@ -1380,11 +1542,18 @@ def _finalize_taskexecutor_goal(repo, goal, final_plan, context, store, goal_id,
     if status == "done":
         emit({"type": "goal_done", "goal": goal})
 
+    delivery_record = _maybe_deliver_goal(orig_repo or repo, goal, goal_id, goal_branch, status, goal_acc, emit, store,
+                                          deliver=deliver, auto_merge=auto_merge,
+                                          git_runner=git_runner, gh_runner=gh_runner,
+                                          merge_gate_runner=merge_gate_runner)
     if iso_wt is not None:
         if status == "done":
             if _merge_goal_to_main(orig_repo, goal_branch, orig_head, orig_branch_name):
                 _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
-                emit({"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name})
+                merged_event = {"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name}
+                if delivery_record and delivery_record.get("status") == "pr_opened":
+                    merged_event["pr_url"] = delivery_record.get("pr_url")
+                emit(merged_event)
             else:
                 emit({"type": "goal_merge_conflict", "branch": goal_branch, "into": orig_branch_name,
                       "worktree": iso_wt, "detail": "local main moved under the run and the goal branch "
@@ -1397,7 +1566,9 @@ def _finalize_taskexecutor_goal(repo, goal, final_plan, context, store, goal_id,
 
 
 def _run_goal_legacy(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
-                     refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
+                     refine=None, context=None, carrier=None, budget=None, emit=None,
+                     deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                     merge_gate_runner=None) -> list:
     """Decompose `goal` and build it.
 
     run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
@@ -1536,11 +1707,18 @@ def _run_goal_legacy(repo, goal, run_leaf=None, *, goal_id=None, resume_from=Non
         # reaches the tree a consumer renders) and remove the now-merged worktree+branch. On a clean merge
         # FAILURE (main moved under us) leave both intact and main untouched. On any non-green outcome leave
         # the worktree+branch for inspection — main stays clean either way.
+        delivery_record = _maybe_deliver_goal(orig_repo, goal, goal_id, goal_branch, status, goal_acc, emit, store,
+                                              deliver=deliver, auto_merge=auto_merge,
+                                              git_runner=git_runner, gh_runner=gh_runner,
+                                              merge_gate_runner=merge_gate_runner)
         if iso_wt is not None:
             if status == "done":
                 if _merge_goal_to_main(orig_repo, goal_branch, orig_head, orig_branch_name):
                     _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
-                    emit({"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name})
+                    merged_event = {"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name}
+                    if delivery_record and delivery_record.get("status") == "pr_opened":
+                        merged_event["pr_url"] = delivery_record.get("pr_url")
+                    emit(merged_event)
                 else:
                     emit({"type": "goal_merge_conflict", "branch": goal_branch, "into": orig_branch_name,
                           "worktree": iso_wt, "detail": "local main moved under the run and the goal branch "
@@ -1885,6 +2063,10 @@ def main(argv=None) -> int:
                    "executable goal acceptance_profile (ADR-0016 D7): {start:{command,base_url?,ready_path?,"
                    "timeout?}, probes:[{request,expect}], negative_control?}. Fixed at intake; absent = the "
                    "goal-level acceptance stays shadow (no goal-level probe).")
+    p.add_argument("--deliver", action="store_true", help="after a verified green goal, push the goal branch "
+                   "and open a GitHub PR with gh. Unverified/blocked goals are never delivered.")
+    p.add_argument("--auto-merge", action="store_true", help="after --deliver opens a PR, invoke "
+                   "scripts/merge-gate.py so the PR merges only if the gate passes. Default off.")
     a = p.parse_args(argv)
     context = None
     if a.acceptance_profile:                           # the OWNER submits the executable acceptance contract
@@ -1896,7 +2078,7 @@ def main(argv=None) -> int:
         events.append(e)
     try:
         plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget,
-                        context=context, emit=_emit)
+                        context=context, emit=_emit, deliver=a.deliver, auto_merge=a.auto_merge)
     except LaunchPreconditionError as exc:
         print(str(exc), file=sys.stderr)
         return 1

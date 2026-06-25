@@ -2250,6 +2250,169 @@ def test_merge_goal_to_main_leaves_main_clean_on_conflict():
     print("ok  (point 2) a conflicting merge aborts -> main stays clean, branch retained")
 
 
+class _FakeDeliveryGit:
+    def __init__(self, push_exit=0):
+        self.push_exit = push_exit
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        import subprocess
+        self.calls.append(list(args))
+        rest = list(args)
+        if len(rest) >= 3 and rest[0] == "git" and rest[1] == "-C":
+            rest = rest[3:]
+        if rest == ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]:
+            return cg.CommandResult(tuple(args), 0, "origin/main\n", "")
+        if rest == ["remote", "get-url", "origin"]:
+            return cg.CommandResult(tuple(args), 0, "git@github.com:owner/repo.git\n", "")
+        if rest[:2] == ["push", "-u"]:
+            err = "push rejected\n" if self.push_exit else ""
+            return cg.CommandResult(tuple(args), self.push_exit, "", err)
+        return subprocess.run(list(args), cwd=str(cwd), capture_output=True, text=True)
+
+
+class _FakeGh:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        if self.exit_code:
+            return cg.CommandResult(tuple(args), self.exit_code, "", "gh failed\n")
+        return cg.CommandResult(tuple(args), 0, "https://github.com/owner/repo/pull/7\n", "")
+
+
+class _FakeMergeGate:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        err = "checks failed\n" if self.exit_code else ""
+        return cg.CommandResult(tuple(args), self.exit_code, "", err)
+
+
+def _taskexecutor_goal_branch(d, *, goal_id="deliver-ok"):
+    import os, subprocess
+    repo, git = _wt_repo(d)
+    base = _rev(git)
+    branch = f"goal/{goal_id}"
+    wt = os.path.join(d, "goal-wt")
+    git("worktree", "add", "-q", wt, "-b", branch, "HEAD")
+    open(os.path.join(wt, "feat.py"), "w").write("feature\n")
+    subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", wt, "commit", "-m", "feature"], check=True, capture_output=True)
+    return repo, git, wt, branch, base
+
+
+def _finalize_taskexecutor_delivery(d, *, goal_id="deliver-ok", verified=True, deliver=True,
+                                    auto_merge=False, push_exit=0, gh_exit=0, merge_gate_exit=0):
+    old_gate = cg.conformance.run_goal_acceptance
+    repo, git, wt, branch, base = _taskexecutor_goal_branch(d, goal_id=goal_id)
+    events = []
+    store = cg.goal_store.GoalStore(repo, emit=events.append)
+    store.create(goal_id, "ship feature", org="codex")
+    cg.conformance.run_goal_acceptance = lambda profile, composed_repo, **_k: {
+        "verified": verified, "evidence": [{"ok": verified}], "findings": [] if verified else [{"bad": True}],
+        "probes_run": 1}
+    fake_git = _FakeDeliveryGit(push_exit=push_exit)
+    fake_gh = _FakeGh(exit_code=gh_exit)
+    fake_gate = _FakeMergeGate(exit_code=merge_gate_exit)
+    try:
+        plan = cg._finalize_taskexecutor_goal(
+            wt, "ship feature", [{"id": "leaf", "objective": "ship", "scope": ["feat.py"],
+                                  "depends_on": [], "status": "done"}],
+            {"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+            store, goal_id, [], True, events.append,
+            iso_wt=wt, orig_repo=repo, goal_branch=branch, orig_head=base, orig_branch_name="main",
+            deliver=deliver, auto_merge=auto_merge, git_runner=fake_git, gh_runner=fake_gh,
+            merge_gate_runner=fake_gate)
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+    return repo, git, plan, events, store.read(goal_id), fake_git, fake_gh, fake_gate
+
+
+def test_deliver_verified_taskexecutor_goal_pushes_branch_opens_pr_and_sets_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(d)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "pr_opened", delivery
+        assert delivery["pr_url"] == "https://github.com/owner/repo/pull/7", delivery
+        assert rec["pr_url"] == "https://github.com/owner/repo/pull/7", rec
+        assert rec["delivery"]["status"] == "pr_opened", rec
+        assert any(c[-3:] == ["-u", "origin", "goal/deliver-ok"] for c in fake_git.calls), fake_git.calls
+        assert fake_gh.calls and fake_gh.calls[0][:3] == ["gh", "pr", "create"], fake_gh.calls
+        assert _rev(git, "main") != "", "local merge still completed"
+    print("ok  --deliver on verified TaskExecutor goal pushes branch, opens PR, and records real pr_url")
+
+
+def test_deliver_unverified_taskexecutor_goal_skips_push_pr_and_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-bad", verified=False)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "skipped_unverified", delivery
+        assert not any(c and c[-3:] == ["-u", "origin", "goal/deliver-bad"] for c in fake_git.calls), fake_git.calls
+        assert fake_gh.calls == [], fake_gh.calls
+        assert "pr_url" not in rec, rec
+        assert rec["status"] == "failed", rec
+    print("ok  --deliver on unverified TaskExecutor goal skips push/PR and fabricates no pr_url")
+
+
+def test_deliver_push_failure_is_fail_soft_and_fabricates_no_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-push-fail", push_exit=1)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "pushed_push_failed", delivery
+        assert rec["delivery"]["status"] == "pushed_push_failed", rec
+        assert "pr_url" not in rec, rec
+        assert fake_gh.calls == [], fake_gh.calls
+        assert any(e.get("type") == "goal_merged" for e in events), "delivery failure must not crash closeout"
+    print("ok  push failure records pushed_*_failed, does not crash, and fabricates no pr_url")
+
+
+def test_auto_merge_invokes_merge_gate_and_records_merge_on_passing_checks():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-automerge-ok", auto_merge=True, merge_gate_exit=0)
+        assert fake_gate.calls, "merge-gate must be invoked after PR creation"
+        assert "https://github.com/owner/repo/pull/7" in fake_gate.calls[0], fake_gate.calls
+        assert rec["delivery"]["merge_gate"]["status"] == "merged", rec
+    print("ok  --auto-merge invokes merge-gate and records merged when checks pass")
+
+
+def test_auto_merge_leaves_pr_open_when_merge_gate_fails():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-automerge-fail", auto_merge=True, merge_gate_exit=1)
+        assert fake_gate.calls, "merge-gate must be invoked after PR creation"
+        assert rec["delivery"]["status"] == "pr_opened", rec
+        assert rec["delivery"]["merge_gate"]["status"] == "left_open", rec
+        assert rec["delivery"]["merge_gate"]["ok"] is False, rec
+    print("ok  --auto-merge leaves PR open when merge-gate reports failing checks")
+
+
+def test_default_taskexecutor_finalize_local_merge_no_delivery():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-default", deliver=False)
+        assert not any(e.get("type") == "goal_delivery" for e in events), events
+        assert fake_git.calls == [] and fake_gh.calls == [] and fake_gate.calls == [], (
+            fake_git.calls, fake_gh.calls, fake_gate.calls)
+        assert any(e.get("type") == "goal_merged" for e in events), events
+        assert "pr_url" not in rec, rec
+    print("ok  default closeout remains local merge only, with no delivery calls")
+
+
 # ---------------------------------------------------------------------------------------------------------
 # ADR-0016 D7 — GOAL-LEVEL ACCEPTANCE GATE wiring. After all leaves are green + composed, BEFORE merge-to-main,
 # run_goal boots the COMPOSED goal artifact (this worktree) against the OWNER's intake-fixed executable
