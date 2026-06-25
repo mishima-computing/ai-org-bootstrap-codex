@@ -129,6 +129,24 @@ _UNSUPPORTED_ENV_RE = re.compile(
     r"machinery is unavailable|jsonschema is not available)",
     re.IGNORECASE,
 )
+# Dependency-fetch connectivity failures are a verification-environment limitation (no DNS/egress/index access),
+# not an implementer repair. This stays separate from `_UNSUPPORTED_ENV_RE`: it only matches network/connectivity
+# phrasings when they are anchored to package-manager/index fetch context, so product-emittable assertions such as
+# "Temporary failure in name resolution" remain product failures when the product/test actually ran.
+_DEPENDENCY_FETCH_CONTEXT_RE = re.compile(
+    r"(?:\bpip\b|pypi|package index|/simple/|could not fetch url|"
+    r"git\+https?://|git clone|unable to access)",
+    re.IGNORECASE,
+)
+_DEPENDENCY_FETCH_CONNECTIVITY_RE = re.compile(
+    r"(?:temporary failure in name resolution|could not resolve host|network is unreachable|"
+    r"failed to establish a new connection|connection refused)",
+    re.IGNORECASE,
+)
+_PIP_COULD_NOT_FETCH_URL_RE = re.compile(
+    r"could not fetch url\s+https?://\S*(?:pypi|/simple/)",
+    re.IGNORECASE,
+)
 # Established CODE signals in the OUTPUT of a command that actually RAN (we have already returned `infra` for a
 # 127 command-not-found / a known-runner-absence above, so an import/assertion failure here is the product's own
 # defect, not a host gap — a `No module named X` for a NON-runner X is the product's undeclared dependency).
@@ -145,6 +163,16 @@ def _stringify(value) -> str:
         return "" if value is None else str(value)
     except Exception:
         return ""
+
+
+def _dependency_fetch_connectivity_failure(text: str) -> bool:
+    has_fetch_context = bool(_DEPENDENCY_FETCH_CONTEXT_RE.search(text))
+    has_connectivity = bool(_DEPENDENCY_FETCH_CONNECTIVITY_RE.search(text))
+    if has_fetch_context and has_connectivity:
+        return True
+    if _PIP_COULD_NOT_FETCH_URL_RE.search(text):
+        return True
+    return False
 
 
 def _failure_classification(*, returncode=None, stdout="", stderr="", error=None, detail: str = "",
@@ -195,6 +223,8 @@ def _failure_classification(*, returncode=None, stdout="", stderr="", error=None
         return "resource"
     if _CODE_TEXT_RE.search(text):
         return "code"
+    if _dependency_fetch_connectivity_failure(text):
+        return "infra"
     if returncode is None and not any(_stringify(v) for v in (stdout, stderr, error, detail)):
         return "undetermined"
     return default
@@ -280,7 +310,7 @@ def _with_failure_classification(finding: dict, passed: bool) -> dict:
     finding["failure_classification"] = cls
     gate_state, repair_route, retryable, confidence = _ROUTING_BY_CLASS[cls]
     text = " ".join(_stringify(finding.get(k)) for k in ("detail", "stderr_tail", "stdout_tail", "check"))
-    if cls == "infra" and _UNSUPPORTED_ENV_RE.search(text):
+    if cls == "infra" and (_UNSUPPORTED_ENV_RE.search(text) or _dependency_fetch_connectivity_failure(text)):
         gate_state, repair_route, retryable, confidence = (_GATE_STATE_UNSUPPORTED, "escalate", False, "medium")
     finding.setdefault("gate_state", gate_state)
     finding.setdefault("repair_route", repair_route)

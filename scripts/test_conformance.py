@@ -2173,6 +2173,78 @@ def test_product_missing_dependency_at_exit_1_stays_code_not_infra():
     print("ok  fix: product `No module named requests` at exit 1 -> still code/implementer (blocks)")
 
 
+def test_dependency_fetch_connectivity_failure_is_unsupported_env_not_code():
+    # The box/verification environment may lack DNS or network egress while fetching dependencies. That is a
+    # could-not-run environment limit, not a product failure for the implementer to "repair".
+    samples = [
+        ("python -m pip install demo",
+         "WARNING: Retrying (Retry(total=4)) after connection broken by "
+         "'NewConnectionError(\"<pip._vendor.urllib3.connection.HTTPSConnection object>\": "
+         "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution)': "
+         "/simple/demo/\n"
+         "ERROR: Could not find a version that satisfies the requirement demo (from versions: none)\n"
+         "ERROR: No matching distribution found for demo\n"),
+        ("python -m pip install demo",
+         "ERROR: Could not fetch URL https://pypi.org/simple/demo/: There was a problem reaching the index\n"),
+        ("python -m pip install git+https://github.com/acme/demo.git",
+         "fatal: unable to access 'https://github.com/acme/demo.git/': Could not resolve host: github.com\n"),
+    ]
+    for cmd, out in samples:
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra", out
+        findings = conf.install_findings(
+            {"build_and_install": {"commands": [cmd]}},
+            fake_runner({cmd: R(1, "", out)}),
+            cwd="/tmp",
+        )
+        assert len(findings) == 1, findings
+        f = findings[0]
+        assert f["failure_classification"] == "infra", f
+        assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+        assert f["repair_route"] == "escalate" and f["repair_route"] != "implementer", f
+        assert f["retryable"] is False and not cp._finding_blocks_convergence(f), f
+    print("ok  fix: dependency-fetch DNS/index failures -> unsupported-env infra, not implementer code")
+
+
+def test_product_assertion_with_connectivity_words_stays_code_not_infra():
+    # The connectivity signatures are anchored to dependency/index fetch context. A product test assertion that
+    # happens to mention the same words is still a product failure and must keep blocking as code.
+    out = "AssertionError: expected cached fallback, got Temporary failure in name resolution\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f
+    print("ok  guard: product assertion mentioning connectivity remains code/implementer")
+
+
+def test_product_requests_urllib3_connection_error_stays_code_not_infra():
+    # A product's own requests/urllib3 stack can emit the same exception class names pip vendors internally.
+    # Those library-internal names are not dependency-fetch anchors; an example/test that ran and failed remains
+    # a product failure, even with no AssertionError text.
+    out = (
+        "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.example.test', port=443): "
+        "Max retries exceeded with url: /v1/payments (Caused by "
+        "NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x10>: "
+        "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\n"
+    )
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    assert conf._failure_classification(returncode=1, stderr=out) != "infra"
+    assert not conf._dependency_fetch_connectivity_failure(out), out
+
+    profile = {"entrypoint": {"invocation": "product-cli"},
+               "examples": [{"invocation": "sync-payments", "expected_status": 0}]}
+    report = conf.run_cli_conformance(_cli_contract(profile), fake_runner({
+        "product-cli sync-payments": R(1, "", out),
+    }))
+    finding = next(f for f in report["findings"] if f["check"] == "exit_status")
+    assert finding["failure_classification"] == "code", finding
+    assert finding["gate_state"] == "VERIFIED_PRODUCT_FAILURE", finding
+    assert finding["repair_route"] == "implementer", finding
+    assert cp._finding_blocks_convergence(finding), finding
+    print("ok  guard: product requests/urllib3 connection error -> code/implementer, not infra/escalate")
+
+
 def test_pytest_plugin_gap_at_exit_1_stays_code_not_infra():
     # the MASKING seam (over-reach of the unsupported-env whitelist): `No module named pytest_asyncio` is the
     # PRODUCT's own missing pytest-PLUGIN dependency raised BY its test code, NOT an absent runner. The anchored
@@ -2231,9 +2303,18 @@ def test_product_emittable_failures_stay_code_never_unsupported_env():
         "AssertionError: expected 200 but got 503\n",
         # a build/install failure a product emits when its wheel cannot be built:
         "ERROR: Could not build wheels for cryptography, which is required to install pyproject.toml-based projects\n",
+        # a dependency resolver miss without network/index reachability context is the product's requested package:
+        "ERROR: Could not find a version that satisfies the requirement acme-private-package\n",
         # generic `X is not available` phrasings a PRODUCT (not the checker) can legitimately print:
         "AssertionError: feature flag 'fast_path' is not available in this build\n",
         "RuntimeError: payment service is not available\n",
+        # connectivity words alone are product-emittable unless anchored to package/index fetching:
+        "AssertionError: expected cached fallback, got Temporary failure in name resolution\n",
+        "RuntimeError: upstream https://api.example.test is down: Network is unreachable\n",
+        "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.example.test', port=443): "
+        "Max retries exceeded with url: /v1/payments (Caused by "
+        "NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x10>: "
+        "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\n",
     ]
     for out in product_emittable:
         # MASKING-DIRECTION GUARD (the core invariant): never infra/unsupported-env/timeout/resource, at a generic
@@ -2244,6 +2325,7 @@ def test_product_emittable_failures_stay_code_never_unsupported_env():
             assert cls not in ("infra", "timeout", "resource"), (out, default, cls)
         # and the whitelist regex itself must NOT match any product-emittable string:
         assert not conf._UNSUPPORTED_ENV_RE.search(out), out
+        assert not conf._dependency_fetch_connectivity_failure(out), out
         # at an ORACLE/BUILD/regression gate (default="code"), where a nonzero is a positive product signal and
         # masking is most dangerous, every product-emittable failure resolves to exactly `code` -> implementer.
         assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code", out
@@ -2428,6 +2510,36 @@ def test_runner_factory_shim_transport_failure_is_infra_not_product_not_pass():
     assert cls == "infra", (cls, res)                           # routes to escalate/clean-retry/unverified
     assert cls != "code", res                                  # NEVER blamed on product code
     print("ok  runner_factory: a shim that can't run (nonzero transport exit) -> infra/could-not-run")
+
+
+def test_runner_factory_transport_slack_covers_slow_first_stage_without_timeout():
+    # A cold box stage can exceed the old 30s slack before the command even runs. Simulate a shim that would time
+    # out at the old effective+30 budget but returns a valid frame under the larger default transport allowance.
+    observed_timeouts = []
+    saved_run = runner_factory.subprocess.run
+
+    def fake_slow_stage_run(argv, input=None, stdout=None, stderr=None, timeout=None):  # noqa: ARG001
+        observed_timeouts.append(timeout)
+        if timeout <= 31.0:  # command timeout=1s + old 30s slack
+            raise runner_factory.subprocess.TimeoutExpired(argv, timeout)
+        out, err = b"staged-ok\n", b""
+        frame = b"".join([runner_factory._MAGIC, b"\n", b"0\n",
+                          str(len(out)).encode(), b"\n", out,
+                          str(len(err)).encode(), b"\n", err])
+        return type("Proc", (), {"returncode": 0, "stdout": frame, "stderr": b""})()
+
+    try:
+        runner_factory.subprocess.run = fake_slow_stage_run
+        with _runner_env(AI_ORG_RUNNER_CMD="fake-shim", AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None,
+                         AI_ORG_RUNNER_TRANSPORT_SLACK=None):
+            runner = runner_factory.get_conformance_runner(timeout=1.0)
+            res = runner("echo staged", cwd="/tmp")
+    finally:
+        runner_factory.subprocess.run = saved_run
+
+    assert res.returncode == 0 and res.stdout == "staged-ok\n", res
+    assert observed_timeouts and observed_timeouts[0] > 31.0, observed_timeouts
+    print("ok  runner_factory: cold-stage shim gets transport budget beyond the old 30s slack")
 
 
 def test_runner_factory_unrunnable_shim_is_infra():

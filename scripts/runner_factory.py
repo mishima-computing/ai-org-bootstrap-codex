@@ -13,6 +13,8 @@ containment boundary.
   AI_ORG_RUNNER_FALLBACK_SUBPROCESS opt-in (1/true/yes/on). If a shim TRANSPORT step fails, run the command
                                     LOCALLY via the subprocess runner instead of surfacing a could-not-run.
                                     For box-LESS dev/CI ONLY — it deliberately gives up the requested isolation.
+  AI_ORG_RUNNER_TRANSPORT_SLACK     optional positive seconds beyond the command timeout for shim staging +
+                                    response framing. Unset -> a generous box-staging default.
 
 == Wire protocol (engine <-> shim), version AOBRUN1 ==
 Binary-safe, length-prefixed, sentinel-framed, so a command's stdout/stderr may contain ANYTHING (newlines,
@@ -55,9 +57,11 @@ if HERE not in sys.path:
 import conformance  # noqa: E402  — RunResult / subprocess_runner live here; the box boundary's data shape.
 
 _MAGIC = b"AOBRUN1"
-# Extra wall-clock the engine waits for the shim BEYOND the command's own timeout: the box still has to frame
-# and return the (timed-out) result. A shim silent past this is itself a transport failure (a hung box).
-_TRANSPORT_SLACK = 30.0
+# Extra wall-clock the engine waits for the shim BEYOND the command's own timeout: the first per-cwd shim call
+# may also cold-stage the artifact into the box before the command can run, and the shim still has to frame and
+# return the result. A shim silent past this is itself a transport failure (a hung box).
+_TRANSPORT_SLACK = 180.0
+_TRANSPORT_SLACK_ENV = "AI_ORG_RUNNER_TRANSPORT_SLACK"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -76,6 +80,17 @@ def get_conformance_runner(timeout: float = 60.0) -> conformance.Runner:
 
 def _is_truthy(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in _TRUTHY
+
+
+def _transport_slack() -> float:
+    raw = os.environ.get(_TRANSPORT_SLACK_ENV)
+    if raw is None or not raw.strip():
+        return _TRANSPORT_SLACK
+    try:
+        value = float(raw)
+    except ValueError:
+        return _TRANSPORT_SLACK
+    return value if value > 0 else _TRANSPORT_SLACK
 
 
 class _TransportFailure(Exception):
@@ -106,11 +121,12 @@ def _invoke_shim(argv_prefix: list, cmd: str, cwd, stdin, timeout, default_timeo
     request = _frame_request(cmd, stdin or "")
     argv = [*argv_prefix, "" if cwd is None else str(cwd)]
     effective = default_timeout if timeout is None else timeout
+    transport_timeout = effective + _transport_slack()
     try:
         proc = subprocess.run(argv, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=effective + _TRANSPORT_SLACK)
+                              timeout=transport_timeout)
     except subprocess.TimeoutExpired:
-        raise _TransportFailure(f"shim did not respond within {effective + _TRANSPORT_SLACK:.0f}s (box hang)")
+        raise _TransportFailure(f"shim did not respond within {transport_timeout:.0f}s (box hang)")
     except (FileNotFoundError, PermissionError, NotADirectoryError, OSError) as exc:
         raise _TransportFailure(f"shim not runnable: {exc!r}")
     if proc.returncode != 0:
