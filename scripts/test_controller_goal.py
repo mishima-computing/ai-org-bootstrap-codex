@@ -1933,6 +1933,35 @@ def test_taskexecutor_root_ci_step_is_opt_in():
     print("ok  root CI writers run once at root only when CI_WRITERS_ENABLED opts in")
 
 
+def test_root_ci_commit_gate_refuses_unproven_workflow_and_emits_needs_info():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _temp_git_repo(d)
+        wf = Path(repo) / ".github" / "workflows" / "functional-ci.yml"
+        wf.parent.mkdir(parents=True)
+        wf.write_text("name: functional-ci\n", encoding="utf-8")
+        events = []
+        commit = cg._commit_root_ci_changes(repo, {"passed": False}, events.append)
+        assert commit is None, commit
+        assert any(e.get("type") == "goal_needs_info" for e in events), events
+        assert "functional-ci.yml" in git("status", "--porcelain", "--untracked-files=all").stdout
+    print("ok  root CI commit gate refuses unproven workflow with needs-info finding")
+
+
+def test_root_ci_commit_gate_commits_only_with_negative_control_proof():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _temp_git_repo(d)
+        wf = Path(repo) / ".github" / "workflows" / "functional-ci.yml"
+        wf.parent.mkdir(parents=True)
+        wf.write_text("name: functional-ci\n", encoding="utf-8")
+        events = []
+        commit = cg._commit_root_ci_changes(repo, {"passed": True}, events.append)
+        assert commit, events
+        assert git("status", "--porcelain").stdout.strip() == ""
+    print("ok  root CI commit gate commits only after negative-control proof passes")
+
+
 def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
     import tempfile, subprocess
     old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
