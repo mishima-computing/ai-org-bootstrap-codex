@@ -12,7 +12,9 @@
     "checks_added",
     "checks_already_present",
     "gaps",
-    "files_changed"
+    "files_changed",
+    "negative_control",
+    "escalations"
   ],
   "properties": {
     "role_id": {
@@ -75,7 +77,88 @@
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^\\.github/workflows/"
+        "pattern": "^(\\.github/workflows/|requirements\\.txt$|pyproject\\.toml$)"
+      }
+    },
+    "negative_control": {
+      "type": "object",
+      "required": [
+        "passed",
+        "static_passed",
+        "good_input",
+        "negative_control"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "static_passed": {
+          "type": "boolean"
+        },
+        "good_input": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "negative_control": {
+          "type": "object",
+          "required": [
+            "red_observed"
+          ],
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "red_observed": {
+              "type": ["boolean", "null"]
+            },
+            "result": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "actionlint": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "escalations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "code",
+          "severity",
+          "message",
+          "evidence"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "ci_writer_escalation"
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "major", "minor", "info"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
       }
     }
   },

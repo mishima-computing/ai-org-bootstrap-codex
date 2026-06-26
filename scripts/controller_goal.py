@@ -1276,15 +1276,70 @@ def _root_ci_writers_enabled() -> bool:
         return False
 
 
-def _commit_root_ci_changes(repo) -> str | None:
+def _ci_writer_proof_passed(proof: dict | None) -> bool:
+    return isinstance(proof, dict) and proof.get("passed") is True
+
+
+def _ci_writer_needs_info_event(reason: str, proof: dict | None = None, escalations: list | None = None) -> dict:
+    findings = []
+    for item in escalations or []:
+        if isinstance(item, dict):
+            findings.append(item)
+    if not findings:
+        findings.append({
+            "type": "ci_writer_escalation",
+            "code": reason,
+            "severity": "critical",
+            "message": "root CI workflow was not committed because negative-control proof did not pass",
+            "evidence": "scripts/controller_goal.py:_commit_root_ci_changes",
+        })
+    return {
+        "type": "goal_needs_info",
+        "source": "functional-ci-action-writer",
+        "reason": reason,
+        "findings": findings,
+        "negative_control": proof or {},
+    }
+
+
+def _commit_root_ci_changes(repo, proof: dict | None = None, emit=None,
+                            escalations: list | None = None) -> str | None:
     if not (Path(repo) / ".git").exists():
         return None
-    changed = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", ".github/workflows"],
+    paths = [".github/workflows", "requirements.txt", "pyproject.toml"]
+    changed = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
+                              "--", *paths],
                              capture_output=True, text=True).stdout.strip()
     if not changed:
         return None
+    changed_paths = []
+    for line in changed.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if parts:
+            changed_paths.append(parts[-1])
+    allowed_ci_paths = {".github/workflows/functional-ci.yml", "requirements.txt", "pyproject.toml"}
+    unproven_paths = [p for p in changed_paths if p not in allowed_ci_paths]
+    if unproven_paths:
+        extra = {
+            "type": "ci_writer_escalation",
+            "code": "unproven_ci_writer_path",
+            "severity": "critical",
+            "message": f"refusing to commit unproven CI-writer changes: {', '.join(unproven_paths)}",
+            "evidence": "scripts/controller_goal.py:_commit_root_ci_changes",
+        }
+        if callable(emit):
+            emit(_ci_writer_needs_info_event("unproven_ci_writer_path", proof, [*(escalations or []), extra]))
+            emit({"type": "root_ci_writers_not_committed", "reason": "unproven_ci_writer_path",
+                  "paths": unproven_paths})
+        return None
+    if not _ci_writer_proof_passed(proof):
+        if callable(emit):
+            emit(_ci_writer_needs_info_event("negative_control_unproven", proof, escalations))
+            emit({"type": "root_ci_writers_not_committed", "reason": "negative_control_unproven"})
+        return None
     git_ops.ensure_identity(repo)
-    subprocess.run(["git", "-C", str(repo), "add", "--", ".github/workflows"], capture_output=True)
+    add_paths = [".github/workflows"] + [p for p in ("requirements.txt", "pyproject.toml") if (Path(repo) / p).exists()]
+    subprocess.run(["git", "-C", str(repo), "add", "--", *add_paths], capture_output=True)
     commit = subprocess.run(["git", "-C", str(repo), "commit", "-m", "root ci workflows"],
                             capture_output=True, text=True)
     if commit.returncode != 0:
@@ -1302,14 +1357,38 @@ def _run_root_ci_writers(repo, goal, context, emit) -> bool:
         return True
     emit({"type": "root_ci_writers_start", "roles": roles})
     ok = True
+    ci_proofs: list[dict] = []
+    ci_escalations: list[dict] = []
     for role in roles:
+        if role == "functional-ci-action-writer":
+            import ci_writer_functional
+            authored = ci_writer_functional.author_functional_ci(Path(repo))
+            result = authored.result
+            proof = result.get("negative_control") if isinstance(result, dict) else {}
+            escalations = result.get("escalations") if isinstance(result, dict) else []
+            if isinstance(proof, dict):
+                ci_proofs.append(proof)
+            if isinstance(escalations, list):
+                ci_escalations.extend([e for e in escalations if isinstance(e, dict)])
+            emit({"type": "root_ci_writer_done", "role": role, "ok": bool(authored.ok),
+                  "unresolved": [e.get("message") for e in ci_escalations if isinstance(e, dict)],
+                  "stage": {"role": role, "kernel": "scripts/ci_writer_functional.py",
+                            "workflow": authored.workflow_path, "negative_control": proof}})
+            if ci_escalations and not authored.ok:
+                emit(_ci_writer_needs_info_event("functional_ci_writer_escalation", proof, ci_escalations))
+            ok = ok and bool(authored.ok)
+            continue
         stage_ok, _result, report_dict, stage = controller_pipeline._execute_stage_isolated(
             Path(repo), role, entries[role], goal, {}, f"root-ci-{uuid.uuid4().hex[:10]}-{role}",
             True, goal_context=context)
         emit({"type": "root_ci_writer_done", "role": role, "ok": bool(stage_ok),
               "unresolved": report_dict.get("unresolved_failures") or [], "stage": stage})
         ok = ok and bool(stage_ok)
-    commit = _commit_root_ci_changes(repo)
+    aggregate_proof = {
+        "passed": bool(ci_proofs) and all(proof.get("passed") is True for proof in ci_proofs),
+        "proofs": ci_proofs,
+    }
+    commit = _commit_root_ci_changes(repo, aggregate_proof, emit, ci_escalations)
     if commit:
         emit({"type": "root_ci_writers_committed", "commit": commit})
     return ok
