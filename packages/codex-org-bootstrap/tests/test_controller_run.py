@@ -36,7 +36,11 @@ class ControllerRunRoutingTests(unittest.TestCase):
                       "files_allowed_to_change": ["x"]}, "r")
         self.assertTrue(self.captured["quality_gate_enabled"])
         self.assertNotIn("output_schema", self.captured)
-        self.assertTrue(self.captured["cache_enabled"])
+        # Cache is forced OFF for the implementer: the implement_host folds runner-owned inputs
+        # (the build-map and the WHY) that are not part of run_contract's content-addressed cache
+        # key, so a cache replay would re-emit a stale implementation that ignores current grounding
+        # (controller_run: "Do not replay a stale implementation without folding the current grounding").
+        self.assertFalse(self.captured["cache_enabled"])
 
     def test_producing_carrier_gets_schema_gate_not_quality(self):
         for role, schema in [("linon", "linon-review"), ("stefan", "aesthetic-review"),

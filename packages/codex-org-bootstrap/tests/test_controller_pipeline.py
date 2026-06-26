@@ -405,10 +405,14 @@ class ControllerPipelineTests(unittest.TestCase):
     @staticmethod
     def _blocking_conf_report():
         """A `block`-mode conformance failure — folds into the convergence findings, so it BLOCKS this
-        iteration (its source is deterministic-impl, so repair routes to the implementer)."""
+        iteration (its source is deterministic-impl, so repair routes to the implementer). The finding carries
+        `failure_classification: "code"` — the explicit routing marker (incr #3) for a VERIFIED product defect:
+        only such a finding blocks convergence and drives the implementer repair loop. A finding without it is a
+        could-not-run / inconclusive dimension that is advisory (left unverified), not a product defect."""
         return {"applicable": True, "passed": False, "checks_run": 1,
                 "findings": [{"source": "cli-conformance", "check": "probe", "passed": False,
-                              "severity": "major", "detail": "end-to-end probe failed"}]}
+                              "severity": "major", "detail": "end-to-end probe failed",
+                              "failure_classification": "code"}]}
 
     @staticmethod
     def _stream_events(stream_path):
@@ -526,7 +530,7 @@ class ControllerPipelineTests(unittest.TestCase):
             "source": "http-conformance", "check": "lifecycle", "severity": "critical", "passed": False,
             "detail": "service start command exited before readiness",
             "returncode": 7, "stdout_tail": "own stdout", "stderr_tail": "own stderr",
-            "expected": "hidden-golden",
+            "expected": "hidden-golden", "failure_classification": "code",
         }
         self._run_with_conformance_reports([self._gate_report(finding), None])
 
@@ -548,7 +552,7 @@ class ControllerPipelineTests(unittest.TestCase):
         finding = {
             "source": "forbidden-pattern", "check": "forbidden_pattern", "severity": "major", "passed": False,
             "detail": "forbidden pattern 'old_name' appears 1 time(s)", "pattern": "old_name",
-            "count": 1, "hits": ["tool.py:3"],
+            "count": 1, "hits": ["tool.py:3"], "failure_classification": "code",
             "fix_hint": "Remove or rename all 1 occurrence(s) of `old_name` in the produced tree at tool.py:3.",
         }
         self._run_with_conformance_reports([self._gate_report(finding), None])
@@ -563,7 +567,7 @@ class ControllerPipelineTests(unittest.TestCase):
         finding = {
             "source": "regression", "check": "regression_suite", "severity": "major", "passed": False,
             "detail": "regression suite failed", "command": "make test", "exit_code": 1,
-            "example": 0, "expected": "hidden-golden",
+            "example": 0, "expected": "hidden-golden", "failure_classification": "code",
             "fix_hint": "Your change broke `make test` (exit 1); hidden-golden — do not modify the tests.",
         }
         self._run_with_conformance_reports([self._gate_report(finding), None])
@@ -578,7 +582,7 @@ class ControllerPipelineTests(unittest.TestCase):
             "source": "static-check", "check": "static_checks", "severity": "major", "passed": False,
             "detail": "static check `python3 -m pyflakes .` failed (exit 1)",
             "command": "python3 -m pyflakes .", "exit_code": 1,
-            "example": 0, "expected": "hidden-golden",
+            "example": 0, "expected": "hidden-golden", "failure_classification": "code",
             "fix_hint": "Static check `python3 -m pyflakes .` failed (exit 1) — hidden-golden — do not silence the analyzer.",
         }
         self._run_with_conformance_reports([self._gate_report(finding), None])
@@ -596,6 +600,7 @@ class ControllerPipelineTests(unittest.TestCase):
                     "source": source, "check": "body_contains", "severity": "major", "passed": False,
                     "detail": f"example 0 missed golden {golden}",
                     "example": 0, "expected": golden, "actual": "observed-output",
+                    "failure_classification": "code",
                 }
                 self._run_with_conformance_reports([self._gate_report(finding), None])
 
@@ -655,7 +660,8 @@ class ControllerPipelineTests(unittest.TestCase):
     def test_adr0018_targeted_gate_repair_still_converges_after_clean_iteration(self):
         finding = {"source": "cli-conformance", "check": "stdout_contains", "severity": "major",
                    "passed": False, "detail": "example 0 missing expected output",
-                   "example": 0, "expected": "golden-output", "actual": "wrong-output"}
+                   "example": 0, "expected": "golden-output", "actual": "wrong-output",
+                   "failure_classification": "code"}
         result = self._run_with_conformance_reports([self._gate_report(finding), None])
 
         self.assertTrue(result["converged"])
