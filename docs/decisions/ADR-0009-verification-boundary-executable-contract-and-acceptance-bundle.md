@@ -275,3 +275,57 @@ secret scanning is not yet FP-audited.
 **Test status.** Full scripts suite green after the flip (conformance 54, contract-preflight 14, controller-goal
 21, controller-workflow 11, gate-fp-audit 11, + others); the two suites that asserted the old shadow defaults
 were updated to assert the promoted defaults (and to set the mode explicitly where they test shadow streaming).
+
+## Addendum — deterministic transforms are untrusted generators: tool-route, always-Linon, speed-first (2026-06-27)
+
+Extends this ADR's boundary to the *implementer* side. Traced from a real failure (`ai-org-repair-handoff.md`
+§12–13): an atomic rename would not land — it was over-decomposed, and on repair the aufheben re-derived
+`files_allowed_to_change` from `write_scope=[]`, narrowing 9→5 files → half-rename → repair spiral. Root disease:
+the engine re-decides STRUCTURAL FACTS (decomposition granularity; the touched-file set) by LLM judgement on every
+pass.
+
+**Decision.** Decomposition gains a second axis — **determinism**. A sub-operation that is a known 100%-deterministic
+transform (rename, move, format, dependency-resolution, …) is routed to a deterministic **TOOL** (the org-tools
+transform registry) instead of the LLM implementer; no tool → graceful LLM fallback. A routed leaf is an **atomic
+tool-leaf** (never decomposed), and the forward dialectic (6 producers + aufheben + implementer) is **bypassed**.
+The tool **owns its scope** (the reference closure) as a FACT — not a per-pass LLM judgement; repair is **bounded**
+(implementer-only, additive, never re-derives the tool output or the scope; `_allowed_files` is **monotone /
+non-narrowing for all leaves**). ADR-0006 guarded the upper write boundary (no widening); this guards the lower
+bound (no narrowing below the required set).
+
+**A deterministic tool is STILL an untrusted generator** (ADR-0011/0012). Determinism = *consistency, not
+correctness*: a consistently-correct tool is consistently-**wrong** when its premise is wrong — uniformly and
+silently — and its self-check is *circular*. So **Linon audits tool output ALWAYS** (`self_verify`, and a
+formatter's idempotence, are circular self-checks and are excluded as Linon substitutes). Linon may be skipped
+only where a **pre-existing, tool-unmodified, relevant** independent oracle (the repo's own tests) covers the
+touched file; else Linon is mandatory. Tool edits to test/oracle files are forced to `residual_unverifiable` (a
+codemod must not silently rewrite the oracle that polices its own boundary). The string-literal residual an AST
+cannot disambiguate (e.g. `result.get("scaffold")`) is exactly Linon's job.
+
+**Evaluation criterion — SPEED first.** A transform-tool earns its place primarily by **speed**: it eliminates the
+dialectic (~8 carrier calls/leaf — 6 producers + aufheben + implementer) and the repair spiral, replacing them
+with fast deterministic execution. **Correctness is the floor, not the metric** — held constant by always-Linon.
+So "is a new tool worth its kernel surface?" is answered by telemetry: **carrier-calls + wall-clock per transform
+leaf, tool vs LLM path**. This is ADR-0005 (settledness, not dumbing) applied: speed comes from removing
+LLM-external work, never from lowering reasoning. A tool that does not save carrier-calls/wall-clock vs the LLM
+path does not earn the surface.
+
+**Transform-class roadmap (rename is tool #1).** The path is a CLASS, not a rename feature: any mechanical
+transform whose effect is a *computable fact* (reference closure / call-site set / import set), where exhaustive
+execution beats the LLM (whose weakness is missed occurrences), atomic, residual to Linon. Qualification test: the
+output is a *function of the input* — only intent/params are judged, never WHAT to produce. Next tools by dogfood
+value: (1) **dependency-resolution fixpoint** (ADR-0019 red-then-green closure; directly fixes the CI
+env-bootstrap pain — undeclared deps red on healthy code — highest near-term payoff); (2) **move/relocate**;
+(3) **import hygiene** (sort / remove-unused / add-missing; add-missing overlaps #1); (4) **format/lint-fix** (the
+always-Linon rule binds). **Hybrid** transforms split *within* one op along the determinism axis — signature-change
+(LLM picks the new signature; tool updates all call sites), extract/inline (LLM picks the boundary; tool does the
+mechanical move) — so even non-100%-deterministic refactors get exhaustive execution. Beyond code (the org is a
+general artifact engine): doc terminology rename, cross-reference updates, schema/data migration. The registry
+grows; each new tool inherits this addendum's rule unchanged.
+
+**Status of enforcement.** Slice-1 implemented + committed in the engine (`feat/deterministic-transform-tools`:
+rename-codemod tool, monotone scope, null-split guard incl. the scope-overlap case, the rename-only transform-kind
+router, dialectic-bypass, always-Linon, bounded tagged repair, the file-vs-line and oracle-rewriting holes; four
+negative-controls as tests). LAND verification (re-run the scaffold rename) in progress. Slice-2 (org-tools
+canonical registration + registry growth, the dependency-resolution fixpoint, move/format kinds, 2nd-axis
+mixed-leaf extraction, shadow double-run) is the next phase. Track against this addendum; do not open a new ADR.
