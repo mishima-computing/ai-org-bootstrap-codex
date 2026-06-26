@@ -466,6 +466,10 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     loop is unchanged; findings come back in the `{"findings": [...]}` shape `_linon_findings` consumes."""
     import codex_review
     started_at = _utc_now()
+    # `codex review` was previously a silent up-to-600s window on the stream; mark its START so the gap
+    # between launch and stage_done is observable (a stalled review is now visible, not a blank stream).
+    _stream_append(repo, {"source": "linon", "type": "linon_started", "run_id": stage_run_id,
+                          "reviewer": "codex-review", "started_at": _iso8601_utc(started_at)})
     try:
         rv = codex_review.review(str(repo))
     except Exception as exc:  # noqa: BLE001 — a failed review is "could not review", not "clean"
@@ -474,7 +478,14 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     findings = rv.get("findings") or []
     stage_ok = bool(rv.get("ok"))
     result = {"findings": findings}
-    unresolved = [] if stage_ok else ["codex review did not complete"]
+    if stage_ok:
+        unresolved = []
+    elif rv.get("timed_out"):
+        unresolved = ["codex review hit the wall-clock timeout (killed, process group reaped)"]
+    elif rv.get("frozen"):
+        unresolved = ["codex review produced no output (no-output watchdog killed it, process group reaped)"]
+    else:
+        unresolved = ["codex review did not complete"]
     report_dict = {"ok": stage_ok, "unresolved_failures": unresolved, "reviewer": "codex-review"}
     try:                                                # journal the raw review for audit (mirror _run_stage)
         d = Path(repo) / ".agent-runs" / "controller" / stage_run_id
