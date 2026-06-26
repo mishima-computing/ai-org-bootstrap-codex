@@ -313,11 +313,19 @@ path does not earn the surface.
 **Transform-class roadmap (rename is tool #1).** The path is a CLASS, not a rename feature: any mechanical
 transform whose effect is a *computable fact* (reference closure / call-site set / import set), where exhaustive
 execution beats the LLM (whose weakness is missed occurrences), atomic, residual to Linon. Qualification test: the
-output is a *function of the input* — only intent/params are judged, never WHAT to produce. Next tools by dogfood
-value: (1) **dependency-resolution fixpoint** (ADR-0019 red-then-green closure; directly fixes the CI
-env-bootstrap pain — undeclared deps red on healthy code — highest near-term payoff); (2) **move/relocate**;
-(3) **import hygiene** (sort / remove-unused / add-missing; add-missing overlaps #1); (4) **format/lint-fix** (the
-always-Linon rule binds). **Hybrid** transforms split *within* one op along the determinism axis — signature-change
+output is a *function of the input* — only intent/params are judged, never WHAT to produce. Next *code-transform*
+tools by dogfood value: (1) **move/relocate** (file/module/symbol + import follow); (2) **import hygiene**
+(sort / remove-unused / add-missing); (3) **format/lint-fix** (the always-Linon rule binds).
+
+**Category boundary — these TRANSFORM existing code; the CI-writer GENERATES an artifact.** "The CI is garbage"
+means the **GitHub Actions workflow CONTENT the CI-writer emitted is garbage** (e.g. a hand-listed
+`pip install jsonschema stripe` that is incomplete and reds healthy code) — not the repo's source, the env, or the
+CI signal. That is the **CI-writer's** domain (ADR-0019): a deterministic *generator* that authors `.github/
+workflows/*.yml` from the repo's signature. It shares this addendum's principle (deterministic, untrusted,
+always-Linon) but is **not a member of the code-transform registry**; the dependency-resolution fixpoint is a
+*technique the CI-writer uses* (a self-resolving workflow step, or a generated manifest), not a peer of rename.
+
+**Hybrid** transforms split *within* one op along the determinism axis — signature-change
 (LLM picks the new signature; tool updates all call sites), extract/inline (LLM picks the boundary; tool does the
 mechanical move) — so even non-100%-deterministic refactors get exhaustive execution. Beyond code (the org is a
 general artifact engine): doc terminology rename, cross-reference updates, schema/data migration. The registry
