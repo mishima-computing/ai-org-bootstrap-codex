@@ -285,6 +285,51 @@ def test_tree_scope_forbidden_pattern_out_of_scope_match_fails_preflight():
     print("ok  tree-scope forbidden pattern with out-of-scope current match -> preflight failure")
 
 
+def test_bare_word_forbidden_pattern_is_flagged_overbroad():
+    # the incident: a bare word `\b[Ss]caffold\b` matches BOTH the demo references to rename AND the real
+    # ADR-0008 mechanism the goal KEEPS -> the contract is unsatisfiable. The guard must flag it.
+    c = _schema_complete_none_contract()
+    c["forbidden_patterns"] = [{"pattern": r"\b[Ss]caffold\b", "scope": "leaf"}]
+    rep = pf.preflight(c)
+    ob = [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"]
+    assert not rep["passed"] and ob, rep
+    assert ob[0]["severity"] == "major" and ob[0]["source"] == "contract-preflight", ob
+    assert ob[0]["bare_word"].lower() == "scaffold" and ob[0]["pattern"] == r"\b[Ss]caffold\b", ob
+    # routes to the designer (full re-synthesis), not implementer-only repair
+    roles = cp._repair_roles_for([{"source": "contract-preflight"}], ["aufheben-designer", "implementer"])
+    assert roles == ["aufheben-designer", "implementer"], roles
+    print("ok  bare-word forbidden pattern -> forbidden_pattern_overbroad major, routes to designer")
+
+
+def test_namespace_anchored_forbidden_patterns_not_flagged():
+    # every namespace-precise authoring is backward compatible: NONE flagged overbroad.
+    for pattern in (r"cockpit\.scaffold", "cockpit/scaffold", "import scaffold", "from cockpit import scaffold",
+                    "SHAGIRI_SCAFFOLD", "def scaffold_runner", "class Scaffold", "_scaffold_seed_commit"):
+        c = _schema_complete_none_contract()
+        c["forbidden_patterns"] = [{"pattern": pattern, "scope": "leaf"}]
+        rep = pf.preflight(c)
+        assert not [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"], (pattern, rep)
+        assert rep["passed"], (pattern, rep)
+    print("ok  namespace-anchored patterns (module/import/env/def/class/underscore-joined) -> not flagged")
+
+
+def test_bare_word_overbroad_enriches_with_collision_hits_when_cwd_available():
+    # advisory enrichment: when cwd is available, surface a few actual collision hits so re-author is mechanical
+    # (the BLOCK decision is still the syntactic bare-word test).
+    c = _schema_complete_none_contract()
+    c["files_allowed_to_change"] = ["demo.py"]
+    c["forbidden_patterns"] = [{"pattern": r"\b[Ss]caffold\b", "scope": "leaf"}]
+    with tempfile.TemporaryDirectory(prefix="pf-overbroad-") as d:
+        root = Path(d)
+        (root / "demo.py").write_text("scaffold demo reference\n", encoding="utf-8")
+        (root / "server.py").write_text("def _scaffold_seed_commit():\n    return scaffold\n", encoding="utf-8")
+        rep = pf.preflight(c, cwd=root)
+    ob = [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"]
+    assert ob and ob[0].get("collision_hits"), ob
+    assert any("server.py" in h for h in ob[0]["collision_hits"]), ob
+    print("ok  bare-word overbroad finding enriches with actual collision hits when cwd is available")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []

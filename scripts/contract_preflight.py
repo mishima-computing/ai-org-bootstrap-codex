@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -71,6 +72,109 @@ def _tree_forbidden_pattern_findings(contract: dict, cwd: str | None) -> tuple[l
             "tree_forbidden_pattern_scope", "major", detail,
             pattern=pattern, count=count, hits=hits, scope="tree"))
     return findings, len(patterns)
+
+
+# A pattern is namespace-ANCHORED when its STRING (zero code inference) already scopes the token to a module
+# path, an import statement, a def/class-qualified identifier, an ALL-CAPS env/const token, or an
+# underscore-joined identifier of >=2 segments. Any of these can name the demo references WITHOUT also naming a
+# bare kept mechanism, so they are allowed. Each test reads the pattern STRING only — never the repo.
+_ANCHOR_MODULE_QUALIFIED = re.compile(r"[A-Za-z_]\w*\\?[./][A-Za-z_]")  # cockpit.scaffold / cockpit\.scaffold / cockpit/scaffold
+_ANCHOR_IMPORT = re.compile(r"\b(?:import|from)\b")                     # import scaffold / from x import
+_ANCHOR_DEF_CLASS = re.compile(r"\b(?:def|class)\b\s+\S")               # def scaffold_runner / class Scaffold
+_ANCHOR_ALLCAPS_TOKEN = re.compile(r"[A-Z][A-Z0-9]*_[A-Z0-9_]+")       # SHAGIRI_SCAFFOLD
+_ANCHOR_UNDERSCORE_IDENT = re.compile(r"[A-Za-z]\w*_\w+")              # _scaffold_seed_commit (>=2 segments)
+
+
+def _strip_boundary_syntax(pattern: str) -> str:
+    """Remove regex word-boundary / case-class / anchor syntax from the pattern STRING so the remaining text is
+    the literal token the author meant — `\\b[Ss]caffold\\b` -> `scaffold`. Operates on text alone (no repo)."""
+    s = pattern.replace(r"\b", "").replace(r"\B", "")
+    s = s.strip("^$")
+    # collapse a single-char case class `[Ss]` / `[aA]` to its alphabetic content
+    s = re.sub(r"\[([A-Za-z])([A-Za-z])\]",
+               lambda m: m.group(1) if m.group(1).lower() == m.group(2).lower() else m.group(0), s)
+    return s
+
+
+def _pattern_is_namespace_anchored(pattern: str) -> bool:
+    """True iff the pattern STRING is already scoped to a namespace (module path / import / def|class /
+    ALL-CAPS const / underscore-joined identifier). Tests the literal token AFTER word-boundary/case-class
+    syntax is stripped, so a bare `\\b...\\b` does not masquerade as path-qualified via its own backslashes.
+    Purely syntactic — it never inspects the repo."""
+    if not isinstance(pattern, str) or not pattern:
+        return False
+    s = _strip_boundary_syntax(pattern)
+    return any(rx.search(s) for rx in (
+        _ANCHOR_MODULE_QUALIFIED, _ANCHOR_IMPORT, _ANCHOR_DEF_CLASS,
+        _ANCHOR_ALLCAPS_TOKEN, _ANCHOR_UNDERSCORE_IDENT))
+
+
+def _reduce_to_bare_word(pattern: str) -> str | None:
+    """Strip regex word-boundary / case-class / anchor syntax from the pattern STRING. If what remains is a
+    single bare word/identifier with NO qualifier, return that word (e.g. `\\b[Ss]caffold\\b` -> `scaffold`);
+    otherwise return None. Zero code inference — operates on the pattern text alone."""
+    if not isinstance(pattern, str) or not pattern:
+        return None
+    s = _strip_boundary_syntax(pattern)
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", s):
+        return s
+    return None
+
+
+def _forbidden_pattern_overbroad_findings(contract: dict, cwd: str | None) -> tuple[list[dict], int]:
+    """DESIGN-TIME guard: reject namespace-BLIND forbidden patterns. The block decision is the syntactic
+    bare-word test on the pattern STRING (ADR-0009: no text inference of intent — only the pattern's own
+    shape). A bare word such as `\\b[Ss]caffold\\b` will match the REAL kept mechanism (ADR-0008
+    cockpit/server.py: `_scaffold_seed_commit`, `result.get("scaffold")`, prose) as well as the demo
+    references, making the contract UNSATISFIABLE — so the re-author must scope the pattern to the OLD module
+    path / specific symbols. Anchored patterns (module-qualified, import, def/class, ALL-CAPS const,
+    underscore-joined identifier) are NOT flagged."""
+    patterns = contract.get("forbidden_patterns") if isinstance(contract, dict) else None
+    if not isinstance(patterns, list) or not patterns:
+        return [], 0
+    findings: list[dict] = []
+    checks = 0
+    for spec in patterns:
+        if not isinstance(spec, dict):
+            continue
+        pattern = spec.get("pattern")
+        if not pattern:
+            continue
+        checks += 1
+        if _pattern_is_namespace_anchored(pattern):
+            continue
+        bare = _reduce_to_bare_word(pattern)
+        if bare is None:
+            continue
+        detail = (
+            f"forbidden pattern {pattern!r} is a bare word ({bare!r}) with no namespace qualifier: it will "
+            f"match the REAL mechanism the goal KEEPS as well as the demo references you mean to forbid, so "
+            f"the contract is unsatisfiable. Author a namespace-precise pattern scoped to the OLD module "
+            f"path / symbols (module-qualified e.g. 'cockpit\\.{bare}', import form 'import {bare}', an "
+            f"ALL-CAPS env/const, or a def/class-qualified identifier) — never a bare word that also names a "
+            f"kept mechanism")
+        extra = {"pattern": pattern, "bare_word": bare}
+        # ADVISORY enrichment only: surface a few actual collision hits so the re-author is mechanical. The
+        # BLOCK decision above is purely the syntactic bare-word test; the scan is never the gate.
+        if cwd is not None:
+            probe = {"role_id": "aufheben-designer", "deliverable_kind": "none",
+                     "forbidden_patterns": [{"pattern": pattern, "scope": "tree"}]}
+            try:
+                report = conformance.run_forbidden_patterns(probe, cwd=cwd)
+            except Exception:
+                report = {}
+            collision_hits: list[str] = []
+            total = 0
+            for f in (report.get("findings") or []):
+                if isinstance(f, dict) and f.get("pattern") == pattern:
+                    total += f.get("count", 0) or 0
+                    collision_hits += [h for h in (f.get("hits") or []) if isinstance(h, str)]
+            if collision_hits:
+                extra["collision_hits"] = collision_hits[:5]
+                extra["collision_count"] = total
+                detail += f"; e.g. it already collides at {', '.join(collision_hits[:5])}"
+        findings.append(_finding("forbidden_pattern_overbroad", "major", detail, **extra))
+    return findings, checks
 
 
 def _http_has_e2e_example(profile) -> bool:
@@ -244,5 +348,10 @@ def preflight(contract: dict, *, cwd=None) -> dict:
     tree_findings, tree_checks = _tree_forbidden_pattern_findings(contract, str(cwd) if cwd is not None else None)
     findings += tree_findings
     checks += tree_checks
+
+    overbroad_findings, overbroad_checks = _forbidden_pattern_overbroad_findings(
+        contract, str(cwd) if cwd is not None else None)
+    findings += overbroad_findings
+    checks += overbroad_checks
 
     return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": checks}
