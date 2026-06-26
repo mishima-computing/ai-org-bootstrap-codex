@@ -325,11 +325,9 @@ workflows/*.yml` from the repo's signature. It shares this addendum's principle 
 always-Linon) but is **not a member of the code-transform registry**; the dependency-resolution fixpoint is a
 *technique the CI-writer uses* (a self-resolving workflow step, or a generated manifest), not a peer of rename.
 
-**Hybrid** transforms split *within* one op along the determinism axis — signature-change
-(LLM picks the new signature; tool updates all call sites), extract/inline (LLM picks the boundary; tool does the
-mechanical move) — so even non-100%-deterministic refactors get exhaustive execution. Beyond code (the org is a
-general artifact engine): doc terminology rename, cross-reference updates, schema/data migration. The registry
-grows; each new tool inherits this addendum's rule unchanged.
+(The three above are the slice-2 scope. **Nothing beyond slice-2 is promised in this ADR until it is built** —
+hybrids, doc/schema transforms, and registry growth are noted in the design doc as possibilities, not decisions,
+to avoid an aspiration backlog that outruns implementation.)
 
 **Status of enforcement.** Slice-1 implemented + committed in the engine (`feat/deterministic-transform-tools`:
 rename-codemod tool, monotone scope, null-split guard incl. the scope-overlap case, the rename-only transform-kind
