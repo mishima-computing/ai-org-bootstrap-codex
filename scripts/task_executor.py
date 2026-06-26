@@ -44,6 +44,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import git_ops  # noqa: E402
+import conformance  # noqa: E402
 from splitter import HOUSE_RULES  # noqa: E402
 
 LEAF = "leaf"
@@ -463,6 +464,7 @@ class TaskExecutor:
                 "kind": "integration",
                 "integrated_children": [c.commit_sha for c in ordered_commits],
                 "verify": evidence,
+                "tree_forbidden_patterns": _aggregate_tree_forbidden_patterns(ordered_commits),
             },
         )
 
@@ -690,6 +692,7 @@ class TaskExecutor:
                 "kind": "leaf",
                 "converged": bool(result.get("converged")),
                 "linon_findings_count": result.get("linon_findings_count"),
+                "tree_forbidden_patterns": conformance.tree_forbidden_patterns(result.get("aufheben", {})),
             }
             return VerifiedCommit(node.id, sha, evidence)
         finally:
@@ -763,6 +766,29 @@ class TaskExecutor:
 def _verification_confirmed(evidence) -> bool:
     """Composite verification is fail-closed: only an explicit verified:true is green."""
     return isinstance(evidence, dict) and evidence.get("verified") is True
+
+
+def _tree_forbidden_patterns_from_evidence(evidence) -> list[dict]:
+    if not isinstance(evidence, dict):
+        return []
+    if isinstance(evidence.get("tree_forbidden_patterns"), list):
+        return [dict(p) for p in evidence["tree_forbidden_patterns"]
+                if isinstance(p, dict) and p.get("pattern")]
+    contract = evidence.get("aufheben") if isinstance(evidence.get("aufheben"), dict) else \
+        evidence.get("contract") if isinstance(evidence.get("contract"), dict) else None
+    return conformance.tree_forbidden_patterns(contract or {})
+
+
+def _aggregate_tree_forbidden_patterns(commits: list[VerifiedCommit]) -> list[dict]:
+    patterns: list[dict] = []
+    seen: set[str] = set()
+    for commit in commits:
+        for spec in _tree_forbidden_patterns_from_evidence(getattr(commit, "evidence", {})):
+            key = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+            if key not in seen:
+                seen.add(key)
+                patterns.append(spec)
+    return patterns
 
 
 def _as_verified_commit(result, node: TaskNode) -> VerifiedCommit:

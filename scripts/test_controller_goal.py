@@ -2579,6 +2579,25 @@ def test_goal_acceptance_gate_is_deliverable_kind_independent():
     print("ok  (d) goal acceptance is deliverable_kind-INDEPENDENT (library leaf, goal probe still runs)")
 
 
+def test_root_tree_forbidden_gate_blocks_delivery_when_final_repo_has_tree_scope_match():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d)
+        (repo / "src").mkdir()
+        (repo / "src" / "legacy.py").write_text("TREE_TOKEN\n", encoding="utf-8")
+        verified = cg.task_executor.VerifiedCommit("root", "sha", {
+            "tree_forbidden_patterns": [{"pattern": "TREE_TOKEN", "scope": "tree"}],
+        })
+        events = []
+        ok = cg._run_root_tree_forbidden_gate(repo, verified, events.append)
+    assert ok is False, events
+    root_events = [e for e in events if e.get("type") == "root_tree_forbidden_gate"]
+    blocked = [e for e in events if e.get("type") == "goal_blocked" and e.get("source") == "forbidden-pattern"]
+    assert root_events and root_events[0]["passed"] is False, events
+    assert blocked and blocked[0]["findings"][0]["hits"] == ["src/legacy.py:1"], events
+    print("ok  root tree-wide forbidden-pattern gate blocks delivery on final composed straggler")
+
+
 if __name__ == "__main__":
     import os
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

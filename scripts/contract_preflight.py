@@ -15,6 +15,14 @@ severity budget / repair loop with no parallel path.
 from __future__ import annotations
 
 import fnmatch
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import conformance  # noqa: E402
 
 # Deliverable kinds that declare an executable interface (so a conformance profile is owed). "none" is the
 # explicit no-interface declaration and is deliberately NOT in this set.
@@ -31,6 +39,38 @@ def _is_substantive_profile(profile) -> bool:
 def _finding(check: str, severity: str, detail: str, **extra) -> dict:
     return {"source": "contract-preflight", "check": check, "severity": severity,
             "passed": False, "detail": detail, "failure_classification": "code", **extra}
+
+
+def _tree_forbidden_pattern_findings(contract: dict, cwd: str | None) -> tuple[list[dict], int]:
+    """Tree-scope patterns must be satisfiable by the leaf before implementation starts."""
+    if cwd is None:
+        return [], 0
+    patterns = conformance.tree_forbidden_patterns(contract)
+    if not patterns:
+        return [], 0
+    probe_contract = {
+        "role_id": "aufheben-designer",
+        "deliverable_kind": contract.get("deliverable_kind", "none"),
+        "files_allowed_to_change": contract.get("files_allowed_to_change"),
+        "forbidden_patterns": patterns,
+    }
+    report = conformance.run_forbidden_patterns(probe_contract, cwd=cwd)
+    findings: list[dict] = []
+    for advisory in report.get("advisory_findings") or []:
+        if not isinstance(advisory, dict):
+            continue
+        pattern = advisory.get("pattern")
+        count = advisory.get("count", 0)
+        hits = advisory.get("hits") or []
+        detail = (f"tree-scoped forbidden pattern {pattern!r} already appears {count} time(s) outside "
+                  "files_allowed_to_change; widen/split the contract or use scope:'leaf' if total repository "
+                  "absence is not required")
+        if hits:
+            detail += "; e.g. " + ", ".join(hits)
+        findings.append(_finding(
+            "tree_forbidden_pattern_scope", "major", detail,
+            pattern=pattern, count=count, hits=hits, scope="tree"))
+    return findings, len(patterns)
 
 
 def _http_has_e2e_example(profile) -> bool:
@@ -124,7 +164,7 @@ def _cli_findings(profile: dict) -> list[dict]:
     return findings
 
 
-def preflight(contract: dict) -> dict:
+def preflight(contract: dict, *, cwd=None) -> dict:
     """Check the aufheben contract before implementation. Returns {applicable, passed, findings, checks_run}.
     `applicable` is False for anything that is not a contract (so it is a no-op on non-aufheben outputs)."""
     if not isinstance(contract, dict) or contract.get("role_id") != "aufheben-designer":
@@ -200,5 +240,9 @@ def preflight(contract: dict) -> dict:
                 f"endpoint/call, and expected body/result — encode the probe so conformance boots the real "
                 f"artifact",
                 kind=kind))
+
+    tree_findings, tree_checks = _tree_forbidden_pattern_findings(contract, str(cwd) if cwd is not None else None)
+    findings += tree_findings
+    checks += tree_checks
 
     return {"applicable": True, "passed": not findings, "findings": findings, "checks_run": checks}

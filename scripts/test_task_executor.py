@@ -602,6 +602,38 @@ def test_cockpit_events_cover_start_done_split_and_empty_fallback():
     print("ok  cockpit events: leaf_start, leaf_split, leaf_done(commit), decompose_empty_fallback")
 
 
+def test_tree_forbidden_patterns_aggregate_through_composite_evidence():
+    pattern = {"pattern": "TREE_TOKEN", "scope": "tree", "reason": "goal-wide rename"}
+
+    def run_leaf(node):
+        if node.id == "A":
+            evidence = {"kind": "leaf", "tree_forbidden_patterns": [pattern]}
+        else:
+            evidence = {"kind": "leaf", "aufheben": {"forbidden_patterns": [pattern, {"pattern": "LOCAL"}]}}
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", evidence)
+
+    def verify(node, integrated_head, child_commits):
+        return {"verified": True}
+
+    def integrate(node, base, child_commits):
+        return (f"integrated-head-{node.id}", None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        return f"integ-sha-{node.id}"
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("A", kind=S.LEAF, objective="do A"),
+        S.TaskNode("B", kind=S.LEAF, objective="do B"),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, max_parallel=1)
+    result = task_executor.execute(root)
+
+    patterns = result.evidence["tree_forbidden_patterns"]
+    assert patterns == [pattern], patterns
+    print("ok  tree-scoped forbidden patterns aggregate once through composite evidence")
+
+
 if __name__ == "__main__":
     test_true_recursion_commit_per_node()
     test_real_git_integration()
@@ -616,4 +648,5 @@ if __name__ == "__main__":
     test_worktree_cleanup_is_idempotent()
     test_parallel_child_abort_cleans_inflight_worktree_and_pgid()
     test_cockpit_events_cover_start_done_split_and_empty_fallback()
+    test_tree_forbidden_patterns_aggregate_through_composite_evidence()
     print("\nall task_executor tests passed.")

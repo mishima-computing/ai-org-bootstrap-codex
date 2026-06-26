@@ -204,6 +204,15 @@
             "type": "integer",
             "minimum": 0
           },
+          "scope": {
+            "description": "Where this absence obligation is enforced. 'leaf' (default) means the leaf conformance gate blocks only on matches in files_allowed_to_change and reports other matches as advisory telemetry. 'tree' means the goal requires repository-wide absence: preflight rejects unsatisfiable leaves with current out-of-scope matches, leaf conformance still blocks only writable files, and the final root gate enforces tree-wide absence after integration.",
+            "type": "string",
+            "enum": [
+              "leaf",
+              "tree"
+            ],
+            "default": "leaf"
+          },
           "reason": {
             "description": "Why this pattern is forbidden \u2014 surfaced in the finding so a reader (and the repair routing) understands the obligation.",
             "type": "string"

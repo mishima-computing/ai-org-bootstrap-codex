@@ -231,6 +231,39 @@ def test_shadow_conformance_streams_infra_finding_event():
     print("ok  conformance streams infra_finding events and keeps them out of block-mode repair")
 
 
+def test_shadow_conformance_streams_forbidden_pattern_out_of_scope_advisory_event():
+    tmp = Path(tempfile.mkdtemp(prefix="cp-fp-advisory-"))
+    (tmp / "src").mkdir()
+    (tmp / "docs").mkdir()
+    (tmp / "src" / "owned.py").write_text("clean\n", encoding="utf-8")
+    (tmp / "docs" / "legacy.md").write_text("TREE_TOKEN\n", encoding="utf-8")
+    results = {"aufheben-designer": {
+        "role_id": "aufheben-designer",
+        "deliverable_kind": "none",
+        "files_allowed_to_change": ["src/owned.py"],
+        "forbidden_patterns": [{"pattern": "TREE_TOKEN", "scope": "tree"}],
+    }}
+
+    events = []
+    saved = (cp._stream_append, cp.CONFORMANCE_GATE_MODE)
+    cp._stream_append = lambda repo, event: events.append(event)
+    try:
+        cp.CONFORMANCE_GATE_MODE = "block"
+        report = cp._shadow_conformance(tmp, results, "run-fp-advisory",
+                                        runner=lambda *a, **k: cp.conformance.RunResult(0, "", ""))
+    finally:
+        cp._stream_append, cp.CONFORMANCE_GATE_MODE = saved
+
+    assert report and report["passed"] and report["findings"] == [], report
+    advisory_events = [e for e in events if e.get("type") == "out_of_scope_advisory"]
+    assert advisory_events, events
+    ev = advisory_events[0]
+    assert ev["source"] == "forbidden-pattern" and ev["scope"] == "tree", ev
+    assert ev["pattern"] == "TREE_TOKEN" and ev["hits"] == ["docs/legacy.md:1"], ev
+    assert not [f for f in report["findings"] if not f.get("passed")], report
+    print("ok  conformance streams forbidden-pattern out-of-scope advisory without failed findings")
+
+
 # ── incr #2: bounded autonomous clean-retry of an unverified dimension ──────────────────────────────────────
 
 def _fake_clean_execute(repo, role, entry, objective, inputs, stage_run_id, cache, **kwargs):

@@ -1460,12 +1460,32 @@ def test_forbidden_pattern_partitions_allowed_scope_and_advisory_hits():
     assert f["check"] == "forbidden_pattern" and f["count"] == 1, f
     assert f["hits"] == ["src/in_scope.py:1"], f
     assert all("tests/out_of_scope.py" not in hit for hit in f["hits"]), f
+    assert f["scope"] == "leaf", f
     advisory = rep.get("advisory_findings") or []
     assert len(advisory) == 1, rep
     a = advisory[0]
     assert a["check"] == "forbidden_pattern_out_of_scope" and a["passed"] is True, a
+    assert a["scope"] == "leaf", a
     assert a["count"] == 2 and a["hits"] == ["tests/out_of_scope.py:1", "tests/out_of_scope.py:2"], a
     print("ok  forbidden-pattern: allowed-scope hits block; out-of-scope hits are advisory only")
+
+
+def test_forbidden_pattern_tree_scope_leaf_conformance_still_blocks_only_allowed_files():
+    with _ws({
+        "src/in_scope.py": "TREE_TOKEN\n",
+        "docs/out_of_scope.md": "TREE_TOKEN\nTREE_TOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract([{"pattern": "TREE_TOKEN", "scope": "tree"}], allowed_files=["src/in_scope.py"]),
+            cwd=d,
+        )
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["count"] == 1 and f["hits"] == ["src/in_scope.py:1"] and f["scope"] == "tree", f
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1, rep
+    assert advisory[0]["scope"] == "tree" and advisory[0]["count"] == 2, advisory
+    print("ok  forbidden-pattern: tree-scope leaf conformance blocks only in-scope hits and advises out-of-scope")
 
 
 def test_forbidden_pattern_without_allowed_files_keeps_legacy_tree_wide_blocking():
@@ -1635,8 +1655,12 @@ def test_schema_forbidden_patterns_is_optional_and_shaped():
             "fallback_plan": "f", "handoff_to_implementer": "h", "deliverable_kind": "none"}
     assert v.is_valid(base), list(v.iter_errors(base))        # optional: absent still validates
     ok = {**base, "forbidden_patterns": [{"pattern": "_scaffold_seed_commit",
-                                          "exclude": ["CHANGELOG.md"], "max_occurrences": 0, "reason": "renamed"}]}
+                                          "exclude": ["CHANGELOG.md"], "max_occurrences": 0, "scope": "tree",
+                                          "reason": "renamed"}]}
     assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert v.is_valid({**base, "forbidden_patterns": [{"pattern": "x"}]}), "scope defaults to leaf"
+    assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "scope": "repo"}]}), \
+        "scope is leaf|tree only"
     assert not v.is_valid({**base, "forbidden_patterns": [{"reason": "no pattern"}]}), "pattern is required"
     assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "max_occurrences": -1}]}), \
         "max_occurrences must be >= 0"

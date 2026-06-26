@@ -1076,6 +1076,20 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
                                   "run_id": run_id, "slot": report["slot"],
                                   "status": report.get("status"), "ts": _iso8601_utc()})
         return report
+    for advisory in report.get("advisory_findings") or []:
+        if not isinstance(advisory, dict) or advisory.get("check") != "forbidden_pattern_out_of_scope":
+            continue
+        _stream_append(repo, {
+            "source": "forbidden-pattern",
+            "type": "out_of_scope_advisory",
+            "run_id": run_id,
+            "pattern": advisory.get("pattern"),
+            "count": advisory.get("count"),
+            "hits": advisory.get("hits") or [],
+            "scope": advisory.get("scope", "leaf"),
+            "finding": advisory,
+            "ts": _iso8601_utc(),
+        })
     _stream_advisory_gate_findings(repo, "cli-conformance", run_id, _advisory_gate_findings(report))
     _stream_append(repo, {
         "source": "cli-conformance",
@@ -1105,7 +1119,7 @@ def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
     if not isinstance(contract, dict):
         return None
     try:
-        report = contract_preflight.preflight(contract)
+        report = contract_preflight.preflight(contract, cwd=str(repo))
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "contract-preflight", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})

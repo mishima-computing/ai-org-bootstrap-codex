@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -266,6 +267,24 @@ def test_non_service_kinds_are_not_forced_to_declare_service_probe():
     print("ok  cli/library/none contracts are not forced to declare service production-boundary probes")
 
 
+def test_tree_scope_forbidden_pattern_out_of_scope_match_fails_preflight():
+    c = _schema_complete_none_contract()
+    c["files_allowed_to_change"] = ["src/in_scope.py"]
+    c["forbidden_patterns"] = [{"pattern": "TREE_TOKEN", "scope": "tree"}]
+    with tempfile.TemporaryDirectory(prefix="pf-tree-scope-") as d:
+        root = Path(d)
+        (root / "src").mkdir()
+        (root / "docs").mkdir()
+        (root / "src" / "in_scope.py").write_text("clean\n", encoding="utf-8")
+        (root / "docs" / "legacy.md").write_text("TREE_TOKEN\n", encoding="utf-8")
+        rep = pf.preflight(c, cwd=root)
+    hits = [f for f in rep["findings"] if f["check"] == "tree_forbidden_pattern_scope"]
+    assert not rep["passed"] and hits, rep
+    assert hits[0]["source"] == "contract-preflight" and hits[0]["scope"] == "tree", hits
+    assert hits[0]["hits"] == ["docs/legacy.md:1"], hits
+    print("ok  tree-scope forbidden pattern with out-of-scope current match -> preflight failure")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []
@@ -324,6 +343,18 @@ def test_preflight_gate_block_reruns_aufheben_then_proceeds():
     assert floored is False and rep["passed"], (floored, rep)
     assert len(runs) == 1 and runs[0]["findings"], "one aufheben re-run, fed the preflight findings"
     print("ok  preflight gate (block): a contract defect re-runs aufheben only, then proceeds")
+
+
+def test_preflight_gate_tree_scope_failure_routes_to_aufheben_not_implementer():
+    rep, floored, runs = _drive_preflight_gate(
+        [{"applicable": True, "passed": False,
+          "findings": [{"source": "contract-preflight", "check": "tree_forbidden_pattern_scope"}]},
+         {"applicable": True, "passed": True, "findings": []}], mode="block")
+    roles = cp._repair_roles_for([{"source": "contract-preflight"}], ["aufheben-designer", "implementer"])
+    assert floored is False and rep["passed"], (floored, rep)
+    assert len(runs) == 1 and runs[0]["findings"][0]["check"] == "tree_forbidden_pattern_scope", runs
+    assert roles == ["aufheben-designer", "implementer"], roles
+    print("ok  tree-scope preflight failure feeds aufheben redesign path, not implementer-only repair")
 
 
 def test_preflight_gate_block_fails_closed_after_cap():

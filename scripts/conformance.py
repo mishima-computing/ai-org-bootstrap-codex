@@ -1636,6 +1636,20 @@ def _allowed_file_matcher(allowed_files) -> Optional[Callable[[str], bool]]:
     return _matches
 
 
+def _forbidden_pattern_scope(spec: dict) -> str:
+    scope = spec.get("scope", "leaf")
+    return scope if scope in ("leaf", "tree") else "leaf"
+
+
+def tree_forbidden_patterns(contract: dict) -> list[dict]:
+    """Return contract forbidden_patterns whose explicit scope requires repository-wide absence."""
+    patterns = contract.get("forbidden_patterns") if isinstance(contract, dict) else None
+    if not isinstance(patterns, list):
+        return []
+    return [dict(spec) for spec in patterns
+            if isinstance(spec, dict) and spec.get("pattern") and _forbidden_pattern_scope(spec) == "tree"]
+
+
 def _forbidden_pattern_findings(patterns: list, cwd: Optional[str], allowed_files=None) -> tuple[list[dict], list[dict]]:
     """For each declared pattern, grep the produced tree at `cwd` (text files only; .git / node_modules / vendor
     dirs and binary files skipped) and count matches in files NOT matching the pattern's `exclude` globs. When
@@ -1652,6 +1666,7 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str], allowed_file
         raw = spec.get("pattern")
         if not raw:
             continue
+        scope = _forbidden_pattern_scope(spec)
         try:
             rx = re.compile(raw)
         except re.error:
@@ -1703,7 +1718,7 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str], allowed_file
             advisory_findings.append(_forbidden_finding(
                 "forbidden_pattern_out_of_scope", "advisory", True, detail,
                 pattern=raw, count=out_of_scope_count, max_occurrences=max_occ, hits=out_of_scope_hits,
-                out_of_scope=True))
+                out_of_scope=True, scope=scope))
         if count > max_occ:
             reason = spec.get("reason")
             detail = (f"forbidden pattern {raw!r} appears {count} time(s) in the produced tree "
@@ -1725,9 +1740,23 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str], allowed_file
                 fix_hint += f" {reason}."
             findings.append(_forbidden_finding(
                 "forbidden_pattern", "major", False, detail,
-                pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint,
+                pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint, scope=scope,
                 failure_classification="code"))   # incr #3: a grep hit in delivered source is a fact -> product defect
     return findings, advisory_findings
+
+
+def run_tree_forbidden_patterns(patterns: list, *, cwd: Optional[str] = None) -> dict:
+    """Root/integration gate: enforce explicit tree-scope forbidden patterns over the composed repo."""
+    if not isinstance(patterns, list) or not patterns:
+        return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
+    normalized = [dict(p, scope="tree") for p in patterns if isinstance(p, dict) and p.get("pattern")]
+    findings, _advisory = _forbidden_pattern_findings(normalized, cwd, allowed_files=None)
+    return {
+        "applicable": True,
+        "passed": all(f["passed"] for f in findings),
+        "findings": findings,
+        "checks_run": len(normalized),
+    }
 
 
 def run_forbidden_patterns(contract: dict, *, cwd: Optional[str] = None) -> dict:

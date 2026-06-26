@@ -1251,6 +1251,23 @@ def _apply_verified_commit(repo, verified: task_executor.VerifiedCommit, emit) -
         raise task_executor.TaskExecutorIntegrationError(cp.stderr.strip())
 
 
+def _run_root_tree_forbidden_gate(repo, final_verified, emit) -> bool:
+    evidence = getattr(final_verified, "evidence", {}) if final_verified is not None else {}
+    patterns = evidence.get("tree_forbidden_patterns") if isinstance(evidence, dict) else None
+    if not isinstance(patterns, list) or not patterns:
+        return True
+    report = conformance.run_tree_forbidden_patterns(patterns, cwd=str(repo))
+    emit({"source": "forbidden-pattern", "type": "root_tree_forbidden_gate",
+          "passed": report.get("passed"), "checks_run": report.get("checks_run"),
+          "findings": report.get("findings", [])})
+    if report.get("passed"):
+        return True
+    emit({"type": "goal_blocked", "source": "forbidden-pattern",
+          "detail": "tree-scoped forbidden_patterns remain in the final composed repository",
+          "findings": report.get("findings", [])})
+    return False
+
+
 def _root_ci_writers_enabled() -> bool:
     try:
         import controller_pipeline
@@ -1473,6 +1490,10 @@ def _run_goal_taskexecutor(repo, goal, run_leaf=None, *, goal_id=None, resume_fr
                 plan = _plan_from_taskexecutor_root(root, status="failed")
         else:
             emit({"type": "root_ci_skipped", "reason": "disabled"})
+        if execution_ok:
+            execution_ok = _run_root_tree_forbidden_gate(repo, final_verified, emit)
+            if not execution_ok:
+                plan = _plan_from_taskexecutor_root(root, status="failed")
 
     return _finalize_taskexecutor_goal(repo, goal, plan, context_ref["value"], store, goal_id, asks, execution_ok, emit,
                                        iso_wt=iso_wt, orig_repo=orig_repo, goal_branch=goal_branch,
