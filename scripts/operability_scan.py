@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 import deliverable_kind as dk
+import deterministic_transform_tools
 import pre_localizer
 
 _SERVER_RE = re.compile(r"uvicorn|gunicorn|hypercorn|waitress|flask run|http\.server|node\s|npm (run )?start|serve\b|rails server")
@@ -62,6 +63,12 @@ _INTERFACE_TOKENS = {"endpoint", "endpoints", "route", "routes", "api", "apis", 
                      "arguments", "export", "exports", "symbol", "symbols", "module", "schema", "json",
                      "webhook", "event", "events", "public"}
 _WEAK_TOKENS = {"fix", "improve", "handle", "support", "update", "change"}
+_RENAME_TO_RE = re.compile(
+    r"\brename\b\s+(?P<old>[A-Za-z_][A-Za-z0-9_./-]*)\s+(?:to|->)\s+(?P<new>[A-Za-z_][A-Za-z0-9_./-]*)",
+    re.IGNORECASE,
+)
+_SCAFFOLD_DEMO_RE = re.compile(r"\bscaffold\b", re.IGNORECASE)
+_DEMO_ORG_RE = re.compile(r"\bdemo[-_ ]org\b|\bDEMO_ORG\b")
 
 
 class OperabilityScan:
@@ -464,3 +471,80 @@ class ChangeIntentScan:
             f"existing_repo_surface_kind is {(existing or {}).get('kind', 'undetermined')}",
             "aufheben must choose deliverable_kind from the actual contract objective and declared acceptance criteria",
         ]
+
+
+class TransformKindScan:
+    """Deterministic transform-kind classifier.
+
+    Slice-1 routes only fully mechanical rename leaves. Anything ambiguous returns
+    ``novel`` so the existing LLM dialectic path is byte-identical to today.
+    """
+
+    def __init__(self, repo, objective: str, candidates=None, index=None):
+        self.repo = Path(repo).resolve()
+        self.objective = objective or ""
+        self.candidates = list(candidates or [])
+        self.index = index or pre_localizer.RepoIndex.cached(self.repo)
+
+    def build(self) -> dict:
+        params = self._rename_params()
+        if params is None:
+            return self._novel("not an unambiguous rename objective")
+        accepted = deterministic_transform_tools.can_handle(self.repo, params)
+        if not accepted:
+            return self._novel("rename-codemod cannot handle the resolved parameters", params=params)
+        return {
+            "transform_kind": "rename",
+            "route": "tool",
+            "tool_id": "rename-codemod",
+            "params": params,
+            "advisory_only": False,
+            "determinism": "consistency_not_correctness",
+        }
+
+    def _novel(self, reason: str, *, params: dict | None = None) -> dict:
+        result = {
+            "transform_kind": "novel",
+            "route": "llm",
+            "tool_id": None,
+            "params": params or {},
+            "reason": reason,
+            "advisory_only": False,
+        }
+        return result
+
+    def _rename_params(self) -> dict | None:
+        matches = list(_RENAME_TO_RE.finditer(self.objective))
+        if len(matches) > 1:
+            return None
+        if len(matches) == 1:
+            old = matches[0].group("old").strip("`'\"")
+            new = matches[0].group("new").strip("`'\".,")
+            if old == new:
+                return None
+            return {
+                "old": old,
+                "new": new,
+                "replacements": deterministic_transform_tools._default_replacements(old, new),
+                "objective": self.objective,
+            }
+        lower = self.objective.lower()
+        if _SCAFFOLD_DEMO_RE.search(self.objective) and _DEMO_ORG_RE.search(self.objective):
+            replacements = {
+                "cockpit.scaffold": "cockpit.demo_org",
+                "cockpit/scaffold.py": "cockpit/demo_org.py",
+                "scaffold.py": "demo_org.py",
+                "SHAGIRI_SCAFFOLD": "SHAGIRI_DEMO_ORG",
+                "SCAFFOLD": "DEMO_ORG_MODE",
+                "scaffold_runner": "demo_runner",
+                "scaffold_activity": "demo_activity",
+                "scaffold": "demo_org",
+            }
+            if "preserve" in lower or "real" in lower or "adr-0008" in lower:
+                return {
+                    "old": "scaffold",
+                    "new": "demo_org",
+                    "replacements": replacements,
+                    "objective": self.objective,
+                }
+        return None

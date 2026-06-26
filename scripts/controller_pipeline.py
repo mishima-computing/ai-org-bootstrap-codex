@@ -32,6 +32,8 @@ import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-impl
 import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
 import fuzz_cli  # noqa: E402  — ADR-0009 #3: black-box CLI property fuzzing (robustness oracle)
 import regression_corpus  # noqa: E402  — ADR-0009 #4: finding -> regression (replayed fuzz counterexamples)
+import deterministic_transform_tools  # noqa: E402  — deterministic transform generators, always Linon-reviewed
+import operability_scan  # noqa: E402  — transform-kind classifier sibling to ChangeIntentScan
 
 RESULT_FILE = "result.json"
 PROVENANCE_FILE = "provenance-manifest.json"
@@ -189,6 +191,29 @@ def _allowed_files(entry: RegistryEntry, inputs: dict[str, dict]) -> list[str]:
     if upstream_allowed:
         return sorted(dict.fromkeys(upstream_allowed))
     return list(entry.write_scope)
+
+
+def _merge_allowed_files(*values) -> list[str]:
+    merged: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("files_allowed_to_change")
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            merged.extend(value)
+    return sorted(dict.fromkeys(merged))
+
+
+def _contract_allowed_files(result: dict | None) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    return _merge_allowed_files(result.get("files_allowed_to_change"))
+
+
+def _enforce_minimum_allowed_files(contract: dict | None, floor: list[str]) -> dict | None:
+    if not isinstance(contract, dict) or not floor:
+        return contract
+    contract["files_allowed_to_change"] = _merge_allowed_files(contract, floor)
+    return contract
 
 
 def _forbidden_files(inputs: dict[str, dict]) -> list[str]:
@@ -852,6 +877,9 @@ _DETERMINISTIC_IMPL_SOURCES = {
     # import, syntax error; the exit code is a fact), so it pins repair to the implementer and lets gate-behind
     # skip the expensive Linon reviewer on it.
     "static-check",
+    # tool-linon: Linon findings over a deterministic transform leaf are implementation repair items bounded
+    # to the tool-owned scope. The tool's self_verify is deliberately absent from this set.
+    "tool-linon",
 }
 
 
@@ -878,6 +906,157 @@ def _gate_error_report(source: str, detail: str) -> dict:
             "findings": [{"source": source, "check": "gate_error", "severity": "critical", "passed": False,
                           "detail": f"gate could not complete: {detail}",
                           "failure_classification": "infra"}]}
+
+
+def _tool_stage(repo: Path, run_id: str, objective: str, verdict: dict, result: dict,
+                started_at: datetime, finished_at: datetime) -> dict:
+    stage_dir = repo / ".agent-runs" / "controller" / run_id
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result_path = stage_dir / RESULT_FILE
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+                           encoding="utf-8")
+    contract = {
+        "role": verdict.get("tool_id") or "deterministic-transform-tool",
+        "prompt": json.dumps({"objective": objective, "transform_kind": verdict}, sort_keys=True),
+        "sandbox": "workspace-write",
+        "files_allowed_to_change": sorted(result.get("scope") or result.get("files_changed") or []),
+    }
+    report = {
+        "ok": not result.get("escalate"),
+        "attempts": [],
+        "changed_files": list(result.get("files_changed") or []),
+        "diff_artifact": {
+            "path": str(stage_dir / "diff.patch"),
+            "sha256": "",
+            "bytes": 0,
+            "untracked_count": 0,
+        },
+    }
+    diff = subprocess.run(["git", "-C", str(repo), "diff"], capture_output=True, text=True, check=False)
+    patch_path = stage_dir / "diff.patch"
+    patch_path.write_text(diff.stdout, encoding="utf-8")
+    report["diff_artifact"]["bytes"] = patch_path.stat().st_size
+    report["diff_artifact"]["sha256"] = sha256_file(patch_path)
+    return {
+        "role": contract["role"],
+        "run_id": run_id,
+        "ok": report["ok"],
+        "report_ok": report["ok"],
+        "contract_sent": contract,
+        "artifact": {
+            "result": result,
+            "result_path": str(result_path),
+            "result_sha256": sha256_file(result_path),
+            "diff_artifact": report["diff_artifact"],
+        },
+        "stage_errors": [],
+        "events": [],
+        "timing": {
+            "started_at": _iso8601_utc(started_at),
+            "finished_at": _iso8601_utc(finished_at),
+            "duration_seconds": max(0.0, (finished_at - started_at).total_seconds()),
+        },
+    }
+
+
+def _tool_contract(objective: str, tool_result: dict) -> dict:
+    scope = sorted(tool_result.get("scope") or tool_result.get("files_changed") or [])
+    residual = list(tool_result.get("residual_unverifiable") or [])
+    return {
+        "role_id": AUFHEBEN_ROLE,
+        "contract_id": "deterministic-transform-tool",
+        "objective": objective,
+        "files_allowed_to_change": scope,
+        "files_not_allowed_to_change": [],
+        "required_checks": [],
+        "acceptance_criteria": ["deterministic transform applied; Linon must independently review the leaf"],
+        "deliverable_kind": "none",
+        "deterministic_transform": {
+            "tool_id": tool_result.get("tool_id"),
+            "files_changed": list(tool_result.get("files_changed") or []),
+            "excluded": list(tool_result.get("excluded") or []),
+            "residual_unverifiable": residual,
+        },
+    }
+
+
+def _tag_tool_linon_findings(findings: list[dict], tool_result: dict) -> list[dict]:
+    tagged = []
+    for finding in findings:
+        item = dict(finding)
+        item["source"] = "tool-linon"
+        item["tool_leaf"] = True
+        item["tool_id"] = tool_result.get("tool_id")
+        item["repair_route"] = "implementer"
+        item["failure_classification"] = "code"
+        item["repair_scope"] = sorted(tool_result.get("scope") or [])
+        if tool_result.get("residual_unverifiable"):
+            item["linon_attention_items"] = list(tool_result.get("residual_unverifiable") or [])
+        tagged.append(item)
+    return tagged
+
+
+def _protected_line_snapshot(repo: Path, excluded: list[dict]) -> dict[tuple[str, int], str]:
+    snapshot: dict[tuple[str, int], str] = {}
+    for item in excluded or []:
+        rel = item.get("file")
+        line = item.get("line")
+        if not isinstance(rel, str) or not isinstance(line, int):
+            continue
+        path = repo / rel
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if 1 <= line <= len(lines):
+            snapshot[(rel, line)] = lines[line - 1]
+    return snapshot
+
+
+def _protected_line_findings(repo: Path, snapshot: dict[tuple[str, int], str]) -> list[dict]:
+    findings = []
+    for (rel, line), expected in sorted(snapshot.items()):
+        path = repo / rel
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            actual = None
+        else:
+            actual = lines[line - 1] if 1 <= line <= len(lines) else None
+        if actual != expected:
+            findings.append({
+                "source": "tool-linon",
+                "tool_leaf": True,
+                "check": "protected_line_unchanged",
+                "file": rel,
+                "line": line,
+                "severity": "critical",
+                "passed": False,
+                "detail": "repair changed a line-level protected reference excluded by the transform tool",
+                "repair_route": "implementer",
+                "failure_classification": "code",
+            })
+    return findings
+
+
+def _transform_route(repo: Path, objective: str) -> dict:
+    try:
+        return operability_scan.TransformKindScan(repo, objective).build()
+    except Exception as exc:  # noqa: BLE001 - classifier failure falls back to LLM path
+        return {"transform_kind": "novel", "route": "llm", "tool_id": None, "params": {},
+                "reason": f"classifier error: {exc!r}"}
+
+
+def _tool_attention_payload(tool_result: dict) -> dict:
+    return {
+        "role_id": "deterministic-transform-tool",
+        "tool_id": tool_result.get("tool_id"),
+        "files_allowed_to_change": sorted(tool_result.get("scope") or []),
+        "files_changed": list(tool_result.get("files_changed") or []),
+        "excluded": list(tool_result.get("excluded") or []),
+        "residual_unverifiable": list(tool_result.get("residual_unverifiable") or []),
+        "note": "self_verify is consistency evidence only; Linon must independently review this tool leaf",
+    }
 
 
 def _finding_blocks_convergence(finding: dict) -> bool:
@@ -1516,6 +1695,159 @@ def _has_valid_producer_for_aufheben(predecessors: dict[str, list[str]], produce
     return any(role in results for role in predecessors.get(AUFHEBEN_ROLE, []) if role in producer_roles)
 
 
+def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: dict, entries: dict[str, RegistryEntry],
+                            *, cache: bool, max_repair_iterations: int, runner=None,
+                            goal_context=None) -> dict:
+    run_started_at = _utc_now()
+    stages: list[dict] = []
+    iterations: list[dict] = []
+    results: dict[str, dict] = {}
+    reports: dict[str, dict] = {}
+    summary: dict[str, bool] = {}
+    required_ok: dict[str, bool] = {}
+    fatal_ok: dict[str, bool] = {}
+
+    tool_started = _utc_now()
+    tool_result = deterministic_transform_tools.apply(repo, verdict.get("params") or {})
+    tool_finished = _utc_now()
+    stages.append(_tool_stage(repo, f"{run_id}-rename-codemod", objective, verdict, tool_result,
+                              tool_started, tool_finished))
+    results["deterministic-transform-tool"] = _tool_attention_payload(tool_result)
+    results[AUFHEBEN_ROLE] = _tool_contract(objective, tool_result)
+    summary["rename-codemod"] = not bool(tool_result.get("escalate"))
+    required_ok["rename-codemod"] = not bool(tool_result.get("escalate"))
+    fatal_ok["rename-codemod"] = not bool(tool_result.get("escalate"))
+    protected_snapshot = _protected_line_snapshot(repo, tool_result.get("excluded") or [])
+
+    _stream_append(repo, {"source": "deterministic-transform-tool", "type": "transform_routed",
+                          "run_id": run_id, "tool_id": tool_result.get("tool_id"),
+                          "files_changed": tool_result.get("files_changed") or [],
+                          "scope": tool_result.get("scope") or [],
+                          "residual_unverifiable": tool_result.get("residual_unverifiable") or [],
+                          "ts": _iso8601_utc()})
+    if tool_result.get("escalate"):
+        findings = [{
+            "source": "rename-codemod",
+            "check": "tool_escalate",
+            "severity": "critical",
+            "passed": False,
+            "detail": json.dumps(tool_result.get("escalate"), sort_keys=True),
+            "failure_classification": "infra",
+        }]
+        finished = _utc_now()
+        iterations.append(_iteration_record("initial", 0, run_started_at, finished, list(stages), len(findings)))
+        manifest = _provenance_manifest(run_started_at, finished, stages, iterations)
+        manifest_path = _write_manifest(repo, run_id, manifest)
+        return {"summary": summary, "required_ok": required_ok, "order": list(summary),
+                "reports": reports, "results": results, "fatal_ok": fatal_ok, "converged": False,
+                "verification_status": "failed", "unverified_gate_findings": {},
+                "linon_findings_count": len(findings), "repair_iterations": 0,
+                "stages": stages, "iterations": iterations, "manifest": manifest,
+                "manifest_path": str(manifest_path), "aufheben": results[AUFHEBEN_ROLE]}
+
+    preflight_report = _contract_preflight(repo, results, run_id)
+    cheap_findings, gate_ctx, _blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report,
+                                                                 runner=runner)
+    findings: list[dict] = list(cheap_findings)
+
+    if "linon" in entries:
+        linon_inputs = {"deterministic-transform-tool": _tool_attention_payload(tool_result)}
+        entry = entries["linon"]
+        stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective, linon_inputs,
+                                                              f"{run_id}-linon", cache,
+                                                              goal_context=goal_context)
+        summary["linon"] = bool(report_dict.get("ok"))
+        required_ok["linon"] = stage_ok
+        fatal_ok["linon"] = stage_ok
+        reports["linon"] = report_dict
+        stages.append(stage)
+        _store_stage_output("linon", entry, stage_ok, result, report_dict, results)
+        if not stage_ok:
+            fatal_ok["linon"] = False
+        tagged = _tag_tool_linon_findings(_linon_findings(results.get("linon")), tool_result)
+        if isinstance(results.get("linon"), dict):
+            results["linon"]["findings"] = tagged
+        findings.extend(tagged)
+
+    findings.extend(_protected_line_findings(repo, protected_snapshot))
+    initial_finished_at = _utc_now()
+    iterations.append(_iteration_record("initial", 0, run_started_at, initial_finished_at,
+                                        list(stages), len(findings)))
+
+    repair_iterations = 0
+    repair_cap = _severity_repair_cap(findings, max_repair_iterations)
+    while findings and repair_iterations < repair_cap and "implementer" in entries:
+        repair_iterations += 1
+        repair_started_at = _utc_now()
+        repair_stages: list[dict] = []
+        linon_context = {"findings": findings, "repair_iteration": repair_iterations}
+        if any(gate_ctx.values()):
+            linon_context["gate_findings"] = gate_ctx
+        inputs = {
+            AUFHEBEN_ROLE: results[AUFHEBEN_ROLE],
+            "deterministic_transform_tool": _tool_attention_payload(tool_result),
+            "linon": linon_context,
+        }
+        implementer_evidence = _deterministic_repair_evidence(findings, results)
+        if implementer_evidence:
+            inputs["gate_findings"] = implementer_evidence
+        locus = _finding_defect_locus(findings)
+        stage_ok, result, report_dict, stage = _execute_stage(repo, "implementer", entries["implementer"],
+                                                              objective, inputs,
+                                                              f"{run_id}-repair{repair_iterations}-implementer",
+                                                              cache, goal_context=goal_context,
+                                                              defect_locus=locus)
+        summary["implementer"] = bool(report_dict.get("ok"))
+        required_ok["implementer"] = stage_ok
+        reports["implementer"] = report_dict
+        stages.append(stage)
+        repair_stages.append(stage)
+        _store_stage_output("implementer", entries["implementer"], stage_ok, result, report_dict, results)
+        if not stage_ok:
+            fatal_ok["implementer"] = False
+            break
+
+        repair_run_id = f"{run_id}-repair{repair_iterations}"
+        repair_preflight = _contract_preflight(repo, results, repair_run_id)
+        cheap_findings, gate_ctx, _blocked_by = _cheap_gate_findings(repo, results, repair_run_id,
+                                                                     repair_preflight, runner=runner)
+        findings = list(cheap_findings) + _protected_line_findings(repo, protected_snapshot)
+        if "linon" in entries:
+            linon_inputs = {"implementer": results.get("implementer", {}),
+                            "deterministic_transform_tool": _tool_attention_payload(tool_result)}
+            stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entries["linon"],
+                                                                  objective, linon_inputs,
+                                                                  f"{repair_run_id}-linon", cache,
+                                                                  goal_context=goal_context)
+            summary["linon"] = bool(report_dict.get("ok"))
+            required_ok["linon"] = stage_ok
+            reports["linon"] = report_dict
+            stages.append(stage)
+            repair_stages.append(stage)
+            _store_stage_output("linon", entries["linon"], stage_ok, result, report_dict, results)
+            tagged = _tag_tool_linon_findings(_linon_findings(results.get("linon")), tool_result)
+            if isinstance(results.get("linon"), dict):
+                results["linon"]["findings"] = tagged
+            findings.extend(tagged)
+        repair_finished_at = _utc_now()
+        iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
+                                            repair_stages, len(findings)))
+
+    converged = bool(required_ok.get("linon")) and not findings
+    unverified_gate_findings = _unverified_gate_findings(gate_ctx)
+    verification_status = "verified" if converged and not unverified_gate_findings else (
+        "unverified" if converged else "failed")
+    manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
+    manifest_path = _write_manifest(repo, run_id, manifest)
+    return {"summary": summary, "required_ok": required_ok, "order": list(summary),
+            "reports": reports, "results": results, "fatal_ok": fatal_ok, "converged": converged,
+            "verification_status": verification_status, "unverified_gate_findings": unverified_gate_findings,
+            "linon_findings_count": len(findings), "repair_iterations": repair_iterations,
+            "stages": stages, "iterations": iterations, "manifest": manifest,
+            "manifest_path": str(manifest_path), "aufheben": results[AUFHEBEN_ROLE],
+            "tool_result": tool_result}
+
+
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                  max_repair_iterations: int = 3, max_parallel: int = 1,
                  goal_context=None, runner=None) -> dict:
@@ -1539,6 +1871,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     predecessors = _predecessors(entries)
     verifiers = set(_verifier_roles(entries))
     ordered = _topological_roles(entries, verifiers)
+    transform_verdict = _transform_route(repo, objective)
+    if transform_verdict.get("route") == "tool" and transform_verdict.get("tool_id") == "rename-codemod":
+        return _run_transform_pipeline(repo, objective, run_id, transform_verdict, entries, cache=cache,
+                                       max_repair_iterations=max_repair_iterations, runner=runner,
+                                       goal_context=goal_context)
 
     results: dict[str, dict] = {}
     reports: dict[str, dict] = {}
@@ -1661,6 +1998,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         role for role in ordered
         if role in producer_roles or role in {AUFHEBEN_ROLE, "implementer"}
     ]
+    accepted_allowed_floor = _contract_allowed_files(results.get(AUFHEBEN_ROLE))
 
     while findings and not pipeline_failed and repair_iterations < repair_cap:
         repair_iterations += 1
@@ -1695,6 +2033,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                     break
                 inputs = {upstream: results[upstream]
                           for upstream in predecessors[role] if upstream in results}
+                if role == AUFHEBEN_ROLE and accepted_allowed_floor:
+                    inputs["prior_contract_scope"] = {
+                        "prior_files_allowed_to_change": accepted_allowed_floor,
+                        "scope_floor": "repair allowlist is monotone; do not narrow below this prior accepted scope",
+                    }
                 if role == "implementer" and implementer_evidence:
                     inputs["gate_findings"] = implementer_evidence
             stage_run_id = f"{run_id}-repair{repair_iterations}-{role}"
@@ -1714,6 +2057,9 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             reports[role] = report_dict
             stages.append(stage)
             repair_stages.append(stage)
+            if role == AUFHEBEN_ROLE and isinstance(result, dict):
+                result = _enforce_minimum_allowed_files(result, accepted_allowed_floor)
+                accepted_allowed_floor = _contract_allowed_files(result)
             _store_stage_output(role, entry, stage_ok, result, report_dict, results)
             if role not in producer_roles:
                 fatal_ok[role] = stage_ok

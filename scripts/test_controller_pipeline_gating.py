@@ -2,6 +2,7 @@
 """Tests for controller_pipeline registry gating."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -99,6 +100,107 @@ def test_pipeline_runs_designer_dialectic_without_ci_writers():
     ], called_roles
     assert result["converged"], result
     print("ok  default pipeline runs designers -> aufheben -> implementer -> linon without CI writers")
+
+
+def test_repair_aufheben_allowlist_is_monotone_non_narrowing():
+    tmp = Path(tempfile.mkdtemp(prefix="cp-monotone-scope-"))
+    calls = []
+    linon_calls = {"n": 0}
+    aufheben_calls = {"n": 0}
+
+    def fake_execute(repo, role, entry, objective, inputs, stage_run_id, cache, **kwargs):
+        calls.append((role, inputs, stage_run_id))
+        result = {"role_id": role}
+        if role == cp.AUFHEBEN_ROLE:
+            aufheben_calls["n"] += 1
+            result = {
+                "role_id": cp.AUFHEBEN_ROLE,
+                "files_allowed_to_change": (
+                    ["a.py", "b.py"] if aufheben_calls["n"] == 1 else ["a.py"]
+                ),
+                "files_not_allowed_to_change": [],
+                "deliverable_kind": "none",
+                "acceptance_criteria": ["rename complete"],
+            }
+        elif role == "linon":
+            linon_calls["n"] += 1
+            result = {"role_id": "linon", "findings": []}
+            if linon_calls["n"] == 1:
+                result["findings"] = [{
+                    "file": "a.py",
+                    "line": 1,
+                    "severity": "major",
+                    "passed": False,
+                    "detail": "repair needed",
+                    "failure_classification": "code",
+                }]
+        return True, result, {"ok": True, "attempts": [], "changed_files": []}, {
+            "role": role,
+            "run_id": stage_run_id,
+            "ok": True,
+        }
+
+    saved = (cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings)
+    try:
+        cp._execute_stage = fake_execute
+        cp._preflight_gate = lambda *args, **kwargs: (None, False)
+        cp._cheap_gate_findings = lambda *args, **kwargs: ([], {}, None)
+        with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+            result = cp.run_pipeline(tmp, "demo objective", "r-monotone", cache=False, max_parallel=1,
+                                     max_repair_iterations=1)
+    finally:
+        cp._execute_stage, cp._preflight_gate, cp._cheap_gate_findings = saved
+
+    repair_aufheben_inputs = [inputs for role, inputs, run_id in calls
+                              if role == cp.AUFHEBEN_ROLE and "repair1" in run_id][0]
+    assert repair_aufheben_inputs["prior_contract_scope"]["prior_files_allowed_to_change"] == ["a.py", "b.py"]
+    repair_implementer_inputs = [inputs for role, inputs, run_id in calls
+                                 if role == "implementer" and "repair1" in run_id][0]
+    assert repair_implementer_inputs[cp.AUFHEBEN_ROLE]["files_allowed_to_change"] == ["a.py", "b.py"]
+    assert result["results"][cp.AUFHEBEN_ROLE]["files_allowed_to_change"] == ["a.py", "b.py"], result["results"]
+    print("ok  repair pass cannot narrow _allowed_files below prior accepted scope")
+
+
+def test_tool_leaf_always_runs_linon_even_when_self_verify_passes_wrong_premise():
+    tmp = Path(tempfile.mkdtemp(prefix="cp-tool-linon-"))
+    (tmp / "scaffold.py").write_text("def scaffold_runner():\n    return 'scaffold_runner'\n", encoding="utf-8")
+    linon_seen = {"called": False}
+
+    def fake_execute(repo, role, entry, objective, inputs, stage_run_id, cache, **kwargs):
+        assert role == "linon", role
+        linon_seen["called"] = True
+        tool_payload = inputs["deterministic-transform-tool"]
+        assert tool_payload["residual_unverifiable"], tool_payload
+        result = {"role_id": "linon", "findings": [{
+            "file": "scaffold.py",
+            "line": 1,
+            "severity": "unknown-test",
+            "passed": False,
+            "detail": "wrong rename premise: expected demo_runner boundary, got wrong_demo_runner",
+        }]}
+        return True, result, {"ok": True, "attempts": [], "changed_files": []}, {
+            "role": role,
+            "run_id": stage_run_id,
+            "ok": True,
+        }
+
+    saved = (cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings)
+    try:
+        cp._execute_stage = fake_execute
+        cp._contract_preflight = lambda *args, **kwargs: None
+        cp._cheap_gate_findings = lambda *args, **kwargs: ([], {}, None)
+        with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+            result = cp.run_pipeline(tmp, "rename scaffold_runner to wrong_demo_runner", "r-tool-linon",
+                                     cache=False, max_parallel=1, max_repair_iterations=0)
+    finally:
+        cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings = saved
+
+    assert linon_seen["called"], "Always-Linon must run over transform-routed leaves"
+    assert result["tool_result"]["self_verify"]["passed"], result["tool_result"]
+    assert result["linon_findings_count"] == 1, result
+    assert not result["converged"], result
+    assert result["results"]["linon"]["findings"][0]["source"] == "tool-linon", result["results"]["linon"]
+    print("ok  tool self_verify cannot green a wrong premise; Linon catches the tool leaf")
 
 
 def test_infra_gate_result_is_unverified_not_clean_green():

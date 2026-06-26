@@ -1714,15 +1714,20 @@ def test_taskexecutor_path_runs_injected_decompose_leaf_and_acceptance_then_merg
             base = _rev(git)
 
             def split(g, c, ca):
-                return [{"id": "leaf", "objective": "write feature", "scope": ["feature.txt"],
-                         "depends_on": []}]
+                return [
+                    {"id": "feature", "objective": "write feature", "scope": ["feature.txt"],
+                     "depends_on": []},
+                    {"id": "docs", "objective": "write docs", "scope": ["docs.txt"],
+                     "depends_on": ["feature"]},
+                ]
 
             def run_leaf(_repo_arg, task):
-                wt = os.path.join(d, "leaf-wt")
+                wt = os.path.join(d, f"{task['id']}-wt")
                 subprocess.run(["git", "-C", repo, "worktree", "add", "--detach", wt, "HEAD"],
                                check=True, capture_output=True)
                 try:
-                    with open(os.path.join(wt, "feature.txt"), "w") as fh:
+                    rel = "feature.txt" if task["id"] == "feature" else "docs.txt"
+                    with open(os.path.join(wt, rel), "w") as fh:
                         fh.write(task["objective"] + "\n")
                     subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
                     subprocess.run(["git", "-C", wt, "commit", "-m", "leaf feature"],
@@ -1740,6 +1745,7 @@ def test_taskexecutor_path_runs_injected_decompose_leaf_and_acceptance_then_merg
             def gate(profile, composed_repo, **_k):
                 gate_seen["repo"] = composed_repo
                 assert os.path.isfile(os.path.join(composed_repo, "feature.txt")), "acceptance sees composed artifact"
+                assert os.path.isfile(os.path.join(composed_repo, "docs.txt")), "acceptance sees dependent artifact"
                 return {"verified": True, "evidence": [{"ok": True}], "findings": [], "probes_run": 1}
 
             cg.conformance.run_goal_acceptance = gate
@@ -1747,20 +1753,21 @@ def test_taskexecutor_path_runs_injected_decompose_leaf_and_acceptance_then_merg
             plan = cg.run_goal(repo, "build feature", run_leaf=run_leaf, split=split, refine=_ok_refine,
                                context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
                                goal_id="texec-a", emit=events.append)
-            assert _statuses(plan) == {"leaf": "done"}, plan
+            assert _statuses(plan) == {"feature": "done", "docs": "done"}, plan
             assert any(e.get("type") == "taskexecutor_start" for e in events), events
             assert any(e.get("type") == "taskexecutor_done" for e in events), events
             assert any(e.get("type") == "leaf_start" and e.get("id") == "root" and
                        e.get("goal_id") == "texec-a" for e in events), events
             assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and
-                       e.get("children") == ["leaf"] for e in events), events
-            assert any(e.get("type") == "leaf_done" and e.get("id") == "leaf" and
+                       e.get("children") == ["feature", "docs"] for e in events), events
+            assert any(e.get("type") == "leaf_done" and e.get("id") == "feature" and
                        e.get("commit") for e in events), events
             acc = [e for e in events if e.get("type") == "goal_acceptance"]
             assert acc and acc[0]["verified"] is True, (acc, events)
             assert any(e.get("type") == "goal_merged" for e in events), events
             assert _rev(git, "main") != base, "TaskExecutor result must merge back to local main"
             assert os.path.isfile(os.path.join(repo, "feature.txt")), "merged main has the final artifact"
+            assert os.path.isfile(os.path.join(repo, "docs.txt")), "merged main has the dependent artifact"
             assert gate_seen.get("repo"), "goal acceptance ran"
     finally:
         cg.conformance.run_goal_acceptance = old_gate
@@ -1845,12 +1852,16 @@ def test_taskexecutor_live_additive_steering_reaches_dispatched_leaf():
     seen = []
 
     def split(g, c, ca):
-        return [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}]
+        return [
+            {"id": "a", "objective": "do a", "scope": ["a.py"], "depends_on": []},
+            {"id": "b", "objective": "do b", "scope": ["b.py"], "depends_on": ["a"]},
+        ]
 
     def run_leaf(repo_arg, task):
         seen.append(task["objective"])
-        with open(os.path.join(repo_arg, "x.py"), "w") as fh:
-            fh.write("x\n")
+        rel = f"{task['id']}.py"
+        with open(os.path.join(repo_arg, rel), "w") as fh:
+            fh.write(f"{task['id']}\n")
         subprocess.run(["git", "-C", repo_arg, "add", "-A"], capture_output=True)
         subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf x"], capture_output=True)
         return {"outcome": "converged",
@@ -1970,11 +1981,15 @@ def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
     os.environ["AI_ORG_GOAL_WORKTREE"] = "1"
 
     def split(g, c, ca):
-        return [{"id": "a", "objective": "write feature", "scope": ["feat.py"], "depends_on": []}]
+        return [
+            {"id": "a", "objective": "write feature a", "scope": ["a.py"], "depends_on": []},
+            {"id": "b", "objective": "write feature b", "scope": ["b.py"], "depends_on": ["a"]},
+        ]
 
     def run_leaf(repo_arg, task):
-        with open(os.path.join(repo_arg, "feat.py"), "w") as fh:
-            fh.write("feature\n")
+        rel = f"{task['id']}.py"
+        with open(os.path.join(repo_arg, rel), "w") as fh:
+            fh.write(f"feature {task['id']}\n")
         subprocess.run(["git", "-C", repo_arg, "add", "-A"], check=True, capture_output=True)
         subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf feature"],
                        check=True, capture_output=True)
@@ -1990,7 +2005,7 @@ def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
             events = []
             plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
                                goal_id="texec-shadow", emit=events.append)
-            assert _statuses(plan) == {"a": "done"}, plan
+            assert _statuses(plan) == {"a": "done", "b": "done"}, plan
             acc = [e for e in events if e.get("type") == "goal_acceptance"]
             assert acc and acc[0]["verified"] is False and acc[0]["status"] == "needs_info", (acc, events)
             assert any(e.get("type") == "goal_finished" and e.get("status") == "needs_info"
@@ -2000,7 +2015,8 @@ def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
             assert any(e.get("type") == "goal_worktree_retained" and e.get("status") == "needs_info"
                        for e in events), events
             assert _rev(git, "main") == base, "unverified TaskExecutor composition must not merge to main"
-            assert not os.path.exists(os.path.join(repo, "feat.py")), "main must not receive the unverified file"
+            assert not os.path.exists(os.path.join(repo, "a.py")), "main must not receive the unverified file"
+            assert not os.path.exists(os.path.join(repo, "b.py")), "main must not receive the unverified file"
             retained = next(e for e in events if e.get("type") == "goal_worktree_retained")
             cg._cleanup_goal_worktree(repo, retained.get("worktree"), retained.get("branch"), delete_branch=True)
     finally:
@@ -2024,7 +2040,10 @@ def test_taskexecutor_non_defer_failed_leaf_with_commit_does_not_verify():
     os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
 
     def split(g, c, ca):
-        return [{"id": "a", "objective": "do a", "scope": ["seed.txt"], "depends_on": []}]
+        return [
+            {"id": "a", "objective": "do a", "scope": ["seed.txt"], "depends_on": []},
+            {"id": "b", "objective": "do b", "scope": ["other.txt"], "depends_on": ["a"]},
+        ]
 
     def run_leaf(repo_arg, task):
         tree = subprocess.run(["git", "-C", repo_arg, "rev-parse", f"{task['base_sha']}^{{tree}}"],
@@ -2045,7 +2064,7 @@ def test_taskexecutor_non_defer_failed_leaf_with_commit_does_not_verify():
             plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
                                context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
                                goal_id="texec-failed-commit", emit=events.append)
-            assert _statuses(plan) == {"a": "failed"}, (plan, events)
+            assert _statuses(plan) == {"a": "failed", "b": "failed"}, (plan, events)
             assert any(e.get("type") == "goal_aborted" and "did not converge" in e.get("error", "")
                        for e in events), events
             assert any(e.get("type") == "goal_finished" and e.get("status") == "failed"

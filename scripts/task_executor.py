@@ -29,6 +29,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -45,6 +46,7 @@ if HERE not in sys.path:
 
 import git_ops  # noqa: E402
 import conformance  # noqa: E402
+import operability_scan  # noqa: E402
 from splitter import HOUSE_RULES  # noqa: E402
 
 LEAF = "leaf"
@@ -54,6 +56,7 @@ LLM_MIN_DEPTH = 1
 LLM_MAX_DEPTH = 5
 
 _DECOMPOSE_TASK_KEYS = {"id", "objective", "depends_on", "base_sha"}
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]*")
 
 
 class TaskExecutorIntegrationError(RuntimeError):
@@ -307,6 +310,32 @@ def _clamped_llm_max_depth(value) -> int | None:
     return min(LLM_MAX_DEPTH, max(LLM_MIN_DEPTH, parsed))
 
 
+def _reference_tokens(text: str) -> set[str]:
+    tokens = {m.group(0).strip("`'\".,:;()[]{}").lower() for m in _TOKEN_RE.finditer(text or "")}
+    return {t for t in tokens if len(t) > 2}
+
+
+def _null_split_reason(parent: TaskNode, children: list[TaskNode]) -> str | None:
+    if not children:
+        return None
+    if len(children) == 1:
+        return "identity split produced one child"
+    parent_tokens = _reference_tokens(parent.objective)
+    if not parent_tokens:
+        return None
+    for child in children:
+        child_tokens = _reference_tokens(child.objective)
+        if not child_tokens:
+            continue
+        intersection = len(parent_tokens & child_tokens)
+        union = len(parent_tokens | child_tokens)
+        jaccard = intersection / union if union else 0.0
+        parent_coverage = intersection / len(parent_tokens)
+        if jaccard >= 0.72 or parent_coverage >= 0.85:
+            return f"child {child.id} restates the parent scope/objective"
+    return None
+
+
 def decompose_with_metadata(node: TaskNode, carrier, max_depth: int) -> DecomposeResult:
     """Ask a read-only carrier to produce this node's child TaskNodes and schema-gate the handoff.
 
@@ -406,6 +435,9 @@ class TaskExecutor:
         self._emit({"type": "leaf_start", "id": node.id, "kind": node.kind, "depth": node.depth})
         if node.subtasks:
             return self.execute_composite(node)
+        if self._is_transform_routed_leaf(node):
+            self._emit({"type": "transform_leaf_atomic", "id": node.id, "tool_id": "rename-codemod"})
+            return self.execute_leaf(node)
         if should_be_leaf(node, self.max_depth):
             return self.execute_leaf(node)
         node.subtasks = self._decompose_node(node)
@@ -542,10 +574,26 @@ class TaskExecutor:
         if isinstance(result, DecomposeResult):
             if node.depth == 0 and result.max_depth is not None:
                 self.max_depth = result.max_depth
-            return result.children
+            children = result.children
         if isinstance(result, list):
-            return result
-        return []
+            children = result
+        if not isinstance(result, (DecomposeResult, list)):
+            return []
+        rejected = _null_split_reason(node, children)
+        if rejected:
+            self._emit({"type": "decompose_rejected", "id": node.id, "reason": rejected,
+                        "children": [child.id for child in children]})
+            return []
+        return children
+
+    def _is_transform_routed_leaf(self, node: TaskNode) -> bool:
+        if self.repo is None:
+            return False
+        try:
+            verdict = operability_scan.TransformKindScan(self.repo, node.objective).build()
+        except Exception:  # noqa: BLE001 - classifier must not sink the executor
+            return False
+        return verdict.get("route") == "tool" and verdict.get("tool_id") == "rename-codemod"
 
     def _default_decompose(self, node: TaskNode) -> DecomposeResult:
         carrier = self._decompose_carrier

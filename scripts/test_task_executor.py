@@ -378,11 +378,15 @@ def test_root_decompose_result_sets_max_depth_once():
         if node.depth == 0:
             return S.DecomposeResult([
                 S.TaskNode("root.child", kind=S.COMPOSITE, base_sha=node.base_sha,
-                           objective="split again", depth=node.depth + 1),
+                           objective="alpha area work", depth=node.depth + 1),
+                S.TaskNode("root.sibling", kind=S.COMPOSITE, base_sha=node.base_sha,
+                           objective="beta area work", depth=node.depth + 1),
             ], max_depth=2)
         return S.DecomposeResult([
             S.TaskNode(f"{node.id}.child", kind=S.COMPOSITE, base_sha=node.base_sha,
-                       objective="split again", depth=node.depth + 1),
+                       objective=f"{node.id} implementation", depth=node.depth + 1),
+            S.TaskNode(f"{node.id}.sibling", kind=S.COMPOSITE, base_sha=node.base_sha,
+                       objective=f"{node.id} verification", depth=node.depth + 1),
         ], max_depth=5)
 
     def run_leaf(node):
@@ -404,7 +408,12 @@ def test_root_decompose_result_sets_max_depth_once():
     task_executor.execute(root)
 
     assert task_executor.max_depth == 2, task_executor.max_depth
-    assert leaves_executed == [("root.child.child", 2)], leaves_executed
+    assert sorted(leaves_executed) == [
+        ("root.child.child", 2),
+        ("root.child.sibling", 2),
+        ("root.sibling.child", 2),
+        ("root.sibling.sibling", 2),
+    ], leaves_executed
     print("ok  root DecomposeResult sets max_depth once; non-root metadata is ignored")
 
 
@@ -576,8 +585,12 @@ def test_cockpit_events_cover_start_done_split_and_empty_fallback():
     split_root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose")
     def split_once(node):
         if node.id == "root":
-            return [S.TaskNode("leaf", kind=S.LEAF, base_sha=node.base_sha,
-                               objective="do leaf", depth=node.depth + 1)]
+            return [
+                S.TaskNode("leaf", kind=S.LEAF, base_sha=node.base_sha,
+                           objective="do leaf", depth=node.depth + 1),
+                S.TaskNode("other", kind=S.LEAF, base_sha=node.base_sha,
+                           objective="do other", depth=node.depth + 1),
+            ]
         return []
 
     task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
@@ -586,7 +599,7 @@ def test_cockpit_events_cover_start_done_split_and_empty_fallback():
     task_executor.execute(split_root)
 
     assert any(e.get("type") == "leaf_start" and e.get("id") == "root" for e in events), events
-    assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and e.get("children") == ["leaf"]
+    assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and e.get("children") == ["leaf", "other"]
                for e in events), events
     assert any(e.get("type") == "leaf_done" and e.get("id") == "leaf" and e.get("commit") == "leaf-sha-leaf"
                for e in events), events
@@ -600,6 +613,50 @@ def test_cockpit_events_cover_start_done_split_and_empty_fallback():
     assert any(e.get("type") == "decompose_empty_fallback" and e.get("id") == "fallback"
                for e in fallback_events), fallback_events
     print("ok  cockpit events: leaf_start, leaf_split, leaf_done(commit), decompose_empty_fallback")
+
+
+def test_null_split_guard_rejects_two_child_whole_parent_restated_scope():
+    events: list[dict] = []
+    leaves: list[str] = []
+
+    parent = S.TaskNode(
+        "rename",
+        kind=S.COMPOSITE,
+        base_sha="BASE0",
+        objective="rename cockpit/scaffold.py scaffold_runner SHAGIRI_SCAFFOLD to demo org while preserving real scaffold",
+    )
+
+    def decomposer(node):
+        return [
+            S.TaskNode(
+                "rename-code",
+                kind=S.COMPOSITE,
+                base_sha=node.base_sha,
+                objective=node.objective,
+                depth=node.depth + 1,
+            ),
+            S.TaskNode(
+                "rename-docs",
+                kind=S.COMPOSITE,
+                base_sha=node.base_sha,
+                objective="update small docs mention after the rename",
+                depth=node.depth + 1,
+            ),
+        ]
+
+    def run_leaf(node):
+        leaves.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, decomposer=decomposer, max_parallel=1,
+                                   max_depth=5, emit=events.append)
+    result = task_executor.execute(parent)
+
+    assert result.task_id == "rename", result
+    assert leaves == ["rename"], leaves
+    assert any(e.get("type") == "decompose_rejected" and e.get("id") == "rename"
+               and "restates" in e.get("reason", "") for e in events), events
+    print("ok  null-split guard rejects n=2 decomposition with a child equal to the parent scope")
 
 
 def test_tree_forbidden_patterns_aggregate_through_composite_evidence():

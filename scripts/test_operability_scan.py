@@ -123,6 +123,22 @@ class OperabilityScanTest(unittest.TestCase):
             self.assertEqual(modifies["interface_delta"], "modifies_existing_interface")
             self.assertEqual(modifies["deliverable_kind_advice"], "http_service")
 
+    def test_transform_kind_routes_unambiguous_rename_only_when_tool_accepts(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            write(repo, "pkg/scaffold.py", "def scaffold_runner():\n    return 'scaffold'\n")
+            routed = ops.TransformKindScan(repo, "rename scaffold to demo_org").build()
+            self.assertEqual(routed["route"], "tool")
+            self.assertEqual(routed["tool_id"], "rename-codemod")
+            self.assertEqual(routed["transform_kind"], "rename")
+
+            ambiguous = ops.TransformKindScan(repo, "rename scaffold to demo_org and rename alpha to beta").build()
+            self.assertEqual(ambiguous["route"], "llm")
+            self.assertEqual(ambiguous["transform_kind"], "novel")
+
+            unsupported = ops.TransformKindScan(repo, "rename missing_symbol to other_symbol").build()
+            self.assertEqual(unsupported["route"], "llm")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
