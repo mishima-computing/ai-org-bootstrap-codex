@@ -25,13 +25,40 @@ python3 scripts/controller_goal.py --repo <repo> --goal "..."
 Optional run controls are `--budget`, `--goal-id`, and `--resume-from`. Use a goal id when you want a stable
 handle for deliberate resume or steering across runs.
 
+The command above is **self-hosted**: the org definition (registry / roles / schemas) is read from `--repo`
+itself. To run the org against an **external workspace** — a separate host repo the org should build rather
+than itself — point `AI_ORG_ROOT` at the org install and `--repo` at the workspace (the org_root / workspace
+split, below). This is exactly how a host (e.g. a cockpit) invokes the builder, and the canonical way to run
+the org against another repo:
+
+```sh
+AI_ORG_ROOT=/path/to/ai-org-bootstrap-codex \
+STREAM_LOG=/path/to/workspace/.agent-runs/stream.jsonl \
+python3 /path/to/ai-org-bootstrap-codex/scripts/controller_goal.py \
+  --repo /path/to/workspace --goal "..." --goal-id <id>
+```
+
+Run it from the org install (its `cwd`). `STREAM_LOG` points at the *workspace's* shared log so the run's
+events land where a watcher tails them, regardless of which worktree a leaf executes in (ADR-0009) — observe a
+run by tailing that file directly; no host process is needed to watch it. Do **not** import `controller_goal`
+and call `run_goal()` directly: that bypasses this entry contract (argv, cwd, `AI_ORG_ROOT`, `STREAM_LOG`) and
+will not behave like a real run.
+
 Observe progress through `STREAM_LOG` or its default path, `.agent-runs/stream.jsonl`. The stream is runtime
 history for watching and auditing a run; it is not committed output. Review the produced PR outputs before
 validation, delivery, or merge; complete the checks requested by the run, then merge only through
 `aob merge-gate` or `scripts/merge-gate.py`.
 
-It is now a **complete autonomous builder**: a GOAL goes in, PRs come out. Three layers stack, each a
-deterministic harness wrapped around a semantic (LLM) core:
+**Delivery (goal → PR).** By default a verified goal is merged into the run's LOCAL main and stops there
+(no remote touched) — `goal_merged`, `pr_url: null`. Pass `--deliver` to push the goal branch and open a
+GitHub PR for the verified result (fail-soft: it reports `committed_no_remote` / `pushed_pr_failed` /
+`pr_opened` truthfully and only sets `pr_url` when `gh pr create` actually succeeds — an UNVERIFIED goal is
+never delivered). Add `--auto-merge` to then run the merge-gate, which merges the PR ONLY if its required
+checks pass (otherwise the PR is left open for human review). A host (e.g. a cockpit) may instead own
+delivery and call the engine without these flags; the engine never fabricates a PR either way.
+
+It is now a **complete autonomous builder**: a GOAL goes in, a verified local merge comes out — and, with
+`--deliver`, a Git PR. Three layers stack, each a deterministic harness wrapped around a semantic (LLM) core:
 
 | Layer | Entry | Unit in → out |
 | --- | --- | --- |
@@ -359,6 +386,7 @@ Gates in place (each `ENV` selects `shadow` (default) | `off` | `block`):
 | **Immutable acceptance bundle** (`controller_pipeline._withhold_acceptance_bundle`) | withholds the golden examples from the implementer — it builds to the spec, the gate checks goldens it never saw, so the implementation and its oracle cannot share one misunderstanding | `WITHHOLD_ACCEPTANCE_BUNDLE` |
 | **Secret scan** (`scripts/secret_scan.py`) | scans source **and the built artifact's archives** via gitleaks (with a pure-Python fallback); known provider tokens / private keys block, generic entropy is advisory, and the secret value is never emitted into a finding | `SECRET_SCAN` |
 | **CLI fuzz** (`scripts/fuzz_cli.py`) | black-box property fuzzing of the built CLI: generates adversarial inputs (empty / malformed / oversized / binary / unicode) and searches for an input that **crashes** it, exits **outside the declared code policy**, or **hangs** — reporting a *minimized* counterexample | `FUZZ_CLI` |
+| **Deadlock-risk** (`scripts/deadlock_static_risk.py`) | a **static** (AST, no execution) analyzer for the one high-signal concurrency-deadlock pattern that reading code *can* catch: a lock held across a **blocking wait with no timeout** — `subprocess.run`/`Popen.wait`/`.communicate`, `concurrent.futures` `Future.result`/`as_completed`, `Executor.map`, `Thread`/`Process.join`, `queue.get`/`put`/`join` — **FAIL**, escalated inside `ThreadPoolExecutor` / carrier / subprocess orchestration; lock-**order** cycles are **advisory**. Whole-file scan (don't narrow the verifier's field, ADR-0006); suppress an audited false positive with `# aob-deadlock-ok: <reason>`. It flags risk patterns historically correlated with deadlocks — it does **not** prove a deadlock and **cannot** catch dynamic aliases, callbacks, cross-process, or data-dependent ordering. (It self-caught the engine's own parallel-execution deadlock — a held lock across a recursive `Future.result`.) | standalone (run over `scripts/`; per-leaf wiring is future) |
 | **Resource limits** | the conformance/fuzz subprocess runner is rlimit/timeout/output-bounded (the executes-untrusted-artifact boundary; an isolated execution backend is the mandatory one in enterprise mode) | — |
 
 **Finding → regression (`scripts/regression_corpus.py`).** Every accepted finding must become a

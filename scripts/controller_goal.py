@@ -17,6 +17,9 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import concurrent.futures
+import inspect
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,7 +33,20 @@ import goal_refiner  # noqa: E402 — ADR-0016 D1b intake sufficiency gate (raw 
 import goal_store  # noqa: E402 — the ORG's own goal-state store (the org owns its state, not the consumer)
 import scaffold_primitive  # noqa: E402 — ADR-0008 deterministic, LLM-free scaffold skeleton
 import splitter  # noqa: E402
+import task_executor  # noqa: E402 — recursive TaskExecutor live path
 from ai_org_bootstrap.registry import load_runtime_registry  # noqa: E402
+
+
+def _env_enabled(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _use_taskexecutor() -> bool:
+    """AI_ORG_USE_TASKEXECUTOR controls the goal-entry cutover. Default ON; off keeps the old frontier path."""
+    return _env_enabled("AI_ORG_USE_TASKEXECUTOR", default=True)
 
 
 def _shared_state_repo(repo) -> str:
@@ -47,6 +63,37 @@ def _shared_state_repo(repo) -> str:
 FLOOR_MAX_DEPTH = 3
 MECH_RETRY_CAP = 2     # a non-quality (mechanical) failure RESUMES the same leaf this many times
 LINON_RESPLIT_CAP = 2  # Linon rejections may refine granularity only this many times per branch
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    args: tuple[str, ...]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+def _default_command_runner(args, cwd):
+    r = subprocess.run(list(args), cwd=str(cwd), capture_output=True, text=True)
+    return CommandResult(tuple(str(a) for a in args), r.returncode, r.stdout, r.stderr)
+
+
+def _run_command(runner, args, cwd) -> CommandResult:
+    try:
+        raw = (runner or _default_command_runner)(list(args), Path(cwd))
+    except Exception as exc:  # noqa: BLE001 - delivery is fail-soft; command errors become records.
+        return CommandResult(tuple(str(a) for a in args), 127, "", f"{type(exc).__name__}: {exc}")
+    if isinstance(raw, CommandResult):
+        return raw
+    if isinstance(raw, subprocess.CompletedProcess):
+        raw_args = raw.args if isinstance(raw.args, (list, tuple)) else [raw.args]
+        return CommandResult(tuple(str(a) for a in raw_args), int(raw.returncode),
+                             str(raw.stdout or ""), str(raw.stderr or ""))
+    if isinstance(raw, dict):
+        return CommandResult(tuple(str(a) for a in raw.get("args", args)),
+                             int(raw.get("exit_code", raw.get("returncode", 0))),
+                             str(raw.get("stdout", "")), str(raw.get("stderr", "")))
+    return CommandResult(tuple(str(a) for a in args), 0, str(raw or ""), "")
 
 
 class LaunchPreconditionError(RuntimeError):
@@ -192,8 +239,39 @@ def _preserve_diff(repo, wt, task):
         return None
 
 
-def _call_leaf(run_leaf, repo, task, resume_diff=None, goal_context=None):
+def _run_leaf_signature(run_leaf):
+    try:
+        return inspect.signature(run_leaf)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_leaf_accepts_defer_merge(run_leaf) -> bool:
+    sig = _run_leaf_signature(run_leaf)
+    if sig is None:
+        return False
+    params = sig.parameters
+    return "defer_merge" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _call_leaf(run_leaf, repo, task, resume_diff=None, goal_context=None, *, defer_merge=False):
     """Call run_leaf, passing optional execution context only if it accepts it."""
+    sig = _run_leaf_signature(run_leaf)
+    if sig is not None:
+        params = sig.parameters
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs = {}
+        if "resume_diff" in params or has_var_kw:
+            kwargs["resume_diff"] = resume_diff
+        if "goal_context" in params or has_var_kw:
+            kwargs["goal_context"] = goal_context
+        if defer_merge:
+            if not ("defer_merge" in params or has_var_kw):
+                raise TypeError("run_leaf does not accept defer_merge")
+            kwargs["defer_merge"] = True
+        return run_leaf(repo, task, **kwargs)
+    if defer_merge:
+        return run_leaf(repo, task, resume_diff=resume_diff, goal_context=goal_context, defer_merge=True)
     try:
         return run_leaf(repo, task, resume_diff=resume_diff, goal_context=goal_context)
     except TypeError:
@@ -203,7 +281,15 @@ def _call_leaf(run_leaf, repo, task, resume_diff=None, goal_context=None):
             return run_leaf(repo, task)
 
 
-def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
+def _max_parallel() -> int:
+    try:
+        max_parallel = int(os.environ.get("AI_ORG_MAX_PARALLEL", "4"))
+    except ValueError:
+        max_parallel = 4
+    return max(1, max_parallel)
+
+
+def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None, runner=None):
     """Call run_pipeline with goal_context AND design-wave parallelism when the implementation accepts them.
 
     The goal path historically called run_pipeline with the serial default (max_parallel=1), so per-leaf design
@@ -214,13 +300,8 @@ def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
     worktree's index/HEAD (that is the frontier-leaf parallelism, which needs a merge lock and is NOT enabled
     here). Matches the CLI default of 4; AI_ORG_MAX_PARALLEL overrides (set 1 to restore serial).
     """
-    import inspect, os
-    try:
-        max_parallel = int(os.environ.get("AI_ORG_MAX_PARALLEL", "4"))
-    except ValueError:
-        max_parallel = 4
-    if max_parallel < 1:
-        max_parallel = 1
+    import inspect
+    max_parallel = _max_parallel()
     try:
         sig = inspect.signature(run_pipeline)
         params = sig.parameters
@@ -230,6 +311,10 @@ def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
             kwargs["goal_context"] = goal_context
         if "max_parallel" in params or has_var_kw:
             kwargs["max_parallel"] = max_parallel
+        # Forward a host-injected conformance runner ONLY when explicitly supplied (default None stays out of
+        # kwargs, so run_pipeline's own None-default -> runner_factory wins for the common box/local path).
+        if runner is not None and ("runner" in params or has_var_kw):
+            kwargs["runner"] = runner
         if kwargs:
             return run_pipeline(wt, objective, run_id, **kwargs)
     except (TypeError, ValueError):
@@ -237,17 +322,50 @@ def _call_run_pipeline(run_pipeline, wt, objective, run_id, goal_context=None):
     return run_pipeline(wt, objective, run_id)
 
 
-def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_context=None) -> dict:
-    """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off HEAD, so parallel leaves
+def _out_of_scope(changed, scope) -> list:
+    """Changed files that fall OUTSIDE a leaf's declared scope — the scope-contract guard's core predicate.
+
+    Scope SEMANTICS (the guard must NOT auto-fail a legitimate leaf):
+      - empty/absent scope -> a NO-OP: no declared file boundary, so NOTHING is out of scope. A
+        legitimately scopeless leaf is not auto-failed (the prior `path_in_scope(p, [])` returned False for
+        every path, so an empty scope wrongly flagged every changed file as a violation).
+      - a directory-prefix entry admits files under it, AND a bare directory name (no trailing slash) is
+        honored as a prefix too, so a directory-scoped leaf (scope `["pkg"]` or `["pkg/"]`) is not
+        auto-failed when it writes `pkg/x.py`.
+      - exact-file and glob entries keep frontier.path_in_scope's semantics unchanged.
+    """
+    entries = [s for s in (str(x).strip() for x in (scope or [])) if s]
+    if not entries:                                            # no declared scope -> no constraint (NO-OP)
+        return []
+    prefixes = [e.replace("\\", "/").rstrip("/") + "/" for e in entries
+                if not any(c in e for c in "*?[")]             # non-glob entries also act as directory prefixes
+    out = []
+    for p in changed:
+        if frontier.path_in_scope(p, entries):                 # exact / glob / trailing-slash dir prefix
+            continue
+        rel = str(p).replace("\\", "/")
+        if any(rel.startswith(pre) for pre in prefixes):       # bare-directory-name prefix
+            continue
+        out.append(p)
+    return out
+
+
+def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_context=None,
+                     defer_merge: bool = False, runner=None) -> dict:
+    """Run ONE leaf's dialectic (controller_pipeline) in its OWN worktree off the leaf base, so parallel leaves
     never collide on the shared repo (per-run isolation, ADR-0009). Returns
-    {"outcome": "converged"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
-      - converged -> the leaf's changed files merge back into the shared repo.
+    {"outcome": "converged"|"unverified"|"failed", "reason": "linon"|"mechanical"|None, "findings", "diff"}:
+      - converged -> the leaf's changed files merge back into the shared repo (ONLY when the pipeline's
+        verification_status is "verified" — convergence alone never merges; see the fail-close below).
+      - unverified -> the pipeline converged but a required gate was NOT proven green
+        (verification_status != "verified"); TERMINAL and fail-closed — NOT merged, NOT done, never resumed
+        or re-split. Carries `unverified_gate_findings` (ADR-0011 / ADR-0016).
       - failed/"linon" -> Linon reviewed the diff and rejected it: a BAD REFERENCE. Its findings come back
         to carry as CONTEXT to a re-split (what was tried and rejected), never as a base to build on.
       - failed/"mechanical" -> it failed for a non-quality reason (carrier timeout/hang, scope, malformed
         output); the partial work is preserved (`diff`) so a retry can RESUME on it.
     `resume_diff` (a patch path) is applied to the fresh worktree before the run, to resume prior work.
-    The worktree is always removed."""
+    The worktree is removed here unless `defer_merge` hands it to the caller's serial fold."""
     fail = lambda **k: {"outcome": "failed", **k}              # noqa: E731
     if run_pipeline is None:
         import controller_pipeline
@@ -259,7 +377,9 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
     # carry, as <run_id>-<role>), so a consumer can attribute each leaf's stage-marmots to its task.
     stream_emit(repo)({"type": "leaf_run", "task_id": task.get("id"), "run_id": run_id})
     wt = tempfile.mkdtemp(prefix=f"leaf-{task['id']}-")
-    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", wt, "HEAD"],
+    base_sha = task.get("base_sha") or "HEAD"
+    # Parallel leaves add/remove worktrees against shared git metadata; rely on git's own lock files there.
+    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", wt, base_sha],
                          capture_output=True, text=True)
     if add.returncode != 0:
         shutil.rmtree(wt, ignore_errors=True)
@@ -267,9 +387,14 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
     if resume_diff and Path(resume_diff).is_file():            # RESUME prior (non-quality-rejected) work
         subprocess.run(["git", "-C", wt, "apply", "--whitespace=nowarn", str(resume_diff)],
                        capture_output=True)
+    # handed_off is True ONLY on the converged defer-mode return that actually hands `wt` to the caller's
+    # serial merge fold (the fold then removes it). EVERY other exit — crash, linon, mechanical, merge error,
+    # and the whole non-defer path — leaves it False, so the `finally` removes the worktree + tempdir. This is
+    # what closes the defer-mode leak: a non-converged leaf used to skip removal in defer mode and leak.
+    handed_off = False
     try:
         try:
-            result = _call_run_pipeline(run_pipeline, wt, task["objective"], run_id, goal_context)
+            result = _call_run_pipeline(run_pipeline, wt, task["objective"], run_id, goal_context, runner=runner)
         except Exception as exc:                               # noqa: BLE001 — a run_pipeline CRASH (a harness/
             # setup error, NOT carrier work): the registry/imports/worktree, e.g. AI_ORG_ROOT unset -> the
             # registry yaml missing. Surface it LOUDLY and classify it "crash"; NEVER swallow it. A swallowed
@@ -292,6 +417,37 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
                 return fail(reason="linon",
                             findings=lin.get("findings") if isinstance(lin, dict) else None)
             return fail(reason="mechanical", diff=_preserve_diff(repo, wt, task))   # resume-able
+        # CONSUMER FAIL-CLOSE (ADR-0011 unproven-never-passes / ADR-0016 never-fabricate-a-pass): the pipeline
+        # can report converged=True yet leave a required gate UNVERIFIED — e.g. a gate that could not RUN, so it
+        # is non-blocking-but-not-proven-green. The producer signals this on its result: verification_status
+        # ("verified" | "unverified" | "failed") + unverified_gate_findings (controller_pipeline.run_pipeline,
+        # controller_pipeline.py:1590/1598-1599). Convergence ALONE is not proof: only an explicit "verified"
+        # verdict earns outcome:"converged". Any explicit non-"verified" status returns the DISTINCT, terminal
+        # `unverified` outcome carrying the gate findings — which every caller treats as NOT mergeable, NOT done,
+        # and NOT a resume/re-split (implementer-repair) target: it is neither "mechanical" nor "linon". (Missing
+        # status only occurs in the legacy `{"converged": True}` test shorthand — the REAL producer ALWAYS emits
+        # it — so absence is honored as verified-by-convergence and never masks a truly-unverified leaf.) Flipping
+        # the producer's classification default is a SEPARATE, later increment; this only stops the consumer from
+        # fabricating a pass over a verdict the producer already reported honestly.
+        vstatus = result.get("verification_status")
+        if vstatus is not None and vstatus != "verified":
+            return {"outcome": "unverified", "verification_status": vstatus,
+                    "unverified_gate_findings": result.get("unverified_gate_findings") or {}}
+        if defer_merge:
+            handed_off = True                                  # the ONLY hand-off: the fold now owns + removes wt
+            return {"outcome": "converged", "leaf_worktree": wt, "_cleanup_worktree": True,
+                    "sessions": result.get("sessions") or {}}
+        changed = git_ops.leaf_changed_files(wt)
+        out_of_scope = _out_of_scope(changed, task.get("scope"))
+        if out_of_scope:
+            try:
+                stream_emit(repo)({"type": "leaf_scope_violation", "task_id": task.get("id"),
+                                   "changed_files": changed, "out_of_scope": out_of_scope,
+                                   "scope": task.get("scope") or []})
+            except Exception:                                  # noqa: BLE001 - telemetry never breaks the run
+                pass
+            return fail(reason="mechanical", scope_violation=True,
+                        changed_files=changed, out_of_scope=out_of_scope)
         # merge the leaf's files into the goal worktree and commit them as ONE commit (the handoff to
         # dependent leaves). Every git-state guard — dir expansion, literal pathspecs, scratch exclusion,
         # identity, add/commit-failure rollback — lives ONCE in git_ops.merge_and_commit_leaf, not inline.
@@ -302,8 +458,9 @@ def default_run_leaf(repo, task, *, run_pipeline=None, resume_diff=None, goal_co
     except Exception:                                          # noqa: BLE001 — a merge/handoff error is NOT a
         return fail(reason="mechanical")                      # setup crash: retryable, never a goal-abort
     finally:
-        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], capture_output=True)
-        shutil.rmtree(wt, ignore_errors=True)
+        if not handed_off:                                     # cleaned up on EVERY exit that did not hand wt off
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], capture_output=True)
+            shutil.rmtree(wt, ignore_errors=True)
 
 
 def _declares_smallest(task: dict) -> bool:
@@ -380,14 +537,14 @@ def _ancestry(plan, leaf_id, path=()):
     return set()
 
 
-def _apply_steering(store, goal_id, leaf, plan, steering_goal_ids=None):
+def _apply_steering(store, goal_id, leaf, plan, steering_goal_ids=None, notes=None):
     """Fold STEERING into THIS leaf's objective at dispatch — WITHOUT a kill + re-fire. A note applies when
     its target is "goal" (every leaf — the degenerate whole-Queue case) OR a node on this leaf's ancestry
     path (the leaf itself, or a BRANCH above it so a branch-targeted steer reaches its whole subtree).
     Node-targeting is the point: goal-level alone is just the Queue. Returns a COPY (never mutates the
     plan / the split source), or the leaf UNCHANGED when nothing applies. Standing guidance — re-evaluated
     for each new leaf at its own dispatch (re-split children inherit a branch's steer)."""
-    notes = _steering_notes_for(store, steering_goal_ids or [goal_id], leaf, plan)
+    notes = notes if notes is not None else _steering_notes_for(store, steering_goal_ids or [goal_id], leaf, plan)
     if not notes:
         return leaf
     block = "\n".join(f"- {n['text']}" for n in notes)
@@ -790,6 +947,125 @@ def _merge_goal_to_main(repo, branch, base_head, main_branch):
     return False
 
 
+def _command_error(res: CommandResult) -> str:
+    text = (res.stderr or res.stdout or "").strip().splitlines()
+    return text[0] if text else f"exit {res.exit_code}"
+
+
+def _pr_url(stdout: str) -> str | None:
+    for token in str(stdout or "").replace("\n", " ").split():
+        if token.startswith("http://") or token.startswith("https://"):
+            return token.strip()
+    return None
+
+
+def _default_branch(git) -> str | None:
+    head = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if head.exit_code == 0 and head.stdout.strip():
+        value = head.stdout.strip()
+        return value.split("/", 1)[1] if value.startswith("origin/") else value
+    for candidate in ("main", "master"):
+        if git("rev-parse", "--verify", "--quiet", f"origin/{candidate}").exit_code == 0:
+            return candidate
+    return None
+
+
+def _deliver_goal_branch(repo, branch, goal, goal_id, *, git_runner=None, gh_runner=None) -> dict:
+    """Push a verified goal branch and open a PR. Fail-soft and honest: pr_url is set only after gh succeeds."""
+    repo_path = Path(repo).expanduser().resolve()
+    record = {"status": "started", "ok": False, "goal_id": goal_id, "branch": branch, "pr_url": None}
+
+    def git(*args):
+        return _run_command(git_runner, ["git", "-C", str(repo_path), *args], repo_path)
+
+    def gh(*args):
+        return _run_command(gh_runner, ["gh", *args], repo_path)
+
+    if not branch:
+        record.update(status="pushed_pr_skipped", reason="no goal branch was available to deliver")
+        return record
+    if git("rev-parse", "--verify", "--quiet", branch).exit_code != 0:
+        record.update(status="pushed_pr_skipped", reason="goal branch was not found")
+        return record
+    default_branch = _default_branch(git)
+    if not default_branch:
+        record.update(status="pushed_pr_skipped", reason="default branch could not be determined")
+        return record
+    record["default_branch"] = default_branch
+    if branch == default_branch:
+        record.update(status="pushed_pr_skipped", reason="refusing to deliver the default branch")
+        return record
+    remote = git("remote", "get-url", "origin")
+    if remote.exit_code != 0:
+        record.update(status="committed_no_remote", reason="origin remote is unavailable")
+        return record
+    push = git("push", "-u", "origin", branch)
+    if push.exit_code != 0:
+        record.update(status="pushed_push_failed", reason=_command_error(push), push_exit=push.exit_code)
+        return record
+    record["pushed"] = True
+    title = (" ".join(str(goal or f"AI Org goal {goal_id or branch}").split()) or f"AI Org goal {goal_id or branch}")
+    if len(title) > 80:
+        title = title[:77] + "..."
+    body = "\n".join([
+        f"Goal-ID: {goal_id or ''}",
+        f"Branch: {branch}",
+        "",
+        "Opened by AI Org engine delivery after the goal verified green.",
+    ])
+    pr = gh("pr", "create", "--base", default_branch, "--head", branch, "--title", title, "--body", body)
+    if pr.exit_code != 0:
+        record.update(status="pushed_pr_failed", reason=_command_error(pr), pr_exit=pr.exit_code)
+        return record
+    url = _pr_url(pr.stdout)
+    if not url:
+        record.update(status="pushed_pr_failed", reason="gh pr create did not return a PR URL", pr_exit=0)
+        return record
+    record.update(status="pr_opened", ok=True, pr_url=url)
+    return record
+
+
+def _run_merge_gate_for_pr(repo, pr_url, goal_id, *, runner=None) -> dict:
+    """Invoke the sole merge path for an opened PR; non-zero leaves the PR open and is reported."""
+    out = Path(repo) / ".agent-runs" / "goals" / f"{goal_id or 'goal'}-merge-gate.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "merge-gate.py"),
+           str(pr_url), "--out", str(out)]
+    res = _run_command(runner, cmd, Path(repo).expanduser().resolve())
+    return {"status": "merged" if res.exit_code == 0 else "left_open",
+            "ok": res.exit_code == 0, "exit_code": res.exit_code,
+            "evidence": str(out), "reason": None if res.exit_code == 0 else _command_error(res)}
+
+
+def _maybe_deliver_goal(repo, goal, goal_id, branch, status, goal_acc, emit, store, *,
+                        deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                        merge_gate_runner=None) -> dict | None:
+    if not deliver:
+        return None
+    verified = status == "done" and isinstance(goal_acc, dict) and goal_acc.get("status") == "verified"
+    if not verified:
+        rec = {"status": "skipped_unverified", "ok": False, "goal_id": goal_id, "branch": branch,
+               "reason": "goal was not verified green; delivery requires goal_acceptance.status=verified"}
+        emit({"type": "goal_delivery", **rec})
+        if store is not None:
+            store.update(goal_id, delivery=rec)
+        return rec
+    try:
+        rec = _deliver_goal_branch(repo, branch, goal, goal_id, git_runner=git_runner, gh_runner=gh_runner)
+    except Exception as exc:  # noqa: BLE001 - delivery cannot crash a verified run.
+        rec = {"status": "delivery_failed", "ok": False, "goal_id": goal_id, "branch": branch,
+               "error": f"{type(exc).__name__}: {exc}"}
+    if auto_merge and rec.get("status") == "pr_opened" and rec.get("pr_url"):
+        rec["merge_gate"] = _run_merge_gate_for_pr(repo, rec["pr_url"], goal_id, runner=merge_gate_runner)
+    emit({"type": "goal_delivery", **rec})
+    if store is not None:
+        update = {"delivery": rec}
+        if rec.get("status") == "pr_opened" and rec.get("pr_url"):
+            update["pr_url"] = rec["pr_url"]
+        store.update(goal_id, **update)
+    return rec
+
+
 def _cleanup_goal_worktree(repo, worktree, branch, *, delete_branch) -> None:
     """Remove the goal worktree (and, on success, its now-merged branch). Worktree first — a branch checked
     out in a worktree cannot be deleted. Fail-soft: cleanup never breaks the goal's reported outcome."""
@@ -812,7 +1088,508 @@ def _goal_acceptance_profile(context):
 
 
 def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
-             refine=None, context=None, carrier=None, budget=None, emit=None) -> list:
+             refine=None, context=None, carrier=None, budget=None, emit=None,
+             deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+             merge_gate_runner=None) -> list:
+    """Run a goal through the live recursive TaskExecutor path, or the legacy frontier path when disabled."""
+    if not _use_taskexecutor():
+        return _run_goal_legacy(repo, goal, run_leaf=run_leaf, goal_id=goal_id, resume_from=resume_from,
+                                split=split, refine=refine, context=context, carrier=carrier,
+                                budget=budget, emit=emit, deliver=deliver, auto_merge=auto_merge,
+                                git_runner=git_runner, gh_runner=gh_runner,
+                                merge_gate_runner=merge_gate_runner)
+    return _run_goal_taskexecutor(repo, goal, run_leaf=run_leaf, goal_id=goal_id, resume_from=resume_from,
+                                  split=split, refine=refine, context=context, carrier=carrier,
+                                  budget=budget, emit=emit, deliver=deliver, auto_merge=auto_merge,
+                                  git_runner=git_runner, gh_runner=gh_runner,
+                                  merge_gate_runner=merge_gate_runner)
+
+
+def _repo_head(repo) -> str:
+    out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+    return out.stdout.strip() or "HEAD"
+
+
+def _format_refined_goal(goal: str, structured) -> str:
+    if not isinstance(structured, dict) or not structured:
+        return goal
+    parts = [f"Raw goal: {goal}"]
+    for key in ("intent", "outcome", "success_condition", "negative_control", "owner"):
+        value = structured.get(key)
+        if value:
+            parts.append(f"{key}: {value}")
+    return "\n".join(parts)
+
+
+def _task_from_node(node: task_executor.TaskNode) -> dict:
+    task = {
+        "id": node.id,
+        "objective": node.objective,
+        "scope": list(getattr(node, "scope", []) or []),
+        "depends_on": list(node.depends_on or []),
+        "base_sha": node.base_sha,
+        "status": getattr(node, "status", "done"),
+        "run_id": None,
+        "pr_url": None,
+    }
+    if node.subtasks:
+        task["children"] = [_task_from_node(child) for child in node.subtasks]
+    return task
+
+
+def _plan_from_taskexecutor_root(root: task_executor.TaskNode, *, status: str = "done") -> list[dict]:
+    def mark(node):
+        node.status = status
+        for child in node.subtasks:
+            mark(child)
+    mark(root)
+    nodes = root.subtasks or [root]
+    return [_task_from_node(node) for node in nodes]
+
+
+def _tasknodes_from_legacy_plan(plan: list[dict], parent: task_executor.TaskNode) -> list[task_executor.TaskNode]:
+    children = []
+    for item in plan or []:
+        if not isinstance(item, dict):
+            continue
+        child = task_executor.TaskNode(
+            id=str(item.get("id") or f"{parent.id}.{len(children) + 1}"),
+            kind=task_executor.COMPOSITE if item.get("children") else task_executor.LEAF,
+            depends_on=[str(d) for d in (item.get("depends_on") or [])],
+            base_sha=item.get("base_sha") or parent.base_sha,
+            objective=str(item.get("objective") or item.get("id") or ""),
+            depth=parent.depth + 1,
+        )
+        child.scope = list(item.get("scope") or [])
+        if item.get("children"):
+            child.subtasks = _tasknodes_from_legacy_plan(item.get("children") or [], child)
+        children.append(child)
+    return children
+
+
+def _commit_worktree_off_base(repo, wt, base: str, message: str) -> str:
+    git_ops.ensure_identity(repo)
+    changed = git_ops.leaf_changed_files(wt)
+    if changed:
+        specs = [f":(literal){path}" for path in changed]
+        subprocess.run(["git", "-C", str(wt), "add", "--", *specs], capture_output=True)
+    tree = subprocess.run(["git", "-C", str(wt), "write-tree"], capture_output=True, text=True).stdout.strip()
+    if not tree:
+        raise task_executor.TaskExecutorIntegrationError(f"write-tree failed in {wt}")
+    out = subprocess.run(["git", "-C", str(repo), "commit-tree", tree, "-p", base, "-m", message],
+                         capture_output=True, text=True)
+    sha = out.stdout.strip()
+    if not sha:
+        raise task_executor.TaskExecutorIntegrationError(f"commit-tree failed: {out.stderr.strip()}")
+    return sha
+
+
+def _taskexecutor_plan_snapshot(root: task_executor.TaskNode) -> list[dict]:
+    nodes = root.subtasks or [root]
+    return [_task_from_node(node) for node in nodes]
+
+
+def _verified_leaf_adapter(repo, run_leaf, context_ref, steer_node=None):
+    leaf_runner = run_leaf or default_run_leaf
+
+    def adapter(node: task_executor.TaskNode) -> task_executor.VerifiedCommit:
+        if callable(steer_node):
+            steer_node(node, refine_objective=False)
+        task = {"id": node.id, "objective": node.objective, "scope": list(getattr(node, "scope", []) or []),
+                "depends_on": list(node.depends_on or []), "base_sha": node.base_sha}
+        if _run_leaf_accepts_defer_merge(leaf_runner):
+            res = _call_leaf(leaf_runner, repo, task, goal_context=context_ref.get("value"), defer_merge=True)
+            if isinstance(res, task_executor.VerifiedCommit):
+                return res
+            if not isinstance(res, dict) or res.get("outcome") != "converged":
+                raise task_executor.TaskExecutorIntegrationError(
+                    f"leaf {node.id} did not converge: {res!r}")
+            wt = res.get("leaf_worktree")
+            try:
+                if wt:
+                    base = node.base_sha or _repo_head(repo)
+                    sha = _commit_worktree_off_base(repo, wt, base, f"leaf: {node.id}")
+                else:
+                    sha = res.get("commit_sha") or res.get("commit") or (node.base_sha or _repo_head(repo))
+                evidence = {k: v for k, v in res.items() if k not in ("leaf_worktree", "_cleanup_worktree")}
+                return task_executor.VerifiedCommit(node.id, sha, evidence)
+            finally:
+                if wt and res.get("_cleanup_worktree"):
+                    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                                   capture_output=True)
+                    shutil.rmtree(wt, ignore_errors=True)
+        res = _call_leaf(leaf_runner, repo, task, goal_context=context_ref.get("value"))
+        if isinstance(res, task_executor.VerifiedCommit):
+            return res
+        if isinstance(res, dict) and res.get("outcome") not in (None, "converged"):
+            raise task_executor.TaskExecutorIntegrationError(f"leaf {node.id} did not converge: {res!r}")
+        if res == "converged":
+            return task_executor.VerifiedCommit(node.id, node.base_sha or _repo_head(repo),
+                                                {"outcome": "converged"})
+        return task_executor._as_verified_commit(res, node)
+
+    return adapter
+
+
+def _apply_verified_commit(repo, verified: task_executor.VerifiedCommit, emit) -> None:
+    sha = (verified or task_executor.VerifiedCommit("", "", {})).commit_sha
+    if not sha or not (Path(repo) / ".git").exists():
+        return
+    exists = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+                            capture_output=True)
+    if exists.returncode != 0:
+        return
+    head = _repo_head(repo)
+    if sha == head:
+        return
+    cp = subprocess.run(["git", "-C", str(repo), "cherry-pick", "--allow-empty",
+                         "--keep-redundant-commits", sha], capture_output=True, text=True)
+    if cp.returncode != 0:
+        subprocess.run(["git", "-C", str(repo), "cherry-pick", "--abort"], capture_output=True)
+        emit({"type": "goal_blocked", "id": verified.task_id, "error": cp.stderr.strip(),
+              "detail": "TaskExecutor produced a commit that could not be applied to the goal worktree"})
+        raise task_executor.TaskExecutorIntegrationError(cp.stderr.strip())
+
+
+def _run_root_tree_forbidden_gate(repo, final_verified, emit) -> bool:
+    evidence = getattr(final_verified, "evidence", {}) if final_verified is not None else {}
+    patterns = evidence.get("tree_forbidden_patterns") if isinstance(evidence, dict) else None
+    if not isinstance(patterns, list) or not patterns:
+        return True
+    report = conformance.run_tree_forbidden_patterns(patterns, cwd=str(repo))
+    emit({"source": "forbidden-pattern", "type": "root_tree_forbidden_gate",
+          "passed": report.get("passed"), "checks_run": report.get("checks_run"),
+          "findings": report.get("findings", [])})
+    if report.get("passed"):
+        return True
+    emit({"type": "goal_blocked", "source": "forbidden-pattern",
+          "detail": "tree-scoped forbidden_patterns remain in the final composed repository",
+          "findings": report.get("findings", [])})
+    return False
+
+
+def _root_ci_writers_enabled() -> bool:
+    try:
+        import controller_pipeline
+        return controller_pipeline._ci_writers_enabled()
+    except Exception:  # noqa: BLE001 - opt-in root CI must not become enabled through an import failure
+        return False
+
+
+def _commit_root_ci_changes(repo) -> str | None:
+    if not (Path(repo) / ".git").exists():
+        return None
+    changed = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", ".github/workflows"],
+                             capture_output=True, text=True).stdout.strip()
+    if not changed:
+        return None
+    git_ops.ensure_identity(repo)
+    subprocess.run(["git", "-C", str(repo), "add", "--", ".github/workflows"], capture_output=True)
+    commit = subprocess.run(["git", "-C", str(repo), "commit", "-m", "root ci workflows"],
+                            capture_output=True, text=True)
+    if commit.returncode != 0:
+        return None
+    return _repo_head(repo)
+
+
+def _run_root_ci_writers(repo, goal, context, emit) -> bool:
+    """Run CI-action-writer roles once at the root, after TaskExecutor composition and before acceptance."""
+    import controller_pipeline
+    entries = controller_pipeline._entries(Path(repo))
+    roles = sorted(controller_pipeline.CI_WRITER_ROLES & set(entries))
+    if not roles:
+        emit({"type": "root_ci_skipped", "reason": "no_roles"})
+        return True
+    emit({"type": "root_ci_writers_start", "roles": roles})
+    ok = True
+    for role in roles:
+        stage_ok, _result, report_dict, stage = controller_pipeline._execute_stage_isolated(
+            Path(repo), role, entries[role], goal, {}, f"root-ci-{uuid.uuid4().hex[:10]}-{role}",
+            True, goal_context=context)
+        emit({"type": "root_ci_writer_done", "role": role, "ok": bool(stage_ok),
+              "unresolved": report_dict.get("unresolved_failures") or [], "stage": stage})
+        ok = ok and bool(stage_ok)
+    commit = _commit_root_ci_changes(repo)
+    if commit:
+        emit({"type": "root_ci_writers_committed", "commit": commit})
+    return ok
+
+
+def _make_taskexecutor_decomposer(repo, goal, split, context_ref, carrier, emit, steer_node=None):
+    decompose_carrier = task_executor.codex_decompose_carrier(repo)
+
+    def decomposer(node: task_executor.TaskNode):
+        if callable(steer_node):
+            steer_node(node, refine_objective=True)
+        context = context_ref.get("value") or {}
+        if split is splitter.split:
+            result = task_executor.decompose_with_metadata(node, decompose_carrier, task_executor._max_depth())
+            children = result.children
+            out = result
+        else:
+            legacy_plan = split(node.objective, {**context, "parent": None if node.id == "root" else node.id},
+                                carrier)
+            children = _tasknodes_from_legacy_plan(legacy_plan, node)
+            out = task_executor.DecomposeResult(children=children)
+        if node.id == "root":
+            emit({"type": "goal_split", "goal": goal, "n": len(children)})
+            _emit_splitter_speech(emit, None, [_task_from_node(child) for child in children])
+        return out
+
+    return decomposer
+
+
+def _make_taskexecutor_steering(store, goal_id, steering_goal_ids, asks, root, context_ref, emit):
+    applied: dict[str, set[tuple]] = {}
+
+    def _note_key(note: dict) -> tuple:
+        return (note.get("target", "goal"), note.get("text", ""), note.get("_resolved"))
+
+    def steer_node(node: task_executor.TaskNode, *, refine_objective: bool) -> None:
+        notes = _resolve_confirmations(_read_steering(store, steering_goal_ids), asks, emit)
+        notes = [n for n in notes if n.get("_resolved") != "rejected"]
+        if not notes:
+            return
+        task = _task_from_node(node)
+        plan = _taskexecutor_plan_snapshot(root)
+        reach = _ancestry(plan, task.get("id")) or {task.get("id")}
+        applicable = [n for n in notes if n.get("target", "goal") == "goal" or n.get("target") in reach]
+        seen = applied.setdefault(node.id, set())
+        fresh = [n for n in applicable if _note_key(n) not in seen]
+        if not fresh:
+            return
+        for note in fresh:
+            seen.add(_note_key(note))
+        if refine_objective:
+            node.objective, refined_context = _steer_refine(node.objective, context_ref.get("value") or {}, fresh)
+            context_ref["value"] = refined_context
+        else:
+            steered = _apply_steering(store, goal_id, task, plan, steering_goal_ids, notes=fresh)
+            node.objective = steered.get("objective") or node.objective
+        emit({"type": "steer_applied", "id": node.id, "goal_id": goal_id})
+
+    return steer_node
+
+
+def _run_goal_taskexecutor(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
+                           refine=None, context=None, carrier=None, budget=None, emit=None,
+                           deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                           merge_gate_runner=None) -> list:
+    """Live goal path: intake/refine -> recursive TaskExecutor -> root CI -> goal acceptance -> merge."""
+    if not os.environ.get("STREAM_LOG"):
+        os.environ["STREAM_LOG"] = str(Path(repo).resolve() / ".agent-runs" / "stream.jsonl")
+    emit = emit or stream_emit(repo)
+    default_leaf_path = run_leaf is None or run_leaf is default_run_leaf
+    run_leaf = run_leaf or default_run_leaf
+    if default_leaf_path or split is splitter.split:
+        check_launch_preconditions(repo, emit=emit)
+
+    orig_repo = str(repo)
+    iso_wt = None
+    goal_branch = None
+    orig_head = None
+    orig_branch_name = None
+    if _goal_worktree_enabled():
+        goal_branch = "goal/" + (str(goal_id) if goal_id else ("anon-" + uuid.uuid4().hex[:8]))
+        iso_wt = _isolate_goal_repo(orig_repo, goal_branch)
+        if iso_wt is not None:
+            _g = lambda *a: subprocess.run(["git", "-C", orig_repo, *a], capture_output=True, text=True)  # noqa: E731
+            orig_head = _g("rev-parse", "HEAD").stdout.strip()
+            orig_branch_name = _g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
+            emit({"type": "goal_worktree", "repo": orig_repo, "worktree": iso_wt,
+                  "branch": goal_branch, "base": orig_head})
+            repo = iso_wt
+        else:
+            goal_branch = None
+
+    store = goal_store.GoalStore(_shared_state_repo(repo), emit=emit) if goal_id else None
+    prior_record = store.read(resume_from) if store is not None and resume_from else None
+    if store is not None:
+        store.create(goal_id, goal, org="", resumed_from=resume_from)
+        if resume_from and store.load(resume_from, repo):
+            restored = store.restored_files(resume_from, repo)
+            if restored:
+                context = {**(context or {}), "resumed_prior_work": {
+                    "files": restored[:200],
+                    "instruction": "These files ALREADY EXIST, cherry-picked from resumed prior work. Build "
+                                   "the goal ON them: extend or patch the existing files; do NOT recreate "
+                                   "equivalent content under new names. Plan only the remaining work."}}
+    steering_goal_ids = [goal_id] + ([resume_from] if resume_from and resume_from != goal_id else [])
+    asks: list[dict] = [dict(a) for a in ((prior_record or {}).get("asks") or []) if isinstance(a, dict)]
+
+    boundary = scaffold_primitive._declared_dir(goal)
+    if boundary:
+        context = {**(context or {}), "scope_boundary": {
+            "dir": boundary,
+            "instruction": f"Every task's scope MUST be a path under `{boundary}/`. Place no deliverable "
+                           f"file outside it and do not invent a sibling directory."}}
+
+    top_carrier = carrier if carrier is not None else (codex_carrier(repo) if split is splitter.split else None)
+    active_refine = refine if refine is not None else (goal_refiner.refine if split is splitter.split else None)
+    if active_refine is not None:
+        refine_carrier = top_carrier if refine is not None and top_carrier is not None else codex_carrier(repo)
+        goal_notes = [n for n in _resolve_confirmations(_read_steering(store, steering_goal_ids), asks, emit)
+                      if n.get("target", "goal") in ("goal", "_goal")]
+        goal_notes = [n for n in goal_notes if n.get("_resolved") != "rejected"]
+        refine_goal, refine_context = _steer_refine(goal, context or {}, goal_notes)
+        verdict = active_refine(refine_goal, refine_context, refine_carrier)
+        if not verdict.get("sufficient"):
+            missing = verdict.get("missing", [])
+            emit({"type": "goal_underdetermined", "goal": goal, "missing": missing})
+            ask = _ask_or_confirm(repo, "_goal", missing, verdict.get("structured"), goal, emit)
+            asks[:] = _upsert_open_ask(asks, ask)
+            if store is not None:
+                store.update(goal_id, status="needs_info", missing=missing,
+                             structured_goal=verdict.get("structured"), asks=asks, open_asks=[ask])
+            if iso_wt is not None:
+                _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
+            return []
+        context = {**(context or {}), "structured_goal": verdict.get("structured")}
+
+    context_ref = {"value": context or {}}
+    root = task_executor.TaskNode(
+        id="root",
+        kind=task_executor.COMPOSITE,
+        base_sha=_repo_head(repo),
+        objective=_format_refined_goal(goal, context_ref["value"].get("structured_goal")),
+        depth=0,
+    )
+    def task_emit(event):
+        enriched = dict(event)
+        if goal_id is not None:
+            enriched.setdefault("goal_id", goal_id)
+        emit(enriched)
+
+    steer_node = _make_taskexecutor_steering(store, goal_id, steering_goal_ids, asks, root, context_ref, task_emit)
+    executor = task_executor.TaskExecutor(
+        repo,
+        run_leaf=_verified_leaf_adapter(repo, run_leaf, context_ref, steer_node),
+        decompose_carrier=task_executor.codex_decompose_carrier(repo),
+        decomposer=_make_taskexecutor_decomposer(repo, goal, split, context_ref, top_carrier, task_emit, steer_node),
+        emit=task_emit,
+    )
+
+    final_verified = None
+    execution_ok = False
+    try:
+        emit({"type": "taskexecutor_start", "goal": goal, "goal_id": goal_id})
+        final_verified = executor.execute(root)
+        _apply_verified_commit(repo, final_verified, emit)
+        execution_ok = True
+        emit({"type": "taskexecutor_done", "goal": goal, "goal_id": goal_id,
+              "commit": final_verified.commit_sha})
+    except Exception as exc:  # noqa: BLE001 - TaskExecutor is the live executor; a failure fails this goal
+        emit({"type": "goal_aborted", "error": f"{type(exc).__name__}: {exc}",
+              "detail": "TaskExecutor failed; no legacy frontier work is attempted while the flag is on."})
+    plan = _plan_from_taskexecutor_root(root, status="done" if execution_ok else "failed")
+
+    if execution_ok:
+        if _root_ci_writers_enabled():
+            execution_ok = _run_root_ci_writers(repo, goal, context_ref["value"], emit)
+            if not execution_ok:
+                plan = _plan_from_taskexecutor_root(root, status="failed")
+        else:
+            emit({"type": "root_ci_skipped", "reason": "disabled"})
+        if execution_ok:
+            execution_ok = _run_root_tree_forbidden_gate(repo, final_verified, emit)
+            if not execution_ok:
+                plan = _plan_from_taskexecutor_root(root, status="failed")
+
+    return _finalize_taskexecutor_goal(repo, goal, plan, context_ref["value"], store, goal_id, asks, execution_ok, emit,
+                                       iso_wt=iso_wt, orig_repo=orig_repo, goal_branch=goal_branch,
+                                       orig_head=orig_head, orig_branch_name=orig_branch_name,
+                                       final_verified=final_verified, deliver=deliver, auto_merge=auto_merge,
+                                       git_runner=git_runner, gh_runner=gh_runner,
+                                       merge_gate_runner=merge_gate_runner)
+
+
+def _finalize_taskexecutor_goal(repo, goal, final_plan, context, store, goal_id, asks, execution_ok, emit, *,
+                                iso_wt=None, orig_repo=None, goal_branch=None, orig_head=None,
+                                orig_branch_name=None, final_verified=None, deliver=False, auto_merge=False,
+                                git_runner=None, gh_runner=None, merge_gate_runner=None):
+    done = bool(final_plan) and execution_ok and all(frontier.node_status(t) == "done" for t in final_plan)
+    status = "done" if done else "failed"
+    sg = (context or {}).get("structured_goal") if isinstance(context, dict) else None
+    profile = _goal_acceptance_profile(context)
+    goal_acc = None
+    if done and profile is not None:
+        result = conformance.run_goal_acceptance(profile, repo)
+        verified = bool(result.get("verified"))
+        goal_acc = {"type": "goal_acceptance", "verified": verified,
+                    "status": "verified" if verified else "failed_acceptance",
+                    "outcome": (sg or {}).get("outcome"),
+                    "success_condition": (sg or {}).get("success_condition"),
+                    "negative_control": (sg or {}).get("negative_control"),
+                    "owner": (sg or {}).get("owner"),
+                    "evidence": result.get("evidence"), "findings": result.get("findings"),
+                    "probes_run": result.get("probes_run"),
+                    "note": ("composed goal artifact booted and satisfied the executable acceptance profile"
+                             if verified else
+                             "composed goal artifact does NOT satisfy the goal WHY — the acceptance probe "
+                             "failed; NOT merged to main")}
+        if not verified:
+            status = "failed"
+            done = False
+    elif done and isinstance(sg, dict) and (sg.get("negative_control") or sg.get("success_condition")):
+        goal_acc = {"type": "goal_acceptance", "verified": False, "status": "needs_info",
+                    "outcome": sg.get("outcome"), "success_condition": sg.get("success_condition"),
+                    "negative_control": sg.get("negative_control"), "owner": sg.get("owner"),
+                    "note": "composed outcome NOT checked against the goal WHY — no executable "
+                            "acceptance_profile was authored at intake; the leaves proved only "
+                            "leaf-obeys-contract"}
+        status = "needs_info"
+        done = False
+    elif done and profile is None:
+        goal_acc = {"type": "goal_acceptance", "verified": False, "status": "needs_info",
+                    "note": "composed outcome NOT checked against the goal WHY — no executable "
+                            "acceptance_profile was authored at intake"}
+        status = "needs_info"
+        done = False
+
+    wip = None
+    if store is not None:
+        wip = store.save_wip(goal_id, repo)
+        leaf_commits = {}
+        if final_verified is not None:
+            leaf_commits[final_verified.task_id] = final_verified.commit_sha
+        update = {"status": status, "queue": final_plan, "leaf_commits": leaf_commits,
+                  "asks": asks, "open_asks": [a for a in asks if a.get("status") == "open"]}
+        if goal_acc is not None:
+            update["goal_acceptance"] = goal_acc
+        store.update(goal_id, **update)
+    if goal_acc is not None:
+        emit(goal_acc)
+    emit({"type": "goal_finished", "status": status, "wip": wip})
+    if status == "done":
+        emit({"type": "goal_done", "goal": goal})
+
+    delivery_record = _maybe_deliver_goal(orig_repo or repo, goal, goal_id, goal_branch, status, goal_acc, emit, store,
+                                          deliver=deliver, auto_merge=auto_merge,
+                                          git_runner=git_runner, gh_runner=gh_runner,
+                                          merge_gate_runner=merge_gate_runner)
+    if iso_wt is not None:
+        if status == "done":
+            if _merge_goal_to_main(orig_repo, goal_branch, orig_head, orig_branch_name):
+                _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
+                merged_event = {"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name}
+                if delivery_record and delivery_record.get("status") == "pr_opened":
+                    merged_event["pr_url"] = delivery_record.get("pr_url")
+                emit(merged_event)
+            else:
+                emit({"type": "goal_merge_conflict", "branch": goal_branch, "into": orig_branch_name,
+                      "worktree": iso_wt, "detail": "local main moved under the run and the goal branch "
+                      "did not merge cleanly; branch + worktree left intact, main untouched"})
+        else:
+            emit({"type": "goal_worktree_retained", "branch": goal_branch, "worktree": iso_wt,
+                  "status": status, "detail": "non-green outcome — worktree+branch left for inspection, "
+                  "main untouched"})
+    return final_plan
+
+
+def _run_goal_legacy(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split=splitter.split,
+                     refine=None, context=None, carrier=None, budget=None, emit=None,
+                     deliver=False, auto_merge=False, git_runner=None, gh_runner=None,
+                     merge_gate_runner=None) -> list:
     """Decompose `goal` and build it.
 
     run_leaf(repo, task) -> "converged" | "failed" runs one leaf's dialectic (defaults to
@@ -951,11 +1728,18 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
         # reaches the tree a consumer renders) and remove the now-merged worktree+branch. On a clean merge
         # FAILURE (main moved under us) leave both intact and main untouched. On any non-green outcome leave
         # the worktree+branch for inspection — main stays clean either way.
+        delivery_record = _maybe_deliver_goal(orig_repo, goal, goal_id, goal_branch, status, goal_acc, emit, store,
+                                              deliver=deliver, auto_merge=auto_merge,
+                                              git_runner=git_runner, gh_runner=gh_runner,
+                                              merge_gate_runner=merge_gate_runner)
         if iso_wt is not None:
             if status == "done":
                 if _merge_goal_to_main(orig_repo, goal_branch, orig_head, orig_branch_name):
                     _cleanup_goal_worktree(orig_repo, iso_wt, goal_branch, delete_branch=True)
-                    emit({"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name})
+                    merged_event = {"type": "goal_merged", "branch": goal_branch, "into": orig_branch_name}
+                    if delivery_record and delivery_record.get("status") == "pr_opened":
+                        merged_event["pr_url"] = delivery_record.get("pr_url")
+                    emit(merged_event)
                 else:
                     emit({"type": "goal_merge_conflict", "branch": goal_branch, "into": orig_branch_name,
                           "worktree": iso_wt, "detail": "local main moved under the run and the goal branch "
@@ -1044,70 +1828,94 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
     emit({"type": "goal_split", "goal": goal, "n": len(plan)})
     _emit_splitter_speech(emit, goal_id, plan)
 
-    spent = 0
-    while True:
-        ready = [t for t in frontier.ready_tasks(plan) if str(t.get("status") or "pending") == "pending"]
-        if not ready:
-            break
-        for leaf in ready:
-            if budget is not None and spent >= budget:
-                emit({"type": "budget_exhausted", "spent": spent})
-                return _finalize(plan)
-            spent += 1
-            plan = frontier.advance(plan, leaf["id"], "running")
-            emit({"type": "leaf_start", "id": leaf["id"], "goal_id": goal_id})   # goal_id attributes the node
-            # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
-            # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
-            exec_leaf = _apply_steering(store, goal_id, leaf, plan, steering_goal_ids)
-            if exec_leaf is not leaf:
-                emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
-            # ADR-0008 Phase 2: a GREENFIELD scaffold leaf seeds a deterministic skeleton (acceptance-gated,
-            # NO Linon — nothing to adversarially verify yet), then FANS OUT its logic via the Queue: the
-            # scaffold gives the seams to split along (walking-skeleton -> fan-out). The node is done only
-            # when its logic children are, so a skeleton-only result is impossible and a heavy leaf no
-            # longer dies atomically at the floor. Linon applies to the logic children, not the scaffold.
-            seeded = _maybe_seed_scaffold(repo, exec_leaf, emit, goal)
-            if seeded and split is not None and (_depth_of(plan, leaf["id"]) or 0) < FLOOR_MAX_DEPTH:
-                base = seeded["base"]
-                fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": base}
-                children = split(_scaffold_logic_objective(leaf, seeded), fan_ctx, carrier)
-                children = [c for c in (children or []) if _scope_under_base(c, base)]   # G1: drop scope-drifters
-                if children and not frontier.validate_plan(children):
-                    for c in children:                          # G2: descendants build ON the seed, never re-scaffold
-                        c["_scaffolded"] = True
-                    plan = _set_children(plan, leaf["id"], children)
-                    plan = frontier.advance(plan, leaf["id"], "pending")   # internal node: done when children are
-                    emit({"type": "scaffold_fanout", "id": leaf["id"], "base": base, "n": len(children)})
-                    _emit_splitter_speech(emit, leaf["id"], children)
-                    continue
-                # no in-base children -> build the logic atomically on the seed (fallback)
-            outcome = _call_leaf(run_leaf, repo, exec_leaf, goal_context=context)
-            res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
-            # A CRASH (harness/setup error, e.g. a missing registry / AI_ORG_ROOT unset) is systemic — every
-            # leaf will crash the same way, so re-splitting/retrying only burns budget and ends in a quiet
-            # "failed". Fail the goal LOUDLY and immediately instead (ADR-0011: unproven/broken never passes).
+    def _cleanup_deferred_leaf(res):
+        wt = (res or {}).get("leaf_worktree") if isinstance(res, dict) else None
+        if wt and (res or {}).get("_cleanup_worktree"):
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                           capture_output=True)
+            shutil.rmtree(wt, ignore_errors=True)
+
+    def _merge_deferred_leaf(leaf, res):
+        wt = (res or {}).get("leaf_worktree") if isinstance(res, dict) else None
+        if not wt:
+            return res
+        changed = git_ops.leaf_changed_files(wt)
+        out_of_scope = _out_of_scope(changed, leaf.get("scope"))
+        if out_of_scope:
+            emit({"type": "leaf_scope_violation", "id": leaf["id"], "goal_id": goal_id,
+                  "changed_files": changed, "out_of_scope": out_of_scope, "scope": leaf.get("scope") or []})
+            return {**res, "outcome": "failed", "reason": "mechanical", "scope_violation": True,
+                    "changed_files": changed, "out_of_scope": out_of_scope}
+        sha = git_ops.merge_and_commit_leaf(repo, wt, leaf.get("id"), leaf.get("objective"))
+        if sha is None:
+            return {**res, "outcome": "failed", "reason": "mechanical"}
+        return {**res, "commit": sha or None}
+
+    def _run_leaf_future(exec_leaf, *, defer_merge):
+        try:
+            outcome = _call_leaf(run_leaf, repo, exec_leaf, goal_context=context, defer_merge=defer_merge)
+            return outcome if isinstance(outcome, dict) else {"outcome": outcome}
+        except Exception as exc:                              # noqa: BLE001 - fold crashes as leaf failures
+            return {"outcome": "failed", "reason": "crash", "error": f"{type(exc).__name__}: {exc}"}
+
+    def _fold_leaf_result(leaf, exec_leaf, res, *, defer_merge):
+        nonlocal plan, spent, goal_aborted
+        res = res if isinstance(res, dict) else {"outcome": res}
+        # Within-wave disjointness is TEXTUAL safety only; semantic composition still rests on the
+        # goal-acceptance profile, which is shadow/non-blocking unless intake authored an executable profile.
+        try:
             if res.get("reason") == "crash":
+                # A crash is SYSTEMIC (a harness/setup error — registry/imports/worktree), NOT a recoverable
+                # per-leaf failure: re-split can't fix it. Restore the old serial path's FAIL-FAST — mark the
+                # leaf failed and ABORT the goal (no new wave). In-flight sibling futures still finish + fold
+                # cleanly (they run in their own worktrees); the abort is checked after the wave drains. At
+                # AI_ORG_MAX_PARALLEL=1 the wave is one leaf, so this is exactly the old fail-fast-on-crash.
                 emit({"type": "goal_blocked", "id": leaf["id"], "error": res.get("error"),
-                      "detail": "a leaf crashed before producing work — a harness/setup error re-splitting "
-                                "cannot fix. Failing the goal loudly rather than burning the budget on retries."})
+                      "detail": "a leaf crashed (systemic, not recoverable per-leaf work); the goal aborts "
+                                "fail-fast after the in-flight wave drains. Sibling futures finish cleanly; "
+                                "no new wave is dispatched."})
                 plan = frontier.advance(plan, leaf["id"], "failed")
-                return _finalize(plan)
-            # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, scope, malformed output —
-            # is not a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
+                goal_aborted = res.get("error") or "leaf crash"
+                return
+            if res.get("outcome") == "unverified":
+                # FAIL-CLOSE (ADR-0011 / ADR-0016): the leaf converged but a required gate was left UNVERIFIED
+                # (default_run_leaf honored the producer's verification_status). An unproven leaf is TERMINAL:
+                # advance it "failed" — never resume it and never re-split it (that would send unproven work to
+                # implementer repair / decomposition and could fabricate a pass). The goal then reports
+                # partial/blocked rather than done, preserving goal-level outcome-honesty.
+                emit({"type": "leaf_unverified", "id": leaf["id"], "goal_id": goal_id,
+                      "unverified_gate_findings": res.get("unverified_gate_findings") or {}})
+                plan = frontier.advance(plan, leaf["id"], "failed")
+                return
+            # RESUME: a non-quality (mechanical) failure — carrier timeout/hang, malformed output — is not
+            # a granularity problem, so retry the SAME leaf on its preserved work; do NOT re-split.
             tries = 0
             prev_sig = _failure_sig(res)
             while res.get("outcome") != "converged" and res.get("reason") == "mechanical" \
+                    and not res.get("scope_violation") \
                     and tries < MECH_RETRY_CAP and not (budget is not None and spent >= budget):
                 tries += 1
                 spent += 1
                 emit({"type": "leaf_resume", "id": leaf["id"], "attempt": tries})
-                outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"), goal_context=context)
+                outcome = _call_leaf(run_leaf, repo, exec_leaf, res.get("diff"), goal_context=context,
+                                     defer_merge=defer_merge)
                 res = outcome if isinstance(outcome, dict) else {"outcome": outcome}
                 sig = _failure_sig(res)
                 if res.get("outcome") != "converged" and sig is not None and sig == prev_sig:
                     emit({"type": "leaf_no_progress", "id": leaf["id"], "attempt": tries})
                     break        # same preserved work twice -> blind retry won't help; let floor/re-split run
                 prev_sig = sig
+            if res.get("outcome") == "converged":
+                res = _merge_deferred_leaf(leaf, res)         # serial fold: scope guard + merge lock
+            if res.get("scope_violation"):
+                plan = frontier.advance(plan, leaf["id"], "failed")
+                return
+            if res.get("reason") == "crash":
+                emit({"type": "goal_blocked", "id": leaf["id"], "error": res.get("error"),
+                      "detail": "a resumed leaf crashed (systemic); the goal aborts fail-fast."})
+                plan = frontier.advance(plan, leaf["id"], "failed")
+                goal_aborted = res.get("error") or "leaf crash"
+                return
             if res.get("outcome") == "converged":
                 if store is not None:                          # AUDIT: record which codex session each role
                     for role, sid in (res.get("sessions") or {}).items():   # used on this leaf (repair reuse)
@@ -1125,13 +1933,13 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                                   "error": repr(e)})
                         except Exception:                         # noqa: BLE001 - observability is fail-soft
                             pass
-                continue
+                return
             depth = _depth_of(plan, leaf["id"]) or 0
             findings = res.get("findings")
             ss = leaf.get("_self_steer", 0)                  # self-steers already spent on this branch
             # a Linon rejection is a BAD REFERENCE: re-split, carrying its findings as retry CONTEXT so the
             # children do not repeat the rejected approach. A self-steer re-split additionally asks for a FINER
-            # decomposition that resolves the findings (the org's own new information, earning a fresh budget).
+            # decomposition that resolves the findings (the org's own information, earning a fresh budget).
             child_ctx = {**(context or {}), "parent": leaf["id"]}
             if findings:
                 child_ctx["prior_rejected_findings"] = findings
@@ -1152,14 +1960,12 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                     emit({"type": "leaf_underdetermined", "id": leaf["id"], "goal_id": goal_id,
                           "missing": missing, "structured": verdict.get("structured"),
                           "detail": "leaf is underdetermined; send back for definition rather than splitting"})
-                    continue
-            # at the floor with a severe finding and self-steer budget left, the org STEERS ITSELF: it floors
-            # honestly UNLESS it can still push a finer decomposition that the (severity-weighted) counter
-            # permits (ADR-0008 addendum — budget follows information; no human in the loop).
+                    return
+            # at the floor with a severe finding and self-steer budget left, the org STEERS ITSELF.
             if at_floor(leaf, depth) and not (findings and ss < _self_steer_cap(findings)):
                 plan = frontier.advance(plan, leaf["id"], "failed")   # budget AND self-steer dry -> real floor
                 emit({"type": "leaf_failed_floor", "id": leaf["id"], "depth": depth, "self_steers": ss})
-                continue
+                return
             self_steering = at_floor(leaf, depth)            # past the floor only because self-steer permits it
             if self_steering:
                 child_ctx["self_steer"] = {"round": ss + 1, "instruction":
@@ -1171,13 +1977,13 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
                 plan = frontier.advance(plan, leaf["id"], "failed")
                 emit({"type": "leaf_failed_resplit_budget", "id": leaf["id"], "resplits": linon_resplits,
                       "cap": LINON_RESPLIT_CAP, "goal_id": goal_id})
-                continue
+                return
             children = split(leaf["objective"], child_ctx, carrier)
             if not children or frontier.validate_plan(children):
                 plan = frontier.advance(plan, leaf["id"], "failed")   # dry split (incl. a dry self-steer) -> floor
                 emit({"type": ("leaf_failed_floor" if self_steering else "split_unusable"),
                       "id": leaf["id"], **({"depth": depth, "self_steers": ss} if self_steering else {})})
-                continue
+                return
             if leaf.get("_scaffolded"):                  # re-split inside a scaffolded subtree stays scaffolded
                 for c in children:
                     c["_scaffolded"] = True
@@ -1193,6 +1999,72 @@ def run_goal(repo, goal, run_leaf=None, *, goal_id=None, resume_from=None, split
             plan = frontier.advance(plan, leaf["id"], "pending")
             emit({"type": "leaf_split", "id": leaf["id"], "n": len(children), "depth": depth, "goal_id": goal_id})
             _emit_splitter_speech(emit, leaf["id"], children)
+        finally:
+            _cleanup_deferred_leaf(res)
+
+    spent = 0
+    goal_aborted = None                                        # set by the fold when a systemic crash aborts
+    defer_leaf_merge = _run_leaf_accepts_defer_merge(run_leaf)
+    while True:
+        ready = [t for t in frontier.ready_tasks(plan) if str(t.get("status") or "pending") == "pending"]
+        if not ready:
+            break
+        requested_max_workers = _max_parallel()
+        max_workers = requested_max_workers if defer_leaf_merge else 1
+        dispatched = []
+        for leaf in ready[:max_workers]:
+            if budget is not None and spent >= budget:
+                if dispatched:
+                    break
+                emit({"type": "budget_exhausted", "spent": spent})
+                return _finalize(plan)
+            spent += 1
+            plan = frontier.advance(plan, leaf["id"], "running")
+            emit({"type": "leaf_start", "id": leaf["id"], "goal_id": goal_id})   # goal_id attributes the node
+            # fold any ADDITIVE STEERING (mid-run guidance) into THIS leaf at dispatch — no kill+re-fire.
+            # exec_leaf carries the steered objective; the ORIGINAL leaf stays the plan/split source.
+            exec_leaf = _apply_steering(store, goal_id, leaf, plan, steering_goal_ids)
+            if exec_leaf is not leaf:
+                emit({"type": "steer_applied", "id": leaf["id"], "goal_id": goal_id})
+            # ADR-0008 Phase 2 scaffold fan-out remains in the serial dispatch/fold path because it mutates
+            # the shared plan and git state before any leaf work is submitted.
+            seeded = _maybe_seed_scaffold(repo, exec_leaf, emit, goal)
+            if seeded and split is not None and (_depth_of(plan, leaf["id"]) or 0) < FLOOR_MAX_DEPTH:
+                base = seeded["base"]
+                fan_ctx = {**(context or {}), "parent": leaf["id"], "scaffold_base": base}
+                children = split(_scaffold_logic_objective(leaf, seeded), fan_ctx, carrier)
+                children = [c for c in (children or []) if _scope_under_base(c, base)]   # G1: drop scope-drifters
+                if children and not frontier.validate_plan(children):
+                    for c in children:                          # G2: descendants build ON the seed, never re-scaffold
+                        c["_scaffolded"] = True
+                    plan = _set_children(plan, leaf["id"], children)
+                    plan = frontier.advance(plan, leaf["id"], "pending")   # internal node: done when children are
+                    emit({"type": "scaffold_fanout", "id": leaf["id"], "base": base, "n": len(children)})
+                    _emit_splitter_speech(emit, leaf["id"], children)
+                    continue
+                # no in-base children -> build the logic atomically on the seed (fallback)
+            dispatched.append((leaf, exec_leaf))
+        if not dispatched:
+            continue
+        if max_workers == 1:
+            for leaf, exec_leaf in dispatched:
+                res = _run_leaf_future(exec_leaf, defer_merge=defer_leaf_merge)
+                _fold_leaf_result(leaf, exec_leaf, res, defer_merge=defer_leaf_merge)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(dispatched))) as executor:
+                futures = {executor.submit(_run_leaf_future, exec_leaf, defer_merge=True): (leaf, exec_leaf)
+                           for leaf, exec_leaf in dispatched}
+                for future in concurrent.futures.as_completed(futures):
+                    leaf, exec_leaf = futures[future]
+                    try:
+                        res = future.result()
+                    except Exception as exc:                   # noqa: BLE001 - defensive; workers also catch
+                        res = {"outcome": "failed", "reason": "crash", "error": f"{type(exc).__name__}: {exc}"}
+                    _fold_leaf_result(leaf, exec_leaf, res, defer_merge=True)
+        if goal_aborted is not None:                           # a systemic crash -> fail-fast (old serial path)
+            emit({"type": "goal_aborted", "error": goal_aborted,
+                  "detail": "a systemic leaf crash aborted the goal; no further waves dispatched."})
+            return _finalize(plan)
     emit({"type": "goal_done", "goal": goal})
     return _finalize(plan)
 
@@ -1212,6 +2084,10 @@ def main(argv=None) -> int:
                    "executable goal acceptance_profile (ADR-0016 D7): {start:{command,base_url?,ready_path?,"
                    "timeout?}, probes:[{request,expect}], negative_control?}. Fixed at intake; absent = the "
                    "goal-level acceptance stays shadow (no goal-level probe).")
+    p.add_argument("--deliver", action="store_true", help="after a verified green goal, push the goal branch "
+                   "and open a GitHub PR with gh. Unverified/blocked goals are never delivered.")
+    p.add_argument("--auto-merge", action="store_true", help="after --deliver opens a PR, invoke "
+                   "scripts/merge-gate.py so the PR merges only if the gate passes. Default off.")
     a = p.parse_args(argv)
     context = None
     if a.acceptance_profile:                           # the OWNER submits the executable acceptance contract
@@ -1223,7 +2099,7 @@ def main(argv=None) -> int:
         events.append(e)
     try:
         plan = run_goal(a.repo, a.goal, goal_id=a.goal_id, resume_from=a.resume_from, budget=a.budget,
-                        context=context, emit=_emit)
+                        context=context, emit=_emit, deliver=a.deliver, auto_merge=a.auto_merge)
     except LaunchPreconditionError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1234,6 +2110,8 @@ def main(argv=None) -> int:
     if any(e.get("type") == "goal_underdetermined" for e in events):
         return 2
     if any(e.get("type") == "goal_finished" and e.get("status") == "blocked_hitl" for e in events):
+        return 2
+    if any(e.get("type") == "goal_finished" and e.get("status") == "needs_info" for e in events):
         return 2
     # A goal whose composed artifact FAILED goal-level acceptance is reported `goal_finished: failed` and is NOT
     # merged to main (~:902/929). Its leaves can all be `done`, so the all-leaves-done check below would wrongly

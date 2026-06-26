@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import conformance as conf
 import controller_pipeline as cp
+import runner_factory
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
@@ -125,6 +126,7 @@ def test_exit_status_mismatch_is_major():
     (f,) = rep["findings"]
     assert f["check"] == "exit_status" and f["severity"] == "major", f
     assert f["expected"] == 2 and f["actual"] == 1, f
+    assert f["failure_classification"] == "code", f
     print("ok  exit-status mismatch -> major finding (expected/actual pinned)")
 
 
@@ -162,7 +164,14 @@ def test_build_failure_is_critical_and_skips_examples():
     (f,) = rep["findings"]
     assert f["check"] == "build_and_install" and f["severity"] == "critical", f
     assert "could not build wheel" in f["stderr_tail"], f
-    print("ok  build failure -> single critical finding, examples skipped (no derived noise)")
+    # incr #3 (narrowed flip): a build/install that RAN and failed is an ESTABLISHED product-failure signal —
+    # a package that cannot be built is the artifact's own defect, NOT a genuinely-ambiguous nonzero. It stays
+    # `code` / VERIFIED_PRODUCT_FAILURE / implementer (a could-not-run exit like 127 would still win first).
+    assert f["failure_classification"] == "code", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert f["repair_route"] == "implementer", f
+    assert f["phase"] == "build", f
+    print("ok  build failure -> single critical CODE finding (implementer), examples skipped (no derived noise)")
 
 
 def test_normalization_tolerates_volatile_output():
@@ -217,6 +226,7 @@ def test_library_import_error_is_critical():
         _probe_result({"import_error": "ModuleNotFoundError: No module named 'nope'"}))
     crit = [f for f in rep["findings"] if f["check"] == "library_import"]
     assert not rep["passed"] and crit and crit[0]["severity"] == "critical", rep
+    assert crit[0]["failure_classification"] == "code", crit
     print("ok  library: a module that fails to import -> library_import critical")
 
 
@@ -332,6 +342,7 @@ def _ws(files: dict):
     import tempfile
     d = tempfile.TemporaryDirectory()
     for rel, content in files.items():
+        os.makedirs(os.path.dirname(os.path.join(d.name, rel)), exist_ok=True)
         with open(os.path.join(d.name, rel), "w", encoding="utf-8") as fh:
             fh.write(content)
     return d
@@ -870,9 +881,10 @@ def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
     # and convergence requires the gate clean) — instead of being overwritten by linon-only.
     results = {"linon": {"findings": []}}                       # linon says clean
     failing = {"applicable": True, "passed": False,
-               "findings": [{"check": "exit_status", "severity": "major", "passed": False}]}
+               "findings": [{"check": "exit_status", "severity": "major", "passed": False,
+                             "failure_classification": "code"}]}
     saved = (cp._shadow_conformance, cp._secret_scan, cp._fuzz_cli, cp.CONFORMANCE_GATE_MODE)
-    cp._shadow_conformance = lambda repo, results, run_id: failing
+    cp._shadow_conformance = lambda repo, results, run_id, runner=None: failing
     cp._secret_scan = lambda repo, run_id: None
     cp._fuzz_cli = lambda repo, results, run_id: None
     try:
@@ -888,14 +900,15 @@ def test_closed_loop_block_gate_keeps_findings_when_linon_clean():
     print("ok  closed loop: a block gate that fails keeps the loop open (linon-clean no longer converges)")
 
 
-def test_gate_error_fails_closed_in_block_only():
-    # P0 fail-closed: a gate that ERRORED is NOT clean (no silent fail-open). The error report folds in block
-    # (blocks) and is telemetry-only in shadow.
+def test_gate_error_is_infra_advisory_for_convergence():
+    # A conformance gate that ERRORED is not a product-code defect. It is still streamed, but it must not feed
+    # the implementer repair loop as a code finding.
     err = cp._gate_error_report("conformance", "boom")
     assert err["passed"] is False and err["error"] and err["findings"][0]["severity"] == "critical", err
-    assert cp._apply_conformance_gate([], err, "block"), "a gate ERROR must block in block mode"
+    assert err["findings"][0]["failure_classification"] == "infra", err
+    assert cp._apply_conformance_gate([], err, "block") == [], "an infra gate ERROR must not drive repair"
     assert cp._apply_conformance_gate([], err, "shadow") == [], "a gate ERROR is telemetry-only in shadow"
-    print("ok  gate ERROR fails closed in block, telemetry-only in shadow (no silent fail-open)")
+    print("ok  gate ERROR is classified infra and remains advisory for convergence")
 
 
 def test_subprocess_runner_is_resource_bounded():
@@ -1091,6 +1104,91 @@ with Server(("127.0.0.1", int(sys.argv[1])), Handler) as server:
     print("ok  http_service: production callable runner launches a real process and stops it")
 
 
+def test_http_service_busy_nominal_port_uses_free_ephemeral_port():
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        held.bind(("127.0.0.1", 0))
+    except PermissionError:
+        held.close()
+        original_free_port = conf._free_loopback_port
+        seen = {}
+
+        class Handle:
+            def stop(self):
+                seen["stopped"] = True
+
+        def launcher(command, *, cwd=None, profile=None):
+            seen["command"] = command
+            seen["profile"] = profile
+            return Handle()
+
+        def req(method, url, *, json_body=None, has_json_body=False, timeout=None):
+            seen.setdefault("urls", []).append(url)
+            return conf.HttpResponse(200, b"ok-ephemeral-port")
+
+        try:
+            conf._free_loopback_port = lambda host: 54321
+            profile = {"start": {"command": "serve --host 127.0.0.1 --port 8765"},
+                       "base_url": "http://127.0.0.1:8765", "readiness_timeout_seconds": 3,
+                       "examples": [{"method": "GET", "path": "/", "expected_status": 200,
+                                     "expected_body_contains": ["ok-ephemeral-port"]}]}
+            rep = conf.run_http_service_conformance(_http_contract(profile), fake_runner({}),
+                                                    http_request=req, service_launcher=launcher)
+            assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+            assert "--port 54321" in seen["command"], seen
+            assert seen["profile"]["base_url"] == "http://127.0.0.1:54321", seen
+            assert all(":54321" in url for url in seen["urls"]), seen
+            assert seen.get("stopped"), seen
+        finally:
+            conf._free_loopback_port = original_free_port
+        print("ok  http_service: nominal port is rewritten to an injected free ephemeral port")
+        return
+    held.listen(1)
+    held_port = held.getsockname()[1]
+    try:
+        with tempfile.TemporaryDirectory(prefix="conf-http-busy-port-") as tmp:
+            marker = Path(tmp) / "bound-port"
+            script = r"""
+import http.server
+import pathlib
+import socketserver
+import sys
+
+port = int(sys.argv[sys.argv.index("--port") + 1])
+marker = pathlib.Path(sys.argv[sys.argv.index("--marker") + 1])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        body = b"ok-ephemeral-port"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", port), Handler) as server:
+    marker.write_text(str(server.server_address[1]))
+    server.serve_forever()
+"""
+            base_url = f"http://127.0.0.1:{held_port}"
+            profile = {"start": {"command": f"python3 -u -c {shlex.quote(script)} "
+                                            f"--port {held_port} --marker {shlex.quote(str(marker))}"},
+                       "base_url": base_url, "readiness_timeout_seconds": 3,
+                       "examples": [{"method": "GET", "path": "/", "expected_status": 200,
+                                     "expected_body_contains": ["ok-ephemeral-port"]}]}
+            rep = conf.run_http_service_conformance(_http_contract(profile), conf.subprocess_runner(timeout=2.0))
+            assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
+            assert marker.exists(), "service should have started on a rewritten free port"
+            assert int(marker.read_text()) != held_port, "the busy nominal port must not be reused"
+    finally:
+        held.close()
+    print("ok  http_service: busy nominal port is rewritten to a free ephemeral port")
+
+
 def test_rpc_service_real_subprocess_runner_launches_and_stops_json_rpc_service():
     port = _free_local_port()
     if port is None:
@@ -1245,7 +1343,23 @@ def test_http_service_start_failure_reports_exit_and_captured_stderr():
     assert not rep["passed"] and finding["check"] == "lifecycle", rep
     assert finding["returncode"] == 7 and "boot exploded" in finding["stderr_tail"], finding
     assert finding.get("error") != "AttributeError", finding
+    # incr #3 safe flip: a service that exits nonzero on boot is GENUINELY AMBIGUOUS (a code/config bug vs a
+    # missing host dependency), so it is `undetermined` -> clean-retry/unverified (#1/#2), not blamed as `code`.
+    assert finding["failure_classification"] == "undetermined", finding
+    assert finding["repair_route"] != "implementer", finding
     print("ok  http_service: failed start reports real exit code and captured stderr")
+
+
+def test_http_service_address_in_use_lifecycle_is_infra():
+    def launcher(command, *, cwd=None, profile=None):
+        raise OSError(48, "Address already in use")
+
+    rep = conf.run_http_service_conformance(_http_contract(_HTTP_PROFILE), FakeBoot(), http_request=_http_req(),
+                                            service_launcher=launcher)
+    f = next(f for f in rep["findings"] if f["check"] == "lifecycle")
+    assert not rep["passed"] and f["failure_classification"] == "infra", f
+    assert cp._apply_conformance_gate([], rep, "block") == [], "infra lifecycle findings must be advisory"
+    print("ok  http_service: address-in-use lifecycle failure is classified infra and advisory")
 
 
 def test_http_service_not_applicable_for_non_http():
@@ -1257,10 +1371,13 @@ def test_http_service_not_applicable_for_non_http():
 
 # --- forbidden-pattern gate (ADR-0016 D7): the cheap, kind-agnostic grep gate ----------------------------
 
-def _fp_contract(patterns, kind="none"):
+def _fp_contract(patterns, kind="none", allowed_files=None):
     """A contract carrying forbidden_patterns. kind='none' proves the gate is kind-agnostic — it fires even
     where no per-kind conformance profile exists."""
-    return {"role_id": "aufheben-designer", "deliverable_kind": kind, "forbidden_patterns": patterns}
+    contract = {"role_id": "aufheben-designer", "deliverable_kind": kind, "forbidden_patterns": patterns}
+    if allowed_files is not None:
+        contract["files_allowed_to_change"] = allowed_files
+    return contract
 
 
 def test_forbidden_pattern_straggler_blocks_with_file_line():
@@ -1329,6 +1446,82 @@ def test_forbidden_pattern_max_occurrences_honored():
     print("ok  forbidden-pattern: max_occurrences honored (N allowed, N+1 blocks)")
 
 
+def test_forbidden_pattern_partitions_allowed_scope_and_advisory_hits():
+    with _ws({
+        "src/in_scope.py": "TOKEN\n",
+        "tests/out_of_scope.py": "TOKEN\nTOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract([{"pattern": "TOKEN"}], allowed_files=["src/in_scope.py"]),
+            cwd=d,
+        )
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["check"] == "forbidden_pattern" and f["count"] == 1, f
+    assert f["hits"] == ["src/in_scope.py:1"], f
+    assert all("tests/out_of_scope.py" not in hit for hit in f["hits"]), f
+    assert f["scope"] == "leaf", f
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1, rep
+    a = advisory[0]
+    assert a["check"] == "forbidden_pattern_out_of_scope" and a["passed"] is True, a
+    assert a["scope"] == "leaf", a
+    assert a["count"] == 2 and a["hits"] == ["tests/out_of_scope.py:1", "tests/out_of_scope.py:2"], a
+    print("ok  forbidden-pattern: allowed-scope hits block; out-of-scope hits are advisory only")
+
+
+def test_forbidden_pattern_tree_scope_leaf_conformance_still_blocks_only_allowed_files():
+    with _ws({
+        "src/in_scope.py": "TREE_TOKEN\n",
+        "docs/out_of_scope.md": "TREE_TOKEN\nTREE_TOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract([{"pattern": "TREE_TOKEN", "scope": "tree"}], allowed_files=["src/in_scope.py"]),
+            cwd=d,
+        )
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["count"] == 1 and f["hits"] == ["src/in_scope.py:1"] and f["scope"] == "tree", f
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1, rep
+    assert advisory[0]["scope"] == "tree" and advisory[0]["count"] == 2, advisory
+    print("ok  forbidden-pattern: tree-scope leaf conformance blocks only in-scope hits and advises out-of-scope")
+
+
+def test_forbidden_pattern_without_allowed_files_keeps_legacy_tree_wide_blocking():
+    with _ws({
+        "src/in_scope.py": "TOKEN\n",
+        "tests/out_of_scope.py": "TOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(_fp_contract([{"pattern": "TOKEN"}]), cwd=d)
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert not rep["passed"] and f["count"] == 2, f
+    assert set(f["hits"]) == {"src/in_scope.py:1", "tests/out_of_scope.py:1"}, f
+    assert rep.get("advisory_findings") == [], rep
+    print("ok  forbidden-pattern: missing files_allowed_to_change keeps legacy tree-wide blocking")
+
+
+def test_forbidden_pattern_out_of_scope_only_passes_leaf_with_advisory():
+    with _ws({
+        "cockpit/scaffold.py": "def scaffold():\n    return 'new'\n",
+        "cockpit/demo_org.py": "def demo():\n    return 'new'\n",
+        "scripts/test_rename_discovery.py": "def scaffold_runner():\n    return 'legacy'\n",
+        "scripts/test_rename_guards.py": "def renamed():\n    return 'clean'\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract(
+                [{"pattern": "def scaffold_runner"}],
+                allowed_files=["cockpit/scaffold.py", "cockpit/demo_org.py"],
+            ),
+            cwd=d,
+        )
+    assert rep["applicable"] and rep["passed"], rep
+    assert rep["findings"] == [], rep
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1 and advisory[0]["hits"] == ["scripts/test_rename_discovery.py:1"], rep
+    print("ok  forbidden-pattern: scaffold-real-3 out-of-scope straggler is advisory and leaf passes")
+
+
 def test_forbidden_pattern_absent_is_noop():
     # (e) no forbidden_patterns declared -> not applicable, no finding, no false positive.
     with _ws({"a.py": "_scaffold_seed_commit\n"}) as d:
@@ -1351,6 +1544,76 @@ def test_forbidden_pattern_skips_binary_and_git():
         rep = conf.run_conformance(_fp_contract([{"pattern": "_scaffold_seed_commit"}]), fake_runner({}), cwd=d)
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     print("ok  forbidden-pattern: binary files and .git/ are skipped")
+
+
+def test_forbidden_pattern_skips_runtime_scratch_but_blocks_delivered_source():
+    with _ws({}) as d:
+        os.makedirs(os.path.join(d, ".agent-runs", "controller", "run1"), exist_ok=True)
+        os.makedirs(os.path.join(d, ".git", "logs"), exist_ok=True)
+        os.makedirs(os.path.join(d, "pkg", "__pycache__"), exist_ok=True)
+        Path(d, ".agent-runs", "controller", "run1", "result.json").write_text("SHAGIRI_SCAFFOLD\n")
+        Path(d, ".git", "logs", "HEAD").write_text("SHAGIRI_SCAFFOLD\n")
+        Path(d, "pkg", "__pycache__", "mod.py").write_text("SHAGIRI_SCAFFOLD\n")
+
+        contract = _fp_contract([{"pattern": "SHAGIRI_SCAFFOLD"}])
+        scratch_only = conf.run_conformance(contract, fake_runner({}), cwd=d)
+        assert scratch_only["applicable"] and scratch_only["passed"] and scratch_only["findings"] == [], scratch_only
+
+        Path(d, "delivered.py").write_text("SHAGIRI_SCAFFOLD\n")
+        delivered = conf.run_conformance(contract, fake_runner({}), cwd=d)
+    f = next(f for f in delivered["findings"] if f["source"] == "forbidden-pattern")
+    assert not delivered["passed"] and f["hits"] == ["delivered.py:1"], delivered
+    assert f["count"] == 1, f
+    assert f["failure_classification"] == "code", f
+    print("ok  forbidden-pattern: runtime scratch is skipped; delivered-source hit still blocks")
+
+
+def test_forbidden_pattern_skips_controller_artifacts_regardless_of_scan_root():
+    token = "SHAGIRI_SCAFFOLD"
+    contract = _fp_contract([{"pattern": token}])
+    with _ws({}) as d:
+        root = Path(d)
+        stage = root / ".agent-runs" / "controller" / "goal-7e142439ee-genius"
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "result.json").write_text(json.dumps({"role_id": "genius", "repo_evidence": [token]}),
+                                           encoding="utf-8")
+        (stage / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "change-intent-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (stage / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
+        (root / "result.json").write_text(json.dumps({"role_id": "linon", "findings": [token]}),
+                                          encoding="utf-8")
+        copied_artifacts = root / "carrier-output"
+        copied_artifacts.mkdir()
+        (copied_artifacts / "build-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "change-intent-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "guard-map.json").write_text(json.dumps({"objective": token}), encoding="utf-8")
+        (copied_artifacts / "carrier-attempt0.log").write_text(f"task mentions {token}\n", encoding="utf-8")
+
+        from_repo_root = conf.run_conformance(contract, fake_runner({}), cwd=d)
+        from_stage_root = conf.run_conformance(contract, fake_runner({}), cwd=str(stage))
+        from_copied_artifact_root = conf.run_conformance(contract, fake_runner({}), cwd=str(copied_artifacts))
+
+    assert from_repo_root["applicable"] and from_repo_root["passed"] and from_repo_root["findings"] == [], \
+        from_repo_root
+    assert from_stage_root["applicable"] and from_stage_root["passed"] and from_stage_root["findings"] == [], \
+        from_stage_root
+    assert from_copied_artifact_root["applicable"] and from_copied_artifact_root["passed"] \
+        and from_copied_artifact_root["findings"] == [], from_copied_artifact_root
+    print("ok  forbidden-pattern: controller artifacts are skipped even when cwd is the stage scratch root")
+
+
+def test_forbidden_pattern_does_not_skip_product_result_json_by_name_only():
+    token = "SHAGIRI_SCAFFOLD"
+    with _ws({}) as d:
+        product = Path(d) / "src" / "result.json"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text(json.dumps({"value": token}), encoding="utf-8")
+        rep = conf.run_conformance(_fp_contract([{"pattern": token}]), fake_runner({}), cwd=d)
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert not rep["passed"] and f["hits"] == ["src/result.json:1"], rep
+    assert f["count"] == 1, f
+    print("ok  forbidden-pattern: product result.json is still scanned when it is not a controller packet")
 
 
 def test_forbidden_pattern_folds_alongside_cli_checker():
@@ -1392,8 +1655,12 @@ def test_schema_forbidden_patterns_is_optional_and_shaped():
             "fallback_plan": "f", "handoff_to_implementer": "h", "deliverable_kind": "none"}
     assert v.is_valid(base), list(v.iter_errors(base))        # optional: absent still validates
     ok = {**base, "forbidden_patterns": [{"pattern": "_scaffold_seed_commit",
-                                          "exclude": ["CHANGELOG.md"], "max_occurrences": 0, "reason": "renamed"}]}
+                                          "exclude": ["CHANGELOG.md"], "max_occurrences": 0, "scope": "tree",
+                                          "reason": "renamed"}]}
     assert v.is_valid(ok), list(v.iter_errors(ok))
+    assert v.is_valid({**base, "forbidden_patterns": [{"pattern": "x"}]}), "scope defaults to leaf"
+    assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "scope": "repo"}]}), \
+        "scope is leaf|tree only"
     assert not v.is_valid({**base, "forbidden_patterns": [{"reason": "no pattern"}]}), "pattern is required"
     assert not v.is_valid({**base, "forbidden_patterns": [{"pattern": "x", "max_occurrences": -1}]}), \
         "max_occurrences must be >= 0"
@@ -1418,6 +1685,7 @@ def test_regression_suite_failure_blocks_with_exit_code_and_tail():
     f = next(f for f in rep["findings"] if f["source"] == "regression")
     assert f["severity"] == "major" and not f["passed"], f
     assert f["check"] == "regression_suite" and f["command"] == cmd and f["exit_code"] == 1, f
+    assert f["failure_classification"] == "code", f
     assert "FAILED tests/test_core.py::test_add" in f["output_tail"], f      # failing test name captured
     assert "core suite must stay green" in f["detail"], f
     # FIX 2 / acceptance (b): the BLOCKING finding carries an ACTIONABLE fix_hint naming the failing command,
@@ -1450,6 +1718,39 @@ def test_regression_suite_passing_command_is_clean_pass():
     rep = conf.run_conformance(_rs_contract({"command": cmd}), fake_runner({cmd: R(0, "5 passed\n", "")}))
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     print("ok  regression: a passing suite (exit 0) passes with no finding")
+
+
+def test_regression_suite_missing_pytest_is_infra_advisory():
+    cmd = "python3 -m pytest -q"
+    rep = conf.run_regression_suite(_rs_contract({"command": cmd}),
+                                    fake_runner({cmd: R(127, "", "No module named pytest\n")}))
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    assert not rep["passed"] and f["failure_classification"] == "infra", f
+    assert "fix_hint" not in f, f
+    assert cp._apply_conformance_gate([], rep, "block") == [], "missing pytest must not block convergence"
+    print("ok  regression: missing pytest is infra/advisory, not a code regression")
+
+
+def test_regression_suite_product_missing_dependency_blocks():
+    cmd = "python3 app.py"
+    output = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n"
+    rep = conf.run_regression_suite(_rs_contract({"command": cmd}),
+                                    fake_runner({cmd: R(1, "", output)}))
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    assert not rep["passed"] and f["failure_classification"] == "code", f
+    assert "fix_hint" in f, f
+    assert cp._apply_conformance_gate([], rep, "block") == [f], "product missing dependency must block"
+    print("ok  regression: product ModuleNotFoundError is code and blocks convergence")
+
+
+def test_regression_suite_timeout_is_advisory_timeout():
+    cmd = "python3 -m pytest -q"
+    rep = conf.run_regression_suite(_rs_contract({"command": cmd, "timeout_seconds": 1}),
+                                    fake_runner({cmd: R(124, "", "<conformance: timeout after 1s>")}))
+    f = next(f for f in rep["findings"] if f["source"] == "regression")
+    assert not rep["passed"] and f["failure_classification"] == "timeout", f
+    assert cp._apply_conformance_gate([], rep, "block") == [], "timeout must not drive repair"
+    print("ok  regression: rc 124 is classified timeout and stays advisory")
 
 
 def test_regression_suite_absent_is_noop():
@@ -1592,6 +1893,7 @@ def test_static_check_failure_blocks_with_exit_code_and_fix_hint():
     f = next(f for f in rep["findings"] if f["source"] == "static-check")
     assert f["severity"] == "major" and not f["passed"], f
     assert f["check"] == "static_checks" and f["command"] == cmd and f["exit_code"] == 1, f
+    assert f["failure_classification"] == "code", f
     assert "undefined name 'reqeusts'" in f["output_tail"], f   # the analyzer's reported error captured
     assert "no undefined names" in f["detail"], f               # declared reason surfaced
     # acceptance (a): the BLOCKING finding carries a NON-EMPTY actionable fix_hint naming the failing command,
@@ -1611,6 +1913,17 @@ def test_static_checks_all_pass_is_clean_pass():
     assert rep["applicable"] and rep["passed"] and rep["findings"] == [], rep
     assert rep["checks_run"] >= 2, rep                           # both analyzers counted
     print("ok  static-check: all analyzers passing (exit 0) passes with no finding")
+
+
+def test_static_check_command_not_found_is_infra_advisory():
+    cmd = "pyflakes ."
+    rep = conf.run_static_checks(_sc_contract([{"command": cmd}]),
+                                 fake_runner({cmd: R(127, "", "sh: pyflakes: command not found\n")}))
+    f = next(f for f in rep["findings"] if f["source"] == "static-check")
+    assert not rep["passed"] and f["failure_classification"] == "infra", f
+    assert "fix_hint" not in f, f
+    assert cp._apply_conformance_gate([], rep, "block") == [], "missing analyzer binary must not block"
+    print("ok  static-check: command-not-found is infra/advisory, not a code defect")
 
 
 def test_static_checks_absent_or_empty_is_noop():
@@ -1873,6 +2186,537 @@ def test_goal_acceptance_profile_validation_and_no_boot_on_invalid():
     assert bad["verified"] is False and bad["probes_run"] == 0, bad
     assert any(f["check"] == "profile" for f in bad["findings"]), bad
     print("ok  goal acceptance: profile shape-checked; invalid contract -> no boot, verified False")
+
+
+# ── incr #3: the producer FINDINGS-ROUTER (explicit routing model + the SAFE flip of the ambiguous default) ──
+
+def test_ambiguous_nonzero_exit_is_undetermined_not_code():
+    # the safe flip: a plain nonzero exit with NO could-not-run signal and NO established code signal is
+    # GENUINELY AMBIGUOUS -> `undetermined` (NOT `code`). Safe only because #1 fail-closes it as unverified.
+    assert conf._failure_classification(returncode=1, stdout="some output", stderr="boom") == "undetermined"
+    # the routing model then keeps it OFF the implementer repair loop (could-not-run/inconclusive).
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": "boom"}, False)
+    assert f["failure_classification"] == "undetermined", f
+    assert f["gate_state"] == "INDETERMINATE" and f["repair_route"] != "implementer", f
+    assert f["repair_route"] == "clean_retry" and f["retryable"] is True, f
+    assert not cp._finding_blocks_convergence(f), f               # ambiguous never blocks-as-code
+    # an ORACLE/ANALYZER call site may opt a plain nonzero INTO `code` (its contract makes nonzero a product
+    # signal) — the flip moves the DEFAULT, it does not remove the deliberate-code path.
+    assert conf._failure_classification(returncode=1, stdout="", stderr="", default="code") == "code"
+    print("ok  incr#3: an ambiguous nonzero exit -> undetermined (unverified), not blamed as code")
+
+
+def test_positive_signal_exit_codes_are_resource_or_infra_not_code():
+    # the RESOURCE HOLE: a shell reports a signal death as POSITIVE 128+N. 137 (SIGKILL/OOM), 134 (SIGABRT),
+    # 139 (SIGSEGV) -> resource; 143 (SIGTERM), 130 (SIGINT) -> infra. None is a product `code` defect.
+    assert conf._failure_classification(returncode=137) == "resource"   # 128+9 OOM-kill
+    assert conf._failure_classification(returncode=134) == "resource"   # 128+6 SIGABRT
+    assert conf._failure_classification(returncode=139) == "resource"   # 128+11 SIGSEGV
+    assert conf._failure_classification(returncode=143) == "infra"      # 128+15 SIGTERM
+    assert conf._failure_classification(returncode=130) == "infra"      # 128+2 SIGINT
+    # even when the call site asks for default="code" (an oracle gate), a signal death still wins as could-not-run.
+    assert conf._failure_classification(returncode=137, default="code") == "resource"
+    f = conf._with_failure_classification({"passed": False, "returncode": 137}, False)
+    assert f["gate_state"] == "COULD_NOT_RUN_INFRA" and f["repair_route"] == "clean_retry", f
+    assert not cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: positive 137/134/139 -> resource, 143/130 -> infra (signal death, never code)")
+
+
+def test_module_not_found_in_ran_output_is_still_code():
+    # an established CODE signal must SURVIVE the flip: a ModuleNotFoundError in the OUTPUT of a command that
+    # actually RAN (exit != 127) is the product's own missing import -> `code` -> implementer.
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    # but the SAME text at exit 127 is command-not-found -> infra (the host gap wins; checked before code).
+    assert conf._failure_classification(returncode=127, stderr="No module named pytest") == "infra"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE" and f["phase"] == "dependency", f
+    assert cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: ModuleNotFoundError in ran output (exit 1) -> still code/implementer (blocks)")
+
+
+def test_missing_pytest_runner_at_exit_1_is_unsupported_env_not_code():
+    # the MIRROR of a fabricated pass: a `python -m pytest` invocation whose RUNNER is missing emits
+    # "No module named pytest" in OUTPUT at exit 1 (NOT 127). The known-runner-absence whitelist must win over
+    # the generic `No module named` CODE clause -> infra/unsupported-env, NOT a product defect blamed on the impl.
+    out = "No module named pytest\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "infra"
+    # even an ORACLE/regression call site (default="code") must not flip a missing runner into code.
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra"
+    f = conf._with_failure_classification(
+        {"passed": False, "returncode": 1, "detail": "regression suite could not run; output tail: " + out}, False)
+    assert f["failure_classification"] == "infra", f
+    assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+    assert f["repair_route"] in ("escalate", "clean_retry") and f["repair_route"] != "implementer", f
+    assert not cp._finding_blocks_convergence(f), f               # a missing runner must NOT block as code
+    print("ok  fix: missing pytest runner at exit 1 -> unsupported-env/infra (not code, not implementer)")
+
+
+def test_other_known_python_runners_absent_at_exit_1_are_unsupported_env_not_code():
+    # EXTENSION of the known-runner whitelist (the SAFE under-coverage fix): OTHER canonical `python -m <runner>`
+    # modules that are absent (tox/nox/coverage/nose2/unittest) emit `No module named <runner>` in OUTPUT at exit 1
+    # (NOT 127, just like pytest). They are an absent VERIFICATION RUNNER, not a product defect -> infra/
+    # unsupported-env -> escalate, exactly as a missing pytest runner. Each name is anchored, so only the bare
+    # canonical module matches (the plugin-extension case is guarded below).
+    for runner in ("tox", "nox", "coverage", "nose2", "unittest"):
+        out = f"No module named {runner}\n"
+        assert conf._failure_classification(returncode=1, stderr=out) == "infra", out
+        # even an ORACLE/regression call site (default="code") must not flip a missing runner into code.
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra", out
+        f = conf._with_failure_classification(
+            {"passed": False, "returncode": 1,
+             "detail": "regression suite could not run; output tail: " + out}, False)
+        assert f["failure_classification"] == "infra", f
+        assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+        assert f["repair_route"] in ("escalate", "clean_retry") and f["repair_route"] != "implementer", f
+        assert not cp._finding_blocks_convergence(f), f            # an absent runner must NOT block as code
+    print("ok  fix: tox/nox/coverage/nose2/unittest absent at exit 1 -> unsupported-env/infra (not implementer)")
+
+
+def test_product_plugin_extending_known_runner_stays_code_not_infra():
+    # the OVER-REACH guard for the whitelist EXTENSION: a PRODUCT plugin whose name extends a runner module
+    # (`tox_someplugin`, `nox_fixtures`, `coverage_enable_subprocess`, `unittest2`) is the product's own undeclared
+    # dependency, NOT an absent runner. The trailing `\b` keeps the runner adjacent to a word char (`_`/digit) so no
+    # boundary forms and it falls through to `_CODE_TEXT_RE` -> code -> implementer (blocks). If it leaked to infra,
+    # a real dep defect would be parked at "unverified" forever (the dangerous code->infra masking direction).
+    for plugin in ("tox_someplugin", "nox_fixtures", "coverage_enable_subprocess", "nose2_html", "unittest2"):
+        out = f"Traceback (most recent call last):\nModuleNotFoundError: No module named '{plugin}'\n"
+        assert conf._failure_classification(returncode=1, stderr=out) == "code", out
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code", out
+        assert not conf._UNSUPPORTED_ENV_RE.search(out), out       # the anchored whitelist must NOT match a plugin
+        f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+        assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+        assert cp._finding_blocks_convergence(f), f                # a missing product plugin still blocks as code
+    print("ok  fix: `No module named tox_someplugin` (& peers) at exit 1 -> code/implementer (plugin gap, not runner)")
+
+
+def test_product_missing_dependency_at_exit_1_stays_code_not_infra():
+    # the NARROW guard (ADR-0006): `No module named requests` is NOT a known runner -> it falls through the
+    # whitelist to `_CODE_TEXT_RE` -> code. A product that forgot to declare its dependency is a code defect.
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f                   # product missing dep still blocks
+    print("ok  fix: product `No module named requests` at exit 1 -> still code/implementer (blocks)")
+
+
+def test_dependency_fetch_connectivity_failure_is_unsupported_env_not_code():
+    # The box/verification environment may lack DNS or network egress while fetching dependencies. That is a
+    # could-not-run environment limit, not a product failure for the implementer to "repair".
+    samples = [
+        ("python -m pip install demo",
+         "WARNING: Retrying (Retry(total=4)) after connection broken by "
+         "'NewConnectionError(\"<pip._vendor.urllib3.connection.HTTPSConnection object>\": "
+         "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution)': "
+         "/simple/demo/\n"
+         "ERROR: Could not find a version that satisfies the requirement demo (from versions: none)\n"
+         "ERROR: No matching distribution found for demo\n"),
+        ("python -m pip install demo",
+         "ERROR: Could not fetch URL https://pypi.org/simple/demo/: There was a problem reaching the index\n"),
+        ("python -m pip install git+https://github.com/acme/demo.git",
+         "fatal: unable to access 'https://github.com/acme/demo.git/': Could not resolve host: github.com\n"),
+    ]
+    for cmd, out in samples:
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "infra", out
+        findings = conf.install_findings(
+            {"build_and_install": {"commands": [cmd]}},
+            fake_runner({cmd: R(1, "", out)}),
+            cwd="/tmp",
+        )
+        assert len(findings) == 1, findings
+        f = findings[0]
+        assert f["failure_classification"] == "infra", f
+        assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV", f
+        assert f["repair_route"] == "escalate" and f["repair_route"] != "implementer", f
+        assert f["retryable"] is False and not cp._finding_blocks_convergence(f), f
+    print("ok  fix: dependency-fetch DNS/index failures -> unsupported-env infra, not implementer code")
+
+
+def test_product_assertion_with_connectivity_words_stays_code_not_infra():
+    # The connectivity signatures are anchored to dependency/index fetch context. A product test assertion that
+    # happens to mention the same words is still a product failure and must keep blocking as code.
+    out = "AssertionError: expected cached fallback, got Temporary failure in name resolution\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f
+    print("ok  guard: product assertion mentioning connectivity remains code/implementer")
+
+
+def test_product_requests_urllib3_connection_error_stays_code_not_infra():
+    # A product's own requests/urllib3 stack can emit the same exception class names pip vendors internally.
+    # Those library-internal names are not dependency-fetch anchors; an example/test that ran and failed remains
+    # a product failure, even with no AssertionError text.
+    out = (
+        "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.example.test', port=443): "
+        "Max retries exceeded with url: /v1/payments (Caused by "
+        "NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x10>: "
+        "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\n"
+    )
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    assert conf._failure_classification(returncode=1, stderr=out) != "infra"
+    assert not conf._dependency_fetch_connectivity_failure(out), out
+
+    profile = {"entrypoint": {"invocation": "product-cli"},
+               "examples": [{"invocation": "sync-payments", "expected_status": 0}]}
+    report = conf.run_cli_conformance(_cli_contract(profile), fake_runner({
+        "product-cli sync-payments": R(1, "", out),
+    }))
+    finding = next(f for f in report["findings"] if f["check"] == "exit_status")
+    assert finding["failure_classification"] == "code", finding
+    assert finding["gate_state"] == "VERIFIED_PRODUCT_FAILURE", finding
+    assert finding["repair_route"] == "implementer", finding
+    assert cp._finding_blocks_convergence(finding), finding
+    print("ok  guard: product requests/urllib3 connection error -> code/implementer, not infra/escalate")
+
+
+def test_pytest_plugin_gap_at_exit_1_stays_code_not_infra():
+    # the MASKING seam (over-reach of the unsupported-env whitelist): `No module named pytest_asyncio` is the
+    # PRODUCT's own missing pytest-PLUGIN dependency raised BY its test code, NOT an absent runner. The anchored
+    # `no module named pytest\b` must NOT match `pytest_asyncio` (the `_` keeps `pytest` inside a word), so it
+    # falls through to `_CODE_TEXT_RE` -> code -> implementer. If it leaked to infra, a real dep defect would be
+    # parked at "unverified" and never repaired (the dangerous code->infra direction).
+    out = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'pytest_asyncio'\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    # the bare runner-absence phrasing (no plugin suffix) also stays code-free of the anchor's word char:
+    assert conf._failure_classification(returncode=1, stderr="No module named pytest_asyncio\n") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f                   # a missing product plugin still blocks as code
+    print("ok  fix: `No module named pytest_asyncio` at exit 1 -> code/implementer (plugin gap, not runner)")
+
+
+def test_generic_is_not_available_in_product_output_stays_code_not_infra():
+    # the SECOND masking seam: the generic `is not available` clause was dropped. A real product failure can
+    # legitimately print "X is not available" — matching it as unsupported-env would re-label a genuine defect as
+    # an infra gap and never repair it. With an established product signal in the same output it must stay code.
+    out = "AssertionError: feature flag 'fast_path' is not available in this build\n"
+    assert conf._failure_classification(returncode=1, stderr=out) == "code"
+    assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code"
+    f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+    assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+    assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+    assert cp._finding_blocks_convergence(f), f
+    # and even a bare ambiguous nonzero with a generic "is not available" no longer routes to unsupported-env:
+    bare = conf._with_failure_classification(
+        {"passed": False, "returncode": 1, "detail": "the requested codec is not available"}, False)
+    assert bare["gate_state"] != "COULD_NOT_RUN_UNSUPPORTED_ENV", bare
+    assert bare["repair_route"] != "escalate", bare
+    print("ok  fix: a product `X is not available` -> code/undetermined, never unsupported-env (no masking)")
+
+
+def test_product_emittable_failures_stay_code_never_unsupported_env():
+    # STRUCTURAL REGRESSION GUARD (Mona walkthrough): `_UNSUPPORTED_ENV_RE` precedence sits ABOVE `_CODE_TEXT_RE`
+    # in `_failure_classification`, so a FUTURE too-broad clause added to the whitelist would silently re-label a
+    # real PRODUCT defect as infra/unsupported-env -> escalate/unverified (a MASKED defect, the dangerous
+    # code->infra direction). The narrowness guarantee currently rests on reviewer discipline; this converts it
+    # to an EXECUTABLE guard. Every string below is the kind a real PRODUCT or its TEST suite would print. The
+    # invariant the guard locks in: NONE of them may ever be classified infra/unsupported-env (the masking
+    # direction), and the whitelist regex must not match any of them. If anyone later broadens `_UNSUPPORTED_ENV_RE`
+    # enough to catch one of these, this test fails — making whitelist drift a visible test failure, not a silent
+    # masked defect.
+    product_emittable = [
+        # a missing PRODUCT dependency (real lib) raised by product/test code, not an absent runner:
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'\n",
+        # a missing pytest PLUGIN the product's own tests import (the `_` keeps `pytest` inside a word):
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'pytest_asyncio'\n",
+        # a made-up application module the product forgot to ship/declare:
+        "Traceback (most recent call last):\nModuleNotFoundError: No module named 'acme_payments.core'\n",
+        # a plain assertion failure from the product's own test suite:
+        "AssertionError: expected 200 but got 503\n",
+        # a build/install failure a product emits when its wheel cannot be built:
+        "ERROR: Could not build wheels for cryptography, which is required to install pyproject.toml-based projects\n",
+        # a dependency resolver miss without network/index reachability context is the product's requested package:
+        "ERROR: Could not find a version that satisfies the requirement acme-private-package\n",
+        # generic `X is not available` phrasings a PRODUCT (not the checker) can legitimately print:
+        "AssertionError: feature flag 'fast_path' is not available in this build\n",
+        "RuntimeError: payment service is not available\n",
+        # connectivity words alone are product-emittable unless anchored to package/index fetching:
+        "AssertionError: expected cached fallback, got Temporary failure in name resolution\n",
+        "RuntimeError: upstream https://api.example.test is down: Network is unreachable\n",
+        "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.example.test', port=443): "
+        "Max retries exceeded with url: /v1/payments (Caused by "
+        "NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x10>: "
+        "Failed to establish a new connection: [Errno -3] Temporary failure in name resolution'))\n",
+    ]
+    for out in product_emittable:
+        # MASKING-DIRECTION GUARD (the core invariant): never infra/unsupported-env/timeout/resource, at a generic
+        # call site (default undetermined) AND at an ORACLE/BUILD/regression site (default code) alike. This is the
+        # assertion that breaks if the whitelist is broadened to swallow a product string.
+        for default in ("undetermined", "code"):
+            cls = conf._failure_classification(returncode=1, stderr=out, default=default)
+            assert cls not in ("infra", "timeout", "resource"), (out, default, cls)
+        # and the whitelist regex itself must NOT match any product-emittable string:
+        assert not conf._UNSUPPORTED_ENV_RE.search(out), out
+        assert not conf._dependency_fetch_connectivity_failure(out), out
+        # at an ORACLE/BUILD/regression gate (default="code"), where a nonzero is a positive product signal and
+        # masking is most dangerous, every product-emittable failure resolves to exactly `code` -> implementer.
+        assert conf._failure_classification(returncode=1, stderr=out, default="code") == "code", out
+    # the subset that carries an ESTABLISHED product signal (import/assertion) is `code` even at a generic site,
+    # and end-to-end routes to the implementer and BLOCKS convergence (never parked as unverified).
+    signal_bearing = [s for s in product_emittable if ("No module named" in s or "AssertionError" in s)]
+    for out in signal_bearing:
+        assert conf._failure_classification(returncode=1, stderr=out) == "code", out
+        f = conf._with_failure_classification({"passed": False, "returncode": 1, "detail": out}, False)
+        assert f["failure_classification"] == "code" and f["repair_route"] == "implementer", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE", f
+        assert cp._finding_blocks_convergence(f), f
+    print("ok  guard: product-emittable failures never infra/unsupported-env; whitelist drift would fail this test")
+
+
+def test_example_comparison_mismatch_is_code_and_blocks():
+    # item #5: the stdout/exit oracle mismatch is the POSITIVE product signal -> code/implementer, and it BLOCKS.
+    profile = {"entrypoint": {"invocation": "mytool"},
+               "examples": [{"invocation": "run", "expected_status": 0,
+                             "expected_stdout_contains": ["DONE"]}]}
+    runner = fake_runner({"mytool run": R(3, "nope\n", "")})       # wrong exit AND wrong stdout, plain exit 3
+    rep = conf.run_cli_conformance(_cli_contract(profile), runner)
+    assert not rep["passed"], rep
+    by_check = {f["check"]: f for f in rep["findings"]}
+    for check in ("exit_status", "stdout_contains"):
+        f = by_check[check]
+        assert f["failure_classification"] == "code", f
+        assert f["gate_state"] == "VERIFIED_PRODUCT_FAILURE" and f["repair_route"] == "implementer", f
+        assert cp._finding_blocks_convergence(f), f
+    assert cp._apply_conformance_gate([], rep, "block") == rep["findings"], "oracle mismatch must block"
+    print("ok  incr#3: an example-comparison mismatch -> code/implementer (blocks convergence)")
+
+
+def test_finding_blocks_convergence_routes_on_repair_route_with_legacy_code_fallback():
+    # the gate decision moves onto repair_route, KEEPING the legacy failure_classification=="code" fallback.
+    assert cp._finding_blocks_convergence({"passed": False, "repair_route": "implementer"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "clean_retry"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "escalate"})
+    assert not cp._finding_blocks_convergence({"passed": False, "repair_route": "none"})
+    # legacy findings (predating the routing model, NO repair_route) still block on the code class.
+    assert cp._finding_blocks_convergence({"passed": False, "failure_classification": "code"})
+    assert not cp._finding_blocks_convergence({"passed": False, "failure_classification": "infra"})
+    assert not cp._finding_blocks_convergence({"passed": False, "failure_classification": "undetermined"})
+    # a passed finding never blocks, regardless of route.
+    assert not cp._finding_blocks_convergence({"passed": True, "repair_route": "implementer"})
+    print("ok  incr#3: _finding_blocks_convergence routes on repair_route; legacy ==code path still works")
+
+
+def test_unsupported_env_infra_routes_to_escalate_not_retry():
+    # a could-not-run that a clean retry will NOT fix (the host lacks the tool) routes to ESCALATE, not the
+    # implementer and not an indefinite retry — kept as `infra` for back-compat, distinguished only in routing.
+    f = conf._with_failure_classification(
+        {"passed": False, "failure_classification": "infra",
+         "detail": "static check `pyflakes .`: command not found"}, False)
+    assert f["failure_classification"] == "infra", f               # back-compat label unchanged
+    assert f["gate_state"] == "COULD_NOT_RUN_UNSUPPORTED_ENV" and f["repair_route"] == "escalate", f
+    assert f["retryable"] is False and not cp._finding_blocks_convergence(f), f
+    print("ok  incr#3: an unsupported-env infra -> escalate (not implementer, not retried)")
+
+
+# ── runner_factory: the box-backed conformance runner (host-injectable execution via AI_ORG_RUNNER_CMD) ──────
+# These tests drive a FAKE shim script (a tiny stand-in for a box CLI wrapper) and assert conformance runs
+# THROUGH it, that the transport boundary is honest (a shim that can't run -> infra/could-not-run, never a
+# fabricated pass and never product blame), and that the unset path is the plain subprocess runner unchanged.
+
+# A shim that EXECUTES the framed command (mirroring a box) and frames the result back over stdout.
+_EXEC_SHIM = r'''#!/usr/bin/env python3
+import sys, subprocess
+MAGIC = b"AOBRUN1"
+def read_block(buf):
+    len_line, rest = buf.split(b"\n", 1)
+    n = int(len_line)
+    return rest[:n], rest[n:]
+cwd = sys.argv[1] if len(sys.argv) > 1 else ""
+buf = sys.stdin.buffer.read()
+magic, rest = buf.split(b"\n", 1)
+assert magic == MAGIC, magic
+cmd_b, rest = read_block(rest)
+stdin_b, rest = read_block(rest)
+proc = subprocess.run(cmd_b.decode(), shell=True, cwd=(cwd or None), input=stdin_b,
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+out, err = proc.stdout or b"", proc.stderr or b""
+sys.stdout.buffer.write(b"".join([MAGIC, b"\n", str(proc.returncode).encode(), b"\n",
+                                  str(len(out)).encode(), b"\n", out,
+                                  str(len(err)).encode(), b"\n", err]))
+'''
+
+# A shim that FAILS at the transport layer: it never produces a frame and exits nonzero (box unavailable).
+_FAILING_SHIM = "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('box unavailable\\n')\nsys.exit(3)\n"
+
+# A shim that exits 0 but emits a MALFORMED (non-AOBRUN1) body — a corrupt/garbage frame.
+_MALFORMED_SHIM = "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('not a frame at all')\n"
+
+
+def _install_shim(d, body):
+    p = Path(d) / "shim.py"
+    p.write_text(body)
+    return f"{sys.executable} {shlex.quote(str(p))}"
+
+
+from contextlib import contextmanager  # noqa: E402 — local to the runner_factory tests below
+
+
+@contextmanager
+def _runner_env(**updates):
+    old = {k: os.environ.get(k) for k in updates}
+    try:
+        for k, v in updates.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_runner_factory_routes_through_shim_passing_rc_stdout_stderr():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("python3 -c \"import sys; sys.stdout.write('OUT-data'); "
+                         "sys.stderr.write('ERR-data'); sys.exit(7)\"", cwd=d)
+    assert res.returncode == 7, res                            # the COMMAND's exit, surfaced through the frame
+    assert res.stdout == "OUT-data" and res.stderr == "ERR-data", res
+    print("ok  runner_factory: conformance runs THROUGH the shim; gates see its rc/stdout/stderr")
+
+
+def test_runner_factory_framing_survives_newlines_and_sentinel_in_output():
+    # length-prefixed framing must carry output that contains newlines AND the sentinel string itself.
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _EXEC_SHIM)
+        payload = "line1\nAOBRUN1\nline3\n"
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("printf %s " + shlex.quote(payload), cwd=d)
+    assert res.returncode == 0 and res.stdout == payload, res
+    print("ok  runner_factory: length-prefixed framing carries newlines + the sentinel verbatim")
+
+
+def test_runner_factory_passes_cwd_and_stdin_through_the_shim():
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "marker.txt").write_text("INSIDE-CWD")
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            cwd_res = runner("cat marker.txt", cwd=d)           # relative path -> proves cwd was applied
+            stdin_res = runner("cat", cwd=d, stdin="piped-payload")
+    assert cwd_res.stdout == "INSIDE-CWD", cwd_res
+    assert stdin_res.stdout == "piped-payload", stdin_res
+    print("ok  runner_factory: cwd + command stdin are delivered to the shim")
+
+
+def test_runner_factory_unset_uses_subprocess_runner_unchanged():
+    sentinel = object()
+    saved = conf.subprocess_runner
+    try:
+        conf.subprocess_runner = lambda *a, **k: sentinel
+        with _runner_env(AI_ORG_RUNNER_CMD=None):
+            got = runner_factory.get_conformance_runner()
+        with _runner_env(AI_ORG_RUNNER_CMD="   "):              # blank/whitespace also means "no shim"
+            got_blank = runner_factory.get_conformance_runner()
+    finally:
+        conf.subprocess_runner = saved
+    assert got is sentinel and got_blank is sentinel, (got, got_blank)
+    print("ok  runner_factory: AI_ORG_RUNNER_CMD unset -> conformance.subprocess_runner unchanged")
+
+
+def test_runner_factory_shim_transport_failure_is_infra_not_product_not_pass():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _FAILING_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("echo should-not-matter", cwd=d)
+    assert res.returncode == 127 and res.returncode != 0, res   # could-not-run, NOT a fabricated pass (0)
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert cls == "infra", (cls, res)                           # routes to escalate/clean-retry/unverified
+    assert cls != "code", res                                  # NEVER blamed on product code
+    print("ok  runner_factory: a shim that can't run (nonzero transport exit) -> infra/could-not-run")
+
+
+def test_runner_factory_transport_slack_covers_slow_first_stage_without_timeout():
+    # A cold box stage can exceed the old 30s slack before the command even runs. Simulate a shim that would time
+    # out at the old effective+30 budget but returns a valid frame under the larger default transport allowance.
+    observed_timeouts = []
+    saved_run = runner_factory.subprocess.run
+
+    def fake_slow_stage_run(argv, input=None, stdout=None, stderr=None, timeout=None):  # noqa: ARG001
+        observed_timeouts.append(timeout)
+        if timeout <= 31.0:  # command timeout=1s + old 30s slack
+            raise runner_factory.subprocess.TimeoutExpired(argv, timeout)
+        out, err = b"staged-ok\n", b""
+        frame = b"".join([runner_factory._MAGIC, b"\n", b"0\n",
+                          str(len(out)).encode(), b"\n", out,
+                          str(len(err)).encode(), b"\n", err])
+        return type("Proc", (), {"returncode": 0, "stdout": frame, "stderr": b""})()
+
+    try:
+        runner_factory.subprocess.run = fake_slow_stage_run
+        with _runner_env(AI_ORG_RUNNER_CMD="fake-shim", AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None,
+                         AI_ORG_RUNNER_TRANSPORT_SLACK=None):
+            runner = runner_factory.get_conformance_runner(timeout=1.0)
+            res = runner("echo staged", cwd="/tmp")
+    finally:
+        runner_factory.subprocess.run = saved_run
+
+    assert res.returncode == 0 and res.stdout == "staged-ok\n", res
+    assert observed_timeouts and observed_timeouts[0] > 31.0, observed_timeouts
+    print("ok  runner_factory: cold-stage shim gets transport budget beyond the old 30s slack")
+
+
+def test_runner_factory_unrunnable_shim_is_infra():
+    with _runner_env(AI_ORG_RUNNER_CMD="/no/such/runner-shim-xyz", AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+        runner = runner_factory.get_conformance_runner()
+        res = runner("echo hi")
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert res.returncode == 127 and cls == "infra", (cls, res)
+    print("ok  runner_factory: an unrunnable/missing shim -> infra (the isolation did not happen, honestly)")
+
+
+def test_runner_factory_malformed_frame_is_infra():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _MALFORMED_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            res = runner("echo hi", cwd=d)
+    cls = conf._failure_classification(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr)
+    assert res.returncode == 127 and cls == "infra", (cls, res)
+    print("ok  runner_factory: a malformed/absent result frame -> infra (not a silent pass)")
+
+
+def test_runner_factory_fallback_opt_in_runs_locally_on_transport_failure():
+    with tempfile.TemporaryDirectory() as d:
+        cmd = _install_shim(d, _FAILING_SHIM)                   # shim can't run -> would be infra...
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS="1"):
+            runner = runner_factory.get_conformance_runner()   # ...but the explicit opt-in runs it locally
+            res = runner("python3 -c \"print('local-ran')\"", cwd=d)
+    assert res.returncode == 0 and res.stdout.strip() == "local-ran", res
+    print("ok  runner_factory: AI_ORG_RUNNER_FALLBACK_SUBPROCESS opt-in runs locally when the box is absent")
+
+
+def test_runner_factory_shim_drives_real_conformance_gate_end_to_end():
+    # End-to-end: a real CLI contract + artifact, with conformance executing every check THROUGH the shim.
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "mytool").write_text("#!/bin/sh\necho ok\n")
+        os.chmod(Path(d) / "mytool", 0o755)
+        profile = {"entrypoint": {"invocation": "./mytool"}, "examples": [
+            {"invocation": "", "expected_status": 0, "expected_stdout_contains": ["ok"]}]}
+        cmd = _install_shim(d, _EXEC_SHIM)
+        with _runner_env(AI_ORG_RUNNER_CMD=cmd, AI_ORG_RUNNER_FALLBACK_SUBPROCESS=None):
+            runner = runner_factory.get_conformance_runner()
+            rep = conf.run_cli_conformance(_cli_contract(profile), runner, cwd=d)
+    assert rep["applicable"] and rep["passed"], rep
+    print("ok  runner_factory: conformance passes a real artifact when executed end-to-end through the shim")
 
 
 if __name__ == "__main__":

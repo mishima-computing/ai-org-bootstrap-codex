@@ -10,6 +10,7 @@ check scope conflicts, derive node status, and immutably advance one task.
 from __future__ import annotations
 
 import fnmatch
+from pathlib import PurePosixPath
 
 __all__ = [
     "validate_plan",
@@ -17,6 +18,7 @@ __all__ = [
     "advance",
     "node_status",
     "scope_conflict",
+    "path_in_scope",
 ]
 
 
@@ -50,11 +52,46 @@ def _literal_prefix(pattern):
     return pattern[:first_glob]
 
 
+def _scope_contains(container, member):
+    """True when a non-glob entry CONTAINS a path under it — the merge guard's containment.
+
+    A bare-directory (`"dir"`) or trailing-slash (`"dir/"`) entry admits every path beneath it; an
+    exact entry contains only itself. This mirrors controller_goal._out_of_scope (which treats every
+    non-glob entry as a directory prefix) and frontier.path_in_scope's trailing-slash dir handling, so
+    the scheduler's conflict notion is a superset-or-equal of what the merge guard flags out-of-scope.
+    """
+    container = container.replace("\\", "/").rstrip("/")
+    member = member.replace("\\", "/").rstrip("/")
+    return member == container or member.startswith(container + "/")
+
+
+def _conflict_subtree(pattern):
+    pattern = pattern.replace("\\", "/")
+    if _has_glob(pattern):
+        pattern = _literal_prefix(pattern)
+    return pattern.rstrip("/")
+
+
+def _subtree_contains(container, member):
+    if container == "" or member == "":
+        return True
+    return _scope_contains(container, member)
+
+
 def _patterns_may_overlap(left, right):
     left_glob = _has_glob(left)
     right_glob = _has_glob(right)
     if not left_glob and not right_glob:
-        return left == right
+        # Directory-containment-aware (NOT mere equality): a dir-scoped entry overlaps any path
+        # under it, just as the merge guard would. Without this, a dir leaf (`src/api/`) and a
+        # file-under-it sibling (`src/api/routes.py`) co-schedule and both merge the same file.
+        return _scope_contains(left, right) or _scope_contains(right, left)
+
+    left_subtree = _conflict_subtree(left)
+    right_subtree = _conflict_subtree(right)
+    if _subtree_contains(left_subtree, right_subtree) or _subtree_contains(right_subtree, left_subtree):
+        return True
+
     if not left_glob:
         return fnmatch.fnmatchcase(left, right)
     if not right_glob:
@@ -68,12 +105,56 @@ def _patterns_may_overlap(left, right):
     return True
 
 
+def _scope_entries(task):
+    return [str(entry).strip() for entry in task.get("scope", ()) if str(entry).strip()]
+
+
 def scope_conflict(task_a, task_b):
-    """Return True unless the two task scopes are proven disjoint."""
-    for left in task_a.get("scope", ()):
-        for right in task_b.get("scope", ()):
+    """Return True unless the two task scopes are proven disjoint.
+
+    An empty/absent scope is an unconstrained writer, so treat it as repo-wide conflict.
+    """
+    left_entries = _scope_entries(task_a)
+    right_entries = _scope_entries(task_b)
+    if not left_entries or not right_entries:
+        return True
+    for left in left_entries:
+        for right in right_entries:
             if _patterns_may_overlap(str(left), str(right)):
                 return True
+    return False
+
+
+def _safe_rel(path: str) -> str | None:
+    path = str(path or "").strip().replace("\\", "/")
+    p = PurePosixPath(path)
+    if not path or p.is_absolute() or ".." in p.parts:
+        return None
+    return str(p)
+
+
+def path_in_scope(path: str, scope: list[str] | tuple[str, ...]) -> bool:
+    """Return true when a changed relative path is covered by a declared scope entry.
+
+    Scope entries support exact files, shell globs, and directory prefixes. Absolute paths and paths
+    containing `..` are rejected for both the changed path and the scope declaration.
+    """
+    rel = _safe_rel(path)
+    if rel is None:
+        return False
+    for raw in scope or ():
+        pattern = _safe_rel(str(raw).strip())
+        if pattern is None:
+            continue
+        if _has_glob(pattern):
+            if fnmatch.fnmatchcase(rel, pattern):
+                return True
+            continue
+        if rel == pattern:
+            return True
+        prefix = pattern.rstrip("/")
+        if str(raw).strip().replace("\\", "/").endswith("/") and rel.startswith(prefix + "/"):
+            return True
     return False
 
 

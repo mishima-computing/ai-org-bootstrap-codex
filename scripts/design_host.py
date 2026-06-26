@@ -20,7 +20,11 @@ import pre_localizer
 
 OUTPUT_FILE = "result.json"
 DESIGN_ROLES = ("genius", "aggressive-designer", "conservative-designer")
+AUFHEBEN_ROLE = "aufheben-designer"
+CHANGE_INTENT_PROMPT_ROLES = DESIGN_ROLES + (AUFHEBEN_ROLE,)
 GUARD_MAP_HEADER = "## GUARD-MAP (deterministic — the existing law that binds the files in scope)"
+CHANGE_INTENT_MAP_HEADER = "## CHANGE-INTENT-MAP (deterministic — advisory interface-delta routing substrate)"
+CHANGE_INTENT_MAP_FILE = "change-intent-map.json"
 OPERABILITY_MAP_HEADER = "## OPERABILITY-MAP (deterministic — repo facts about deploy/run/observe/bound/rollback)"
 # the design-proposal continuity fields determinism owns vs the LLM owns (selected_profiles stays LLM-owned:
 # it is authorization-validated against authorized profile ids, so an inferred-kind candidate cannot ride in it)
@@ -182,6 +186,78 @@ def _distill(guard_map: dict, cap: int) -> list[dict]:
     return out[:cap]
 
 
+def _change_intent_recipients(interface_delta: str) -> tuple[str, ...]:
+    if interface_delta == "no_surface_change":
+        return ("aggressive-designer", "genius", AUFHEBEN_ROLE)
+    return ("aggressive-designer", "conservative-designer", "genius", AUFHEBEN_ROLE)
+
+
+def role_receives_change_intent(role_id: str, change_intent_map: dict | None) -> bool:
+    if not change_intent_map:
+        return False
+    return role_id in _change_intent_recipients(change_intent_map.get("interface_delta", "unknown"))
+
+
+def role_receives_operability(role_id: str, change_intent_map: dict | None) -> bool:
+    if role_id != "conservative-designer":
+        return False
+    if not change_intent_map:
+        return True
+    return change_intent_map.get("interface_delta") not in ("no_surface_change", "unknown")
+
+
+def format_change_intent_section(change_intent_map: dict, role_id: str) -> str:
+    delta = (change_intent_map or {}).get("interface_delta", "unknown")
+    advice = (change_intent_map or {}).get("deliverable_kind_advice")
+    if delta == "unknown":
+        kind_line = "No deliverable_kind advice is authoritative for this objective; aufheben must choose from the contract facts."
+    else:
+        kind_line = f"Advisory deliverable_kind advice: {advice!r}; aufheben remains the authority."
+    return "\n\n".join([
+        CHANGE_INTENT_MAP_HEADER,
+        "This is advisory prompt substrate, not a gate input and not a contract field. It classifies the leaf "
+        "objective's interface delta from objective tokens plus localized candidate scope. If "
+        "`interface_delta` conflicts with `existing_repo_surface_kind`, the leaf change-intent fact wins for "
+        "contract design.",
+        f"Recipient: {role_id}. Interface delta: {delta}. {kind_line}",
+        "```json\n" + json.dumps(change_intent_map, indent=2, ensure_ascii=False) + "\n```",
+    ])
+
+
+def inject_change_intent_evidence(packet: dict, change_intent_map: dict, rel_path: str, role_id: str) -> dict:
+    """Carry change-intent into producer packets using only schema-valid existing fields.
+
+    Aufheben receives the map in the prompt only; its implementation contract schema intentionally has no
+    change_intent property.
+    """
+    if not isinstance(packet, dict) or role_id == AUFHEBEN_ROLE:
+        return packet
+    delta = change_intent_map.get("interface_delta", "unknown")
+    advice = change_intent_map.get("deliverable_kind_advice")
+    summary = f"CHANGE INTENT (see {rel_path}): interface_delta={delta}; deliverable_kind_advice={advice}"
+    if role_id == "genius":
+        targets = []
+        for key in ("substrate_inputs", "repo_evidence"):
+            ev = packet.get(key)
+            if not isinstance(ev, list):
+                ev = packet[key] = []
+            targets.append(ev)
+        if not any(isinstance(x, dict) and x.get("locator") == rel_path for ev in targets for x in ev):
+            targets[0].append({"ref_type": "run_artifact", "locator": rel_path,
+                               "summary": summary[:400]})
+    else:
+        constraints = packet.get("constraints")
+        if not isinstance(constraints, list):
+            constraints = packet["constraints"] = []
+        constraints.append(summary[:600])
+        ta = packet.get("things_to_avoid")
+        if not isinstance(ta, list):
+            ta = packet["things_to_avoid"] = []
+        for item in (change_intent_map.get("contract_design_advice") or [])[:3]:
+            ta.append(f"CHANGE INTENT: {item}"[:600])
+    return packet
+
+
 # --------------------------------------------------------------------------- carrier seam + the runner
 def _default_carrier(repo, prompt, sandbox, *, timeout, retries, out_dir, output_file, resume_session):
     import carrier_harness
@@ -196,8 +272,9 @@ def format_operability_section(op_map: dict) -> str:
         "continuity fields (version_constraints, ecosystem_facts_used, forbidden_expansions, "
         "missing_safety_checks) are PRE-FILLED from this map — do NOT re-derive them. Spend your judgment on "
         "selected_profiles, safe_change_path, reversibility_plan, knowledge_gaps, and which detected gap should "
-        "become a gate. The inferred deliverable_kind is ADVISORY (aufheben declares the real one); use it to "
-        "scope which operability checks actually matter for this kind.",
+        "become a gate. `existing_repo_surface_kind` is a repo-surface fact, not the leaf's deliverable kind. "
+        "If `change_intent_map.interface_delta` conflicts with it, the leaf change-intent fact wins for "
+        "contract design; use the repo-surface fact only to scope which operability checks matter.",
         "```json\n" + json.dumps(op_map, indent=2, ensure_ascii=False) + "\n```",
     ])
 
@@ -260,13 +337,37 @@ def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier
         except ValueError:
             guard_rel = str(guard_file)
 
-        # conservative-designer additionally gets a deterministic operability-map (kind inference + the
-        # kind-aware missing-checks + the factual continuity pre-fill). genius/aggressive stay guard-only.
+        change_intent_map = change_intent_rel = None
         op_map = op_rel = None
-        if role_id == "conservative-designer":
+        try:                                      # advisory only: failures degrade to the pre-existing prompt
+            import operability_scan
+            existing_scan = operability_scan.OperabilityScan(rp, [c.path for c in candidates], guard_map)
+            op_map = existing_scan.build()
+            change_intent_map = operability_scan.ChangeIntentScan(
+                rp,
+                objective,
+                candidates,
+                index=existing_scan.index,
+                existing_repo_surface_kind=op_map.get("existing_repo_surface_kind") or op_map.get("kind_verdict"),
+            ).build()
+            if role_receives_change_intent(role_id, change_intent_map):
+                change_intent_file = out_dir / CHANGE_INTENT_MAP_FILE
+                change_intent_file.write_text(json.dumps(change_intent_map, indent=2, ensure_ascii=False),
+                                              encoding="utf-8")
+                try:
+                    change_intent_rel = change_intent_file.resolve().relative_to(rp).as_posix()
+                except ValueError:
+                    change_intent_rel = str(change_intent_file)
+        except Exception:                         # noqa: BLE001 — advisory substrate must not sink the stage
+            change_intent_map = change_intent_rel = None
+            op_map = op_rel = None
+
+        # conservative-designer additionally gets a deterministic operability-map (existing repo surface kind +
+        # the kind-aware missing-checks + the factual continuity pre-fill), except no_surface_change refactors
+        # are intentionally guard-only for the conservative minimal-fix lens.
+        if op_map is not None and role_receives_operability(role_id, change_intent_map):
             try:                                  # the operability scan must never sink the stage — degrade
-                import operability_scan            # to guard-only on any scan failure (genius/aggressive prove
-                op_map = operability_scan.OperabilityScan(rp, [c.path for c in candidates], guard_map).build()
+                                                  # to guard-only on any scan failure (genius/aggressive prove
                 op_file = out_dir / "operability-map.json"
                 op_file.write_text(json.dumps(op_map, indent=2, ensure_ascii=False), encoding="utf-8")
                 try:
@@ -276,9 +377,14 @@ def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier
             except Exception:                     # noqa: BLE001 — guard-only is a valid fallback
                 op_map = op_rel = None
 
-        base_prompt = format_guard_section(guard_map) \
-            + (("\n\n" + format_operability_section(op_map)) if op_map is not None else "") \
-            + "\n\n---\n\n" + prompt
+        sections = []
+        if role_id in DESIGN_ROLES:
+            sections.append(format_guard_section(guard_map))
+        if change_intent_map is not None and role_receives_change_intent(role_id, change_intent_map):
+            sections.append(format_change_intent_section(change_intent_map, role_id))
+        if op_map is not None and op_rel is not None and role_receives_operability(role_id, change_intent_map):
+            sections.append(format_operability_section(op_map))
+        base_prompt = ("\n\n".join(sections) + "\n\n---\n\n" if sections else "") + prompt
         # ONE loop absorbs transport-empty AND schema-fail (each launch uses retries=0 so the harness
         # transport-retry does not compound with this schema-retry). attempts are aggregated; logs go to
         # per-attempt subdirs so they do not overwrite. A final failure returns ok=False so a rejected
@@ -306,8 +412,12 @@ def make_design_carrier_runner(repo, role_id, schema_path, objective, *, carrier
             if packet is None:
                 last_reason = ["output was empty or unsalvageable JSON"]
                 continue
-            packet = inject_guard_evidence(packet, guard_map, guard_rel, role_id)
-            if op_map is not None:
+            if role_id in DESIGN_ROLES:
+                packet = inject_guard_evidence(packet, guard_map, guard_rel, role_id)
+            if change_intent_map is not None and change_intent_rel is not None \
+                    and role_receives_change_intent(role_id, change_intent_map):
+                packet = inject_change_intent_evidence(packet, change_intent_map, change_intent_rel, role_id)
+            if op_map is not None and op_rel is not None and role_receives_operability(role_id, change_intent_map):
                 packet = inject_operability_evidence(packet, op_map, op_rel)
             result_file.write_text(json.dumps(packet, ensure_ascii=False), encoding="utf-8")
             verdict = _gate(json.dumps(packet), schema_path)

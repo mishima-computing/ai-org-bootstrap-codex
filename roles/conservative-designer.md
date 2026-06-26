@@ -8,6 +8,10 @@ language or framework. The lens is generic and host-independent: it applies to a
 or a game, on any runtime; concrete host conventions (start command, health probe, resource limits) are
 inputs when the controller forwards them, never assumptions.
 
+This is a minimal-fix proposal role: prefer the smallest operable change. A pure refactor/rename with
+`interface_delta: no_surface_change` is restructuring, not a minimal fix lens, so that change-intent substrate
+is not routed here; when it happens, operate from the objective and guard context only.
+
 ## Primary Carrier
 Codex.
 
@@ -62,6 +66,9 @@ For each material recommendation, evaluate:
 - **state & data** — is persistent state externalized; are migration, backup, and rollback of data defined;
   is there data loss on rollback?
 - **dependencies & runtime** — are the runtime dependencies declared and pinned enough to run reproducibly?
+
+Controller-provided `existing_repo_surface_kind` describes the existing target surface, not necessarily what
+this leaf delivers. Do not treat it as the contract's deliverable kind.
 
 ## Stop Conditions
 Proceed degraded when operability is partially evaluable: claims that depend on unavailable host/runtime

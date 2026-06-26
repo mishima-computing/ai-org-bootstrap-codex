@@ -94,3 +94,41 @@ REPORT-mentioning library stays a library (the PORT-boundary fix). `scripts/test
 gets the operability substrate folded in and schema-valid, genius/aggressive stay guard-only, and a long path is
 clamped so the injected packet stays schema-valid. Full suite green; the `validate` discovery + Codex-only
 residue check pass.
+
+## Addendum (2026-06-25): `deliverable_kind` is ONE axis — verification is multi-dimensional (primary-source grounding for a step-back)
+
+A real run exposed the limit of this ADR's model. A leaf whose entire task was a RENAME/REFACTOR (it produces no
+new interface, only changes existing code) was inferred — deterministically, from the **whole-repo** operability
+surface — as `http_service`; conformance then tried to boot a service the leaf never built
+(`uvicorn app.main:app` → exit 127), so the leaf could never converge. The deterministic inference was
+*consistently* wrong for this class, because `deliverable_kind` answers only "what interface does the artifact
+expose" (the source-to-deploy / Cloud Native Buildpacks lens), while the leaf's real deliverable was a
+**behavior-preserving change**. This is a CATEGORY CONFLATION, not a tuning bug.
+
+`deliverable_kind` is one axis (the deliverable/interface axis). Verifying software has several established,
+ORTHOGONAL dimensions. Dug from the ORIGINAL sources (not secondary summaries):
+
+| Dimension | Categories | Primary source |
+|---|---|---|
+| Maintenance purpose/type | corrective / adaptive / perfective / preventive | Swanson, "The Dimensions of Maintenance," ICSE 1976 → ISO/IEC/IEEE 14764 |
+| Evolution / system class | S-type (correctness vs a fixed spec) / P-type (validity vs a problem model) / E-type (coupled to a changing world, must keep evolving) | Lehman, "Programs, Life Cycles, and Laws of Software Evolution," Proc. IEEE 1980 |
+| V&V reference criterion | verify (vs spec/design — "build it right") / validate (vs user need — "build the right thing") | Boehm |
+| Lifecycle / artifact phase | requirements … design … implementation … integration … verification … validation … operation … maintenance … disposal | ISO/IEC/IEEE 12207; IEEE 1012 |
+| Testing level / object | unit / integration / system / acceptance; test object (SUT) | ISO/IEC/IEEE 29119 |
+| Testing technique basis | specification- / structure- / experience-based | ISO/IEC/IEEE 29119-4 |
+| Change taxonomy facets (explicitly multi-axis) | temporal properties / object of change / system properties / change support | Buckley et al., "Towards a Taxonomy of Software Change," 2005 |
+| Maintenance ontology (entities) | change request / product / activity / maintainer / environment | Kitchenham et al., 1999 |
+
+Notes from the primaries: Swanson's original is a SINGLE-axis maintenance-type typology, not a broad taxonomy.
+**Buckley et al. 2005 is the explicit MULTI-facet taxonomy of change** (the clearest "how many axes" answer).
+Chapin et al. 2001 re-bases change classification on *observed change evidence* rather than maintainer intent.
+Lehman's S/P/E is a distinct "what is correctness judged against" dimension that maps onto the
+finished-product-vs-evolving question this run surfaced.
+
+Implication (recorded for the step-back, NOT yet decided): a refactor/rename leaf is "perfective" maintenance
+(Swanson), whose verification target is behavior preservation + regression + change-impact + characterization
+(Fowler; Rothermel & Harrold; Bohner & Arnold; Feathers) — NOT interface conformance. The engine already owns
+the kind-agnostic pieces (`forbidden_patterns`, `regression_suite`, `static_checks`). Whether to add a
+maintenance/`change_kind` axis, lean on the existing `none`, or restructure more deeply is deferred to the
+step-back; this addendum records the grounding so that redesign starts from the primary literature, not from
+scratch.

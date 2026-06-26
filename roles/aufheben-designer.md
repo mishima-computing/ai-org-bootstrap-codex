@@ -38,6 +38,29 @@ Write `situation_read` within 1000 characters on either output path (schema tole
 ## Deliverable Kind And Conformance Profile
 When the contract delivers an artifact with an executable interface, encode that interface as a checkable conformance profile so the controller can verify the built artifact against it (ADR-0009: you choose and encode the interface; a deterministic gate proves the implementation obeys it).
 
+If the controller supplies `CHANGE-INTENT-MAP`, its `interface_delta` wins over `existing_repo_surface_kind`
+when choosing `deliverable_kind`. `existing_repo_surface_kind` describes the current repo surface; it is not
+the leaf's deliverable kind. For `interface_delta: no_surface_change`, prefer `deliverable_kind: none` and
+omit `conformance` unless the objective actually adds or changes a checkable interface. In that case, require
+regression_suite, static_checks, and/or forbidden_patterns to prove the refactor/rename preserved behavior and
+left no stale tokens.
+
+For `forbidden_patterns`, set `scope: "leaf"` for per-leaf rename/refactor stragglers where the implementer can
+only fix files in `files_allowed_to_change`; omitted scope defaults to `"leaf"` but explicit scope is preferred
+when authoring new contracts. Set `scope: "tree"` only when the goal requires total repository absence after all
+leaves integrate. If a tree-scoped pattern currently matches files outside `files_allowed_to_change`, do not emit an
+unsatisfiable leaf contract: widen the allowed files, split the work so another leaf owns those files, or rescope the
+pattern to `"leaf"` when repository-wide absence is not actually required.
+
+Each `forbidden_patterns[].pattern` MUST be scoped to the OLD module path / specific symbols you are removing —
+module-qualified (`cockpit\.scaffold`, `cockpit/scaffold`), an import form (`import scaffold`, `from cockpit import scaffold`),
+an ALL-CAPS env/const token (`SHAGIRI_SCAFFOLD`), or a `def `/`class `-qualified identifier (`def scaffold_runner`).
+NEVER author a bare word (e.g. `scaffold` or `\b[Ss]caffold\b`) when that word also names a mechanism the goal KEEPS:
+a bare pattern matches the kept mechanism (e.g. ADR-0008 `_scaffold_seed_commit`, `result.get("scaffold")`, prose) as
+well as the demo references you mean to forbid, making the contract unsatisfiable. The contract-preflight guard rejects
+bare-word patterns (`forbidden_pattern_overbroad`); re-author the pattern namespace-precisely so it names only the OLD
+references being removed.
+
 Set `deliverable_kind` to the kind being produced (`cli`, `library`, `http_service`, `rpc_service`, `batch_job`, or `json`). When the deliverable IS a JSON document (config, API spec, schema, manifest, data fixture), use `json` and emit `conformance.json`: the produced file path(s) and, per file, the JSON Schema it must validate against (inline `schema` or a `schema_path`) and/or the `required_paths` that must resolve. A CLI or service that merely emits JSON is not a `json` deliverable — it stays `cli`/`http_service` and its output is checked through that profile's substring/body assertions. For a `library` deliverable, emit `conformance.library` with the importable `module` and the `exported_symbols` that must resolve; set `language: powershell` when it is a PowerShell module (imported via `Import-Module`, surface checked via `pwsh`) rather than the default Python module. For a `cli` deliverable, emit `conformance.cli` per `schemas/implementation-contract.schema.json`: the `entrypoint.invocation` (how it is launched), and at least the three load-bearing `examples` — `--help`, the no-argument invocation, and one invalid-input invocation — each with its `expected_status` (the exit code) and a small `expected_stdout_contains`/`expected_stderr_contains` substring. Pin exit codes explicitly in `status_and_errors`: which codes mean success, which mean invalid input, which mean operational failure. Exit-code precision is the single largest observed interface leak, so encoding it up front is cheaper than a repair wave to discover it. Prefer substring checks over whole-output snapshots. Declare `deliverable_kind` explicitly on every contract. When the deliverable has no executable interface (pure prose, data, a refactor with no surface change), set `deliverable_kind` to `none` and omit `conformance`. When the deliverable DOES have a checkable interface but of a kind none of the profiles above fit (a new artifact kind), set `deliverable_kind` to `undetermined` — never downgrade such an artifact to `none`. `undetermined` is recognized and streamed as unchecked (it signals a real checker is owed for that kind), whereas `none` asserts there is nothing to check; collapsing the two hides an unverified interface. Declaring the kind is required rather than leaving the field absent, so the interface obligation is never skipped by silence. A conformance profile is required wherever the declared kind has a built-in profile to pin.
 
 ## Interaction With Other Roles

@@ -134,6 +134,11 @@ def fuzz(profile: dict, runner, *, cwd: Optional[str] = None, iterations: int = 
             regressed += 1
         findings.append({
             "source": "cli-fuzz", "check": kind, "severity": severity, "passed": False,
+            # A fuzz finding is a VERIFIED, REPRODUCED product defect: the runner actually executed the built
+            # CLI and observed a crash / exit-out-of-policy / hang on a concrete input. That is a `code` failure
+            # under the routing model (controller_pipeline._finding_blocks_convergence) — it MUST block
+            # convergence and drive the implementer repair loop, never be demoted to advisory infra.
+            "failure_classification": "code", "repair_route": "implementer",
             "detail": ("REGRESSION (a recorded counterexample reproduced) — " if is_replay else "") + detail,
             "arg": _bounded(arg, 80), "stdin": _bounded(min_stdin), "stdin_len": len(stdin),
             "returncode": res.returncode, "regressed": is_replay,

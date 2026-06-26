@@ -11,6 +11,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ import controller_run  # noqa: E402
 from controller_evidence import RunJournal, sha256_file  # noqa: E402
 from ai_org_bootstrap.registry import RegistryEntry, load_runtime_registry  # noqa: E402
 import conformance  # noqa: E402  — ADR-0009 #1: black-box CLI conformance (the dynamic gate)
+import runner_factory  # noqa: E402  — host-injectable conformance runner (box isolation via AI_ORG_RUNNER_CMD)
 import contract_preflight  # noqa: E402  — ADR-0009 #1: deterministic pre-implementation contract review
 import secret_scan  # noqa: E402  — ADR-0009 #2: validity-tiered secret scanning (gitleaks + fallback)
 import fuzz_cli  # noqa: E402  — ADR-0009 #3: black-box CLI property fuzzing (robustness oracle)
@@ -42,6 +44,11 @@ PROVENANCE_FILE = "provenance-manifest.json"
 WRITE_ROLE_RETRIES = 2
 AUFHEBEN_ROLE = "aufheben-designer"
 STEFAN_ROLE = "stefan"
+CI_WRITER_ROLES = frozenset({
+    "functional-ci-action-writer",
+    "security-ci-action-writer",
+    "nonfunctional-ci-action-writer",
+})
 
 # On a REPAIR iteration these four roles RESUME their prior codex session (keeping full memory, emitting
 # only a small delta) instead of re-deriving from scratch. aufheben-designer/linon/stefan stay FRESH:
@@ -102,10 +109,18 @@ def _stefan_enabled() -> bool:
     return _env_enabled("STEFAN_ENABLED")
 
 
+def _ci_writers_enabled() -> bool:
+    """Control shell for CI writers: default OFF, opt in with CI_WRITERS_ENABLED=1/true/yes/on."""
+    return _env_enabled("CI_WRITERS_ENABLED")
+
+
 def _active_entries(entries: dict[str, RegistryEntry]) -> dict[str, RegistryEntry]:
-    if _stefan_enabled():
-        return dict(entries)
-    return {role: entry for role, entry in entries.items() if role != STEFAN_ROLE}
+    active = dict(entries)
+    if not _stefan_enabled():
+        active = {role: entry for role, entry in active.items() if role != STEFAN_ROLE}
+    if not _ci_writers_enabled():
+        active = {role: entry for role, entry in active.items() if role not in CI_WRITER_ROLES}
+    return active
 
 
 def _verifier_roles(entries: dict[str, RegistryEntry]) -> list[str]:
@@ -451,6 +466,10 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     loop is unchanged; findings come back in the `{"findings": [...]}` shape `_linon_findings` consumes."""
     import codex_review
     started_at = _utc_now()
+    # `codex review` was previously a silent up-to-600s window on the stream; mark its START so the gap
+    # between launch and stage_done is observable (a stalled review is now visible, not a blank stream).
+    _stream_append(repo, {"source": "linon", "type": "linon_started", "run_id": stage_run_id,
+                          "reviewer": "codex-review", "started_at": _iso8601_utc(started_at)})
     try:
         rv = codex_review.review(str(repo))
     except Exception as exc:  # noqa: BLE001 — a failed review is "could not review", not "clean"
@@ -459,7 +478,14 @@ def _execute_linon_via_codex_review(repo: Path, stage_run_id: str) -> tuple[bool
     findings = rv.get("findings") or []
     stage_ok = bool(rv.get("ok"))
     result = {"findings": findings}
-    unresolved = [] if stage_ok else ["codex review did not complete"]
+    if stage_ok:
+        unresolved = []
+    elif rv.get("timed_out"):
+        unresolved = ["codex review hit the wall-clock timeout (killed, process group reaped)"]
+    elif rv.get("frozen"):
+        unresolved = ["codex review produced no output (no-output watchdog killed it, process group reaped)"]
+    else:
+        unresolved = ["codex review did not complete"]
     report_dict = {"ok": stage_ok, "unresolved_failures": unresolved, "reviewer": "codex-review"}
     try:                                                # journal the raw review for audit (mirror _run_stage)
         d = Path(repo) / ".agent-runs" / "controller" / stage_run_id
@@ -845,20 +871,202 @@ def _repair_roles_for(findings: list[dict], repair_forward_roles: list[str]) -> 
 
 def _gate_error_report(source: str, detail: str) -> dict:
     """ADR-0009 P0 — a gate that ERRORED (could not complete) is NOT clean. The external review flagged that a
-    scanner crash was treated as "no findings" (a silent fail-open). This returns a FAILING report whose
-    critical `gate_error` finding folds in `block` mode (fail-closed) and merely streams in `shadow` (telemetry).
-    A gate ERROR is a gate/runtime problem, not a product defect — repair routing (P0 #6) should send it to the
-    gate, not loop the implementer; until then it at least blocks instead of passing silently."""
+    scanner crash was treated as "no findings" (a silent fail-open). This returns a non-passing report whose
+    critical `gate_error` finding is classified as infra: surfaced to the stream, but not fed to the implementer
+    as a product-code repair."""
     return {"applicable": True, "passed": False, "error": True, "checks_run": 0,
             "findings": [{"source": source, "check": "gate_error", "severity": "critical", "passed": False,
-                          "detail": f"gate could not complete (fail-closed in block): {detail}"}]}
+                          "detail": f"gate could not complete: {detail}",
+                          "failure_classification": "infra"}]}
+
+
+def _finding_blocks_convergence(finding: dict) -> bool:
+    """A finding drives the implementer repair loop (and blocks convergence) iff its EXPLICIT routing model
+    (incr #3) sends it to the implementer — i.e. a VERIFIED product/code defect. A could-not-run / inconclusive
+    finding (`clean_retry` / `escalate` / `none`) does NOT: it routes to the incr-#2 clean retry and, if it
+    reproduces, fails closed as terminally UNVERIFIED (incr #1) — it never masquerades as a product defect.
+    LEGACY FALLBACK during migration: findings predating the routing model still block on
+    `failure_classification == "code"`, so nothing regresses while producers are migrated."""
+    if not isinstance(finding, dict) or finding.get("passed"):
+        return False
+    return finding.get("repair_route") == "implementer" or finding.get("failure_classification") == "code"
+
+
+def _advisory_gate_findings(report: dict | None) -> list[dict]:
+    if not report:
+        return []
+    return [f for f in report.get("findings", [])
+            if isinstance(f, dict) and not f.get("passed") and not _finding_blocks_convergence(f)]
+
+
+def _stream_advisory_gate_findings(repo, source: str, run_id: str, findings: list[dict]) -> None:
+    for finding in findings:
+        cls = finding.get("failure_classification", "undetermined")
+        _stream_append(repo, {"source": source, "type": "infra_finding", "run_id": run_id,
+                              "failure_classification": cls, "finding": finding, "ts": _iso8601_utc()})
+
+
+def _unverified_gate_findings(gate_ctx: dict | None) -> dict:
+    """Non-blocking gate failures still mean that verification dimension is not proven green."""
+    if not isinstance(gate_ctx, dict):
+        return {}
+    out = {}
+    for name, findings in gate_ctx.items():
+        advisory = [f for f in (findings or [])
+                    if isinstance(f, dict) and not f.get("passed") and not _finding_blocks_convergence(f)]
+        if advisory:
+            out[name] = advisory
+    return out
+
+
+# ── incr #2: BOUNDED AUTONOMOUS CLEAN-RETRY of an UNVERIFIED dimension ──────────────────────────────────────
+# With the #1 consumer fail-close, a single TRANSIENT infra hiccup (a one-shot environment failure) would now
+# terminally fail an otherwise-good leaf. So before a dimension is declared terminally unverified, RE-RUN THAT
+# DIMENSION ONLY — its FULL gate (ADR-0006: the SAME check, never narrowed), not the whole leaf and not the
+# code-repair loop — in a FRESH execution context: a fresh subprocess and, where the gate reads the workspace, a
+# fresh git worktree on the SAME commit. Autonomous SLA (NO human in the loop mid-run):
+#   cleared    -> the dimension now executes AND passes: it is verified, the leaf proceeds normally.
+#   reproduced -> the SAME non-code could-not-run recurs: the dimension stays terminally unverified (the #1
+#                 fail-close then applies — terminal unverified leaf, not done, not merged).
+#   code       -> the retry reveals a real product defect: it is classified `code` and folds into the blocking
+#                 findings (it blocks/repairs as normal, never papered over as infra).
+# Bounded: 1 clean retry by default; 2 ONLY for known-transient infra classes (image-pull / DNS / runner
+# eviction / a transient port or connection error). NEVER unbounded. Code defects already fold into `findings`
+# during the loop (the normal repair path) and are filtered out of the unverified set, so they never enter this
+# retry path — only non-code "could-not-run" dimensions do. (busy-port is solved at the source —
+# conformance._profile_with_ephemeral_service_port — so the retry is for the RESIDUAL transient infra only.)
+CLEAN_RETRY_DEFAULT_CAP = int(os.environ.get("CLEAN_RETRY_CAP", "1"))             # retries beyond the first run
+CLEAN_RETRY_TRANSIENT_CAP = int(os.environ.get("CLEAN_RETRY_TRANSIENT_CAP", "2"))  # known-transient infra only
+_TRANSIENT_INFRA_RE = re.compile(
+    r"(image ?pull|errimagepull|imagepullbackoff|"                                   # image-pull
+    r"could not resolve host|temporary failure in name resolution|getaddrinfo|name or service not known|"  # DNS
+    r"runner (?:eviction|evicted|preempt|terminated)|node (?:eviction|evicted)|"     # runner-eviction
+    r"connection (?:refused|reset|timed out)|broken pipe|"                           # transient connection
+    r"address already in use|errno 48|errno 98)",                                    # transient port bind
+    re.IGNORECASE)
+
+
+def _is_transient_infra(findings: list[dict]) -> bool:
+    """A KNOWN-transient infra class (image-pull / DNS / runner-eviction / a transient port or connection error)
+    earns the extra retry. Matched over each finding's human text + stderr tail; conservative — an unrecognized
+    infra failure gets the default single retry, never the larger budget."""
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        text = " ".join(str(f.get(k) or "") for k in ("detail", "stderr_tail", "check"))
+        if _TRANSIENT_INFRA_RE.search(text):
+            return True
+    return False
+
+
+def _retry_verdict(report: dict | None) -> str:
+    """Classify a clean-retry's FRESH gate report against the autonomous SLA: 'cleared' (the dimension now passes
+    — verified), 'code' (a real product defect surfaced — block/repair as normal), or 'reproduced' (the same
+    non-code could-not-run recurred — stays unverified)."""
+    if not report or report.get("applicable") is False or report.get("passed"):
+        return "cleared"
+    failed = [f for f in report.get("findings", []) if isinstance(f, dict) and not f.get("passed")]
+    if not failed:
+        return "cleared"
+    if any(_finding_blocks_convergence(f) for f in failed):
+        return "code"
+    return "reproduced"
+
+
+def _stream_retry_evidence(repo, run_id: str, dimension: str, attempt: int, report: dict | None,
+                           verdict: str) -> None:
+    """Persist per-attempt evidence so the run is auditable: attempt index, phase, exit code, signal,
+    stderr-tail, classification, and the SLA verdict. Drawn from the representative failing finding (a cleared
+    attempt carries no finding, so its evidence is the verdict alone)."""
+    failed = [f for f in (report or {}).get("findings", []) if isinstance(f, dict) and not f.get("passed")]
+    rep = failed[0] if failed else {}
+    rc = rep.get("returncode")
+    signal = -rc if isinstance(rc, int) and rc < 0 else None
+    _stream_append(repo, {
+        "source": "clean-retry", "type": "dimension_retry", "run_id": run_id, "dimension": dimension,
+        "attempt": attempt, "verdict": verdict, "phase": rep.get("check"), "exit_code": rc, "signal": signal,
+        "stderr_tail": rep.get("stderr_tail"), "classification": rep.get("failure_classification"),
+        "ts": _iso8601_utc()})
+
+
+def _rerun_dimension(repo, dimension: str, results: dict, run_id: str, runner=None) -> dict | None:
+    """Re-run ONE verification dimension's FULL gate in a FRESH execution context (ADR-0006: the SAME check, not a
+    narrowed one). `preflight` is contract-only (no workspace, no subprocess) so it re-runs in place; the
+    workspace-reading gates (conformance / secret / fuzz) re-run with a FRESH subprocess on a FRESH git worktree
+    checked out at the SAME commit (HEAD) and overlaid with the leaf's CURRENT artifact — so a transient
+    half-written / lock / port-bound state left by the first run cannot recur. The worktree is ALWAYS removed
+    (leak-free, per the #3/#4 worktree-lifecycle discipline); if one cannot be created we still re-run with a
+    fresh subprocess in-place rather than skip the retry."""
+    if dimension == "preflight":
+        return _contract_preflight(repo, results, run_id)
+    wt = Path(tempfile.mkdtemp(prefix=f"pl-retry-{dimension}-"))
+    add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), "HEAD"],
+                         capture_output=True, text=True)
+    if add.returncode == 0:
+        _copy_plain_snapshot(Path(repo), wt)           # overlay the CURRENT working-tree artifact onto the checkout
+        cwd = wt
+    else:
+        cwd = Path(repo)                               # worktree unavailable -> fresh subprocess only
+    try:
+        if dimension == "conformance":
+            # Prefer the caller-threaded conformance runner (the box-backed executor an entry handed
+            # run_pipeline) so the clean retry runs conformance through the SAME boundary the first pass used;
+            # fall back to the factory (local subprocess OR an AI_ORG_RUNNER_CMD box shim) only when none was
+            # supplied. The runner spawns a FRESH subprocess per call, so reusing the object still gives the
+            # retry the fresh execution context ADR-0006 wants — the engine never imports host code either way.
+            return _shadow_conformance(cwd, results, run_id,
+                                       runner=runner or runner_factory.get_conformance_runner())
+        if dimension == "secret":
+            return _secret_scan(cwd, run_id)
+        if dimension == "fuzz":
+            # Fuzz keeps its OWN short-timeout runner (15s default — fuzz_cli calls the runner without an
+            # explicit per-iteration timeout, so the runner's default IS the per-iteration bound; the threaded
+            # conformance runner's 60s default would silently relax it). Box isolation still holds via the
+            # factory when AI_ORG_RUNNER_CMD is set. The threaded `runner` is conformance's, not fuzz's.
+            return _fuzz_cli(cwd, results, run_id, runner=runner_factory.get_conformance_runner(timeout=15))
+        return None
+    finally:
+        if add.returncode == 0:
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                           capture_output=True)
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def _clean_retry_unverified(repo, results: dict, run_id: str, gate_ctx: dict, runner=None) -> tuple[dict, list[dict]]:
+    """incr #2 orchestrator — for each dimension left UNVERIFIED by a non-code could-not-run, re-run its full
+    gate in a fresh context up to a bounded number of retries (1 by default; 2 for a known-transient infra
+    class). Returns (updated gate_ctx, code_findings): a CLEARED dimension's findings become clean (it drops out
+    of the unverified set); a REPRODUCED one keeps its could-not-run finding (stays unverified); a retry that
+    reveals CODE has its blocking findings returned so the caller folds them into `findings` (block/repair as
+    normal). Each attempt streams auditable evidence. Bounded — never unbounded."""
+    unverified = _unverified_gate_findings(gate_ctx)
+    if not unverified:
+        return gate_ctx, []
+    gate_ctx = dict(gate_ctx)
+    code_findings: list[dict] = []
+    for dimension, advisory in unverified.items():
+        cap = CLEAN_RETRY_TRANSIENT_CAP if _is_transient_infra(advisory) else CLEAN_RETRY_DEFAULT_CAP
+        for attempt in range(1, cap + 1):
+            report = _rerun_dimension(repo, dimension, results, f"{run_id}-retry{attempt}-{dimension}",
+                                      runner=runner)
+            verdict = _retry_verdict(report)
+            _stream_retry_evidence(repo, run_id, dimension, attempt, report, verdict)
+            gate_ctx[dimension] = list((report or {}).get("findings") or [])
+            if verdict == "cleared":
+                break
+            if verdict == "code":
+                code_findings += [f for f in gate_ctx[dimension] if _finding_blocks_convergence(f)]
+                break
+            # reproduced -> retry again within the bound, else fall through to terminally-unverified
+    return gate_ctx, code_findings
 
 
 def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict | None:
     """Run the CLI conformance gate over the implemented artifact and stream the result. Returns the report
-    (or None when not applicable / disabled). `runner` defaults to the in-box subprocess runner; tests inject
-    a fake. Fail-soft: any error is logged to the stream and swallowed — a verification gate must never break
-    the build it observes."""
+    (or None when not applicable / disabled). `runner` defaults to runner_factory.get_conformance_runner() —
+    the local bounded subprocess, OR a host-injected box shim when AI_ORG_RUNNER_CMD is set (the engine never
+    imports host code); tests inject a fake. Fail-soft: any error is logged to the stream and swallowed — a
+    verification gate must never break the build it observes."""
     if CONFORMANCE_GATE_MODE == "off":
         return None
     contract = results.get(AUFHEBEN_ROLE)
@@ -866,7 +1074,7 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
         return None
     try:
         report = conformance.run_conformance(
-            contract, runner or conformance.subprocess_runner(), cwd=str(repo))
+            contract, runner or runner_factory.get_conformance_runner(), cwd=str(repo))
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "conformance", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
@@ -879,6 +1087,21 @@ def _shadow_conformance(repo, results: dict, run_id: str, runner=None) -> dict |
                                   "run_id": run_id, "slot": report["slot"],
                                   "status": report.get("status"), "ts": _iso8601_utc()})
         return report
+    for advisory in report.get("advisory_findings") or []:
+        if not isinstance(advisory, dict) or advisory.get("check") != "forbidden_pattern_out_of_scope":
+            continue
+        _stream_append(repo, {
+            "source": "forbidden-pattern",
+            "type": "out_of_scope_advisory",
+            "run_id": run_id,
+            "pattern": advisory.get("pattern"),
+            "count": advisory.get("count"),
+            "hits": advisory.get("hits") or [],
+            "scope": advisory.get("scope", "leaf"),
+            "finding": advisory,
+            "ts": _iso8601_utc(),
+        })
+    _stream_advisory_gate_findings(repo, "cli-conformance", run_id, _advisory_gate_findings(report))
     _stream_append(repo, {
         "source": "cli-conformance",
         "type": "shadow_findings" if CONFORMANCE_GATE_MODE != "block" else "findings",
@@ -907,7 +1130,7 @@ def _contract_preflight(repo, results: dict, run_id: str) -> dict | None:
     if not isinstance(contract, dict):
         return None
     try:
-        report = contract_preflight.preflight(contract)
+        report = contract_preflight.preflight(contract, cwd=str(repo))
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "contract-preflight", "type": "gate_error",
                               "run_id": run_id, "detail": repr(exc)})
@@ -1021,7 +1244,7 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
                    or (os.path.join(os.path.dirname(stream_log), "regressions.jsonl") if stream_log else None)
                    or regression_corpus.default_path(repo))
     try:
-        report = fuzz_cli.fuzz(profile, runner or conformance.subprocess_runner(timeout=15),
+        report = fuzz_cli.fuzz(profile, runner or runner_factory.get_conformance_runner(timeout=15),
                                cwd=str(repo), corpus_path=corpus_path)
     except Exception as exc:                                    # noqa: BLE001 — gate never breaks the run
         _stream_append(repo, {"source": "cli-fuzz", "type": "gate_error", "run_id": run_id, "detail": repr(exc)})
@@ -1038,7 +1261,7 @@ def _fuzz_cli(repo, results: dict, run_id: str, runner=None) -> dict | None:
     return report
 
 
-def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dict | None):
+def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dict | None, runner=None):
     """gate-behind — RE-RUN ONLY the CHEAP deterministic gates (conformance / preflight / secret / fuzz) on the
     CURRENT artifact, with NO linon contribution. Returns (findings, gate_ctx, blocked_by):
       * `findings`   — the CURRENT-ITERATION BLOCKING cheap-gate findings (empty iff every cheap gate is clean).
@@ -1051,7 +1274,7 @@ def _cheap_gate_findings(repo, results: dict, run_id: str, preflight_report: dic
     A non-empty `blocked_by` lets the caller SKIP the expensive linon verifier on a diff that repairs no matter
     what linon says — saving its tokens AND its wall-clock. preflight is contract-bound, so the caller re-runs
     it on the (possibly repaired) contract and passes its report in."""
-    conf = _shadow_conformance(repo, results, run_id)
+    conf = _shadow_conformance(repo, results, run_id, runner=runner)
     secret = _secret_scan(repo, run_id)
     fuzz = _fuzz_cli(repo, results, run_id)
     findings: list[dict] = []
@@ -1097,7 +1320,7 @@ def _apply_conformance_gate(findings: list[dict], report: dict | None, mode: str
     one-line, auditable flip from shadow to blocking (ADR-0009 / Tricorder shadow-first)."""
     if mode != "block" or not report or report.get("passed"):
         return findings
-    return findings + [f for f in report.get("findings", []) if not f.get("passed")]
+    return findings + [f for f in report.get("findings", []) if _finding_blocks_convergence(f)]
 
 
 def _iteration_record(kind: str, iteration: int, started_at: datetime, finished_at: datetime,
@@ -1295,7 +1518,11 @@ def _has_valid_producer_for_aufheben(predecessors: dict[str, list[str]], produce
 
 def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                  max_repair_iterations: int = 3, max_parallel: int = 1,
-                 goal_context=None) -> dict:
+                 goal_context=None, runner=None) -> dict:
+    # `runner` is the conformance executor (a conformance.Runner). None -> each gate site falls back to
+    # runner_factory.get_conformance_runner(), which is the local bounded subprocess OR a host-injected box
+    # shim when AI_ORG_RUNNER_CMD is set. An entry (controller_goal) may supply one explicitly; the engine
+    # never imports host code either way.
     if not isinstance(max_repair_iterations, int) or max_repair_iterations < 0:
         raise ValueError("max_repair_iterations must be a non-negative integer")
 
@@ -1349,10 +1576,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
                 pipeline_failed = True
                 break
             inputs = {u: results[u] for u in predecessors[role] if u in results}
-            runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
-                      else _execute_stage)
-            outcomes[role] = runner(repo, role, entries[role], objective, inputs,
-                                    f"{run_id}-{role}", cache, goal_context=goal_context)
+            stage_runner = (_execute_stage_isolated if (repo_is_git and entries[role].write_scope)
+                            else _execute_stage)               # NB: not the conformance `runner` param below
+            outcomes[role] = stage_runner(repo, role, entries[role], objective, inputs,
+                                          f"{run_id}-{role}", cache, goal_context=goal_context)
         if pipeline_failed:
             break
         for role in wave:                              # record deterministically in wave order
@@ -1397,7 +1624,8 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     gate_ctx: dict = {}
     findings: list[dict] = _linon_findings(results.get("linon"))
     if not pipeline_failed:
-        cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report)
+        cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report,
+                                                                    runner=runner)
         if blocked_by:
             _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": run_id,
                                   "iteration": 0, "reason": blocked_by, "ts": _iso8601_utc()})
@@ -1503,7 +1731,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             repair_run_id = f"{run_id}-repair{repair_iterations}"
             repair_preflight = _contract_preflight(repo, results, repair_run_id)
             cheap_findings, gate_ctx, blocked_by = _cheap_gate_findings(repo, results, repair_run_id,
-                                                                        repair_preflight)
+                                                                        repair_preflight, runner=runner)
             if blocked_by:
                 _stream_append(repo, {"source": "linon", "type": "linon_skipped", "run_id": repair_run_id,
                                       "iteration": repair_iterations, "reason": blocked_by,
@@ -1538,13 +1766,28 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
                                             repair_stages, len(findings)))
 
+    # incr #2 — BOUNDED AUTONOMOUS CLEAN-RETRY: before any dimension is declared TERMINALLY unverified, re-run it
+    # in a fresh context (fresh subprocess + fresh worktree on the SAME commit). A retry that CLEARS verifies the
+    # dimension (it drops out of the unverified set, the leaf proceeds); one that REPRODUCES the could-not-run
+    # leaves it unverified (the #1 fail-close then applies); one that reveals a real CODE defect folds in here as
+    # a blocking finding (block/repair as normal). Skipped when the pipeline already failed for a non-gate reason
+    # (no proven artifact to retry against). ADR-0011/0016: a retry that still cannot verify NEVER passes.
+    if not pipeline_failed and _unverified_gate_findings(gate_ctx):
+        gate_ctx, retry_code_findings = _clean_retry_unverified(repo, results, run_id, gate_ctx, runner=runner)
+        findings = findings + retry_code_findings
+
     converged = bool(required_ok.get("linon")) and not findings
+    unverified_gate_findings = _unverified_gate_findings(gate_ctx)
+    verification_status = "verified" if converged and not unverified_gate_findings else (
+        "unverified" if converged else "failed")
     manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
     manifest_path = _write_manifest(repo, run_id, manifest)
     return {"summary": summary, "required_ok": required_ok, "order": list(summary),
             "fatal_ok": fatal_ok,
             "reports": reports, "results": results, "manifest": manifest,
             "manifest_path": str(manifest_path), "converged": converged,
+            "verification_status": verification_status,
+            "unverified_gate_findings": unverified_gate_findings,
             "repair_iterations": repair_iterations,
             "max_repair_iterations": max_repair_iterations,
             "linon_findings_count": len(findings),

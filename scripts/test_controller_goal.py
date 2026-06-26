@@ -5,11 +5,14 @@ Uses STUB split + run_leaf so the loop is proven without a carrier or the dialec
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import controller_goal as cg
+
+os.environ.setdefault("AI_ORG_USE_TASKEXECUTOR", "0")
 
 
 def _leaf(i, scope, deps=None):
@@ -33,6 +36,21 @@ def _statuses(plan):
                 walk(t["children"])
     walk(plan)
     return out
+
+
+def _temp_git_repo(root, name="r"):
+    import os, subprocess
+    repo = os.path.join(root, name)
+    os.mkdir(repo)
+    def git(*a):
+        return subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, text=True)
+    git("init", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    open(os.path.join(repo, "seed.txt"), "w").write("seed\n")
+    git("add", "-A")
+    git("commit", "-m", "base")
+    return repo, git
 
 
 def test_all_leaves_converge():
@@ -156,6 +174,50 @@ def test_default_run_leaf_surfaces_a_crash_not_silently():
     print("ok  default_run_leaf surfaces a crash (leaf_crash + reason=crash), never swallows it")
 
 
+def test_default_run_leaf_fails_closed_when_pipeline_verification_unverified():
+    # FALSIFIABLE (ADR-0011 unproven-never-passes / ADR-0016 never-fabricate-a-pass): a pipeline result that
+    # CONVERGED but left a required gate UNVERIFIED (the producer shape from controller_pipeline.run_pipeline:
+    # converged=True, verification_status="unverified", unverified_gate_findings={...} — e.g. a regression_suite
+    # whose `pytest` could not RUN, so the gate is non-blocking-but-not-proven-green) must NOT be accepted as
+    # converged. BEFORE the consumer fail-close, default_run_leaf returned outcome="converged" and the leaf
+    # merged + was marked done; AFTER, it returns the DISTINCT, terminal outcome="unverified", carries the gate
+    # findings, does NOT merge (HEAD unchanged, no commit), and is neither "mechanical" (resume) nor "linon"
+    # (re-split) — so it is never sent to implementer repair.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git = _temp_git_repo(d)
+        head_before = git("rev-parse", "HEAD").stdout.strip()
+        findings = {"regression_suite": [{"passed": False, "detail": "pytest not found -> gate could not run"}]}
+        pipeline = lambda wt, obj, run_id: {"converged": True, "verification_status": "unverified",
+                                            "unverified_gate_findings": findings}
+        res = cg.default_run_leaf(repo, {"id": "u", "objective": "o", "scope": ["x.py"]}, run_pipeline=pipeline)
+        head_after = git("rev-parse", "HEAD").stdout.strip()
+    assert res["outcome"] == "unverified", res                      # DISTINCT, terminal — not "converged"
+    assert res["outcome"] != "converged", res                       # the live bug: a pass fabricated without proof
+    assert res.get("unverified_gate_findings") == findings, res     # carries the unproven-gate evidence
+    assert res.get("reason") not in ("mechanical", "linon"), res    # NOT a resume / re-split (implementer-repair) target
+    assert "commit" not in res, res                                 # did NOT merge
+    assert head_after == head_before, (head_before, head_after)     # no merge commit landed on the shared repo
+    print("ok  default_run_leaf fails closed on an UNVERIFIED gate (terminal 'unverified', no merge, no repair)")
+
+
+def test_goal_does_not_mark_unverified_leaf_done_or_merge_it():
+    # The goal-level consumer must treat a terminal `unverified` leaf as NOT done and NOT merged — the goal
+    # reports failed/partial, never done (goal-level outcome-honesty, ADR-0016). Regression guard at the goal
+    # boundary for a leaf the producer reported as unverified.
+    split = lambda goal, ctx, carrier: [_leaf("u", ["x.py"])]
+    run_leaf = lambda r, t: {"outcome": "unverified",
+                             "unverified_gate_findings": {"regression_suite": [{"passed": False}]}}
+    events = []
+    plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split, emit=events.append)
+    assert _statuses(plan).get("u") != "done", _statuses(plan)      # NOT marked done
+    assert any(e.get("type") == "leaf_unverified" for e in events), events
+    assert not any(e.get("type") == "leaf_done" and e.get("id") == "u" for e in events), events
+    fin = [e for e in events if e["type"] == "goal_finished"]
+    assert fin and fin[0]["status"] != "done", events              # the goal is NOT done (no fabricated pass)
+    print("ok  goal does not mark/merge an unverified leaf done (fail-closed at the goal boundary)")
+
+
 def test_launch_precondition_fails_before_split_when_registry_missing():
     # A direct launch with the default leaf runner needs the org registry. If AI_ORG_ROOT is missing on a
     # cross-repo run, fail BEFORE the splitter/codex path starts, with a distinct precondition event.
@@ -258,6 +320,342 @@ def test_budget_stops():
     done = sum(1 for v in _statuses(plan).values() if v == "done")
     assert done == 1, ("budget=1 -> only one leaf ran", _statuses(plan))
     print("ok  budget caps total leaf runs (autonomous bound, not a human)")
+
+
+def test_frontier_leaf_parallel_batch_starts_siblings_before_either_finishes():
+    import os, threading
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    sequence = []
+    lock = threading.Lock()
+    both_started = threading.Event()
+    errors = []
+
+    def run_leaf(_repo, task, **_kwargs):
+        with lock:
+            sequence.append(("start", task["id"]))
+            if len([x for x in sequence if x[0] == "start"]) == 2:
+                both_started.set()
+        if not both_started.wait(2):
+            errors.append(f"{task['id']} finished before both siblings started")
+            return "failed"
+        with lock:
+            sequence.append(("finish", task["id"]))
+        return "converged"
+
+    try:
+        split = lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])]
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf, split=split)
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert not errors, errors
+    first_finish = next(i for i, x in enumerate(sequence) if x[0] == "finish")
+    assert [x[0] for x in sequence[:first_finish]] == ["start", "start"], sequence
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  frontier leaf wave runs disjoint ready siblings concurrently")
+
+
+def test_frontier_leaf_dependency_waves_cut_worktrees_from_folded_head():
+    import os, tempfile
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    seen = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def split(_g, _c, _k):
+                return [
+                    _leaf("A", ["work/A.txt"]),
+                    _leaf("B", ["work/B.txt"], deps=["A"]),
+                    _leaf("C", ["work/C.txt"], deps=["A"]),
+                    _leaf("D", ["work/D.txt"], deps=["B", "C"]),
+                ]
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                if leaf_id in {"B", "C"}:
+                    assert os.path.isfile(os.path.join(wt, "work", "A.txt")), f"{leaf_id} missing A"
+                if leaf_id == "D":
+                    for dep in ("A", "B", "C"):
+                        assert os.path.isfile(os.path.join(wt, "work", f"{dep}.txt")), f"D missing {dep}"
+                os.makedirs(os.path.join(wt, "work"), exist_ok=True)
+                open(os.path.join(wt, "work", f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                seen.append(leaf_id)
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf, split=split)
+    finally:
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert seen[0] == "A" and seen[-1] == "D", seen
+    assert set(seen[1:3]) == {"B", "C"}, seen
+    assert _statuses(plan) == {"A": "done", "B": "done", "C": "done", "D": "done"}, _statuses(plan)
+    print("ok  dependency waves release only after folded commits reach the next worktree HEAD")
+
+
+def test_frontier_leaf_merge_is_serial_even_when_leaf_work_overlaps():
+    import os, tempfile, threading, time
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    real_merge = cg.git_ops.merge_and_commit_leaf
+    active = {"n": 0, "max": 0}
+    lock = threading.Lock()
+    both_started = threading.Event()
+    starts = []
+
+    def wrapped_merge(*args, **kwargs):
+        with lock:
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+        try:
+            time.sleep(0.05)
+            return real_merge(*args, **kwargs)
+        finally:
+            with lock:
+                active["n"] -= 1
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+            cg.git_ops.merge_and_commit_leaf = wrapped_merge
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                with lock:
+                    starts.append(leaf_id)
+                    if len(starts) == 2:
+                        both_started.set()
+                assert both_started.wait(2), "leaf work did not overlap"
+                open(os.path.join(wt, f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("a", ["a.txt"]), _leaf("b", ["b.txt"])])
+    finally:
+        cg.git_ops.merge_and_commit_leaf = real_merge
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert active["max"] == 1, active
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  merge_and_commit_leaf is entered only by the serial fold")
+
+
+def test_run_leaf_without_defer_merge_support_forces_serial_execution():
+    import os, tempfile, threading, time
+    old_mp = os.environ.get("AI_ORG_MAX_PARALLEL")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    real_merge = cg.git_ops.merge_and_commit_leaf
+    active_leaf = {"n": 0, "max": 0}
+    active_merge = {"n": 0, "max": 0}
+    lock = threading.Lock()
+
+    def wrapped_merge(*args, **kwargs):
+        with lock:
+            active_merge["n"] += 1
+            active_merge["max"] = max(active_merge["max"], active_merge["n"])
+        try:
+            time.sleep(0.03)
+            return real_merge(*args, **kwargs)
+        finally:
+            with lock:
+                active_merge["n"] -= 1
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+            cg.git_ops.merge_and_commit_leaf = wrapped_merge
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                leaf_id = objective.rsplit(" ", 1)[-1]
+                with lock:
+                    active_leaf["n"] += 1
+                    active_leaf["max"] = max(active_leaf["max"], active_leaf["n"])
+                try:
+                    time.sleep(0.05)
+                    open(os.path.join(wt, f"{leaf_id}.txt"), "w").write(f"{leaf_id}\n")
+                    return {"converged": True}
+                finally:
+                    with lock:
+                        active_leaf["n"] -= 1
+
+            def run_leaf(repo_arg, task):                    # intentionally NO defer_merge support
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("a", ["a.txt"]), _leaf("b", ["b.txt"])])
+    finally:
+        cg.git_ops.merge_and_commit_leaf = real_merge
+        if old_mp is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old_mp
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert active_leaf["max"] == 1, active_leaf
+    assert active_merge["max"] == 1, active_merge
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  run_leaf without defer_merge support is throttled to serial leaf execution")
+
+
+def test_frontier_leaf_scope_guard_rejects_out_of_scope_changed_file():
+    import os, tempfile
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    events = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                open(os.path.join(wt, "oops.py"), "w").write("out of scope\n")
+                return {"converged": True}
+
+            def run_leaf(repo_arg, task, **kwargs):
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("bad", ["allowed.py"])],
+                               emit=events.append)
+            assert not os.path.exists(os.path.join(repo, "oops.py")), "out-of-scope file must not merge"
+    finally:
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert _statuses(plan) == {"bad": "failed"}, _statuses(plan)
+    viol = [e for e in events if e.get("type") == "leaf_scope_violation"]
+    assert viol and viol[0]["out_of_scope"] == ["oops.py"], events
+    print("ok  scope guard blocks changed_files outside declared scope and emits leaf_scope_violation")
+
+
+def test_frontier_leaf_crash_isolation_keeps_sibling_result():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    try:
+        def run_leaf(_repo, task, **_kwargs):
+            if task["id"] == "boom":
+                raise RuntimeError("leaf exploded")
+            return "converged"
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf,
+                           split=lambda g, c, k: [_leaf("boom", ["boom.py"]), _leaf("ok", ["ok.py"])])
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert _statuses(plan) == {"boom": "failed", "ok": "done"}, _statuses(plan)
+    print("ok  one leaf crash is folded as that leaf failure while sibling converges")
+
+
+def test_defer_mode_failure_cleans_up_worktree_and_reconciles_spent():
+    # REGRESSION (the PR1 worktree leak): in defer/parallel mode a NON-converged leaf (mechanical failure)
+    # handed its worktree to nobody, and default_run_leaf's `finally` skipped removal in defer mode -> the
+    # worktree + tempdir LEAKED on every failed/retried leaf. A REAL default_run_leaf (defer_merge=True, the
+    # parallel path) over a FAILING pipeline must leave NO worktree registered and run a BOUNDED number of
+    # attempts (spent reconciled: one initial run + MECH_RETRY_CAP resumes, never an unbounded leak).
+    import os, subprocess, tempfile
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"           # leaf worktrees register on `repo` -> visible in the list
+    calls = {"n": 0}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _temp_git_repo(d)
+
+            def pipeline(wt, objective, run_id, **_kwargs):
+                calls["n"] += 1                           # a REAL run that fails mechanically (never converges)
+                return {"converged": False}
+
+            def run_leaf(repo_arg, task, **kwargs):       # **kwargs carries defer_merge=True (the parallel path)
+                return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, **kwargs)
+
+            plan = cg.run_goal(repo, "g", run_leaf=run_leaf,
+                               split=lambda g, c, k: [_leaf("atom", ["only.py"])])
+            wts = subprocess.run(["git", "-C", repo, "worktree", "list"],
+                                 capture_output=True, text=True).stdout
+    finally:
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    assert "leaf-" not in wts, ("a failed defer-mode leaf must not leak its worktree", wts)
+    assert _statuses(plan) == {"atom": "failed"}, _statuses(plan)
+    assert calls["n"] == 1 + cg.MECH_RETRY_CAP, ("spent must be bounded (1 run + MECH_RETRY_CAP resumes)", calls)
+    print("ok  defer-mode failure removes its worktree + tempdir and reconciles spent (no leak)")
+
+
+def test_frontier_leaf_budget_bound_dispatches_only_budgeted_ready_leaf():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "2"
+    starts = []
+    events = []
+    try:
+        plan = cg.run_goal("/repo", "g",
+                           run_leaf=lambda r, t: starts.append(t["id"]) or "converged",
+                           split=lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])],
+                           budget=1, emit=events.append)
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert starts == ["a"], starts
+    assert any(e.get("type") == "budget_exhausted" and e.get("spent") == 1 for e in events), events
+    assert _statuses(plan) == {"a": "done", "b": "pending"}, _statuses(plan)
+    print("ok  budget bounds concurrent dispatch before a full ready wave is submitted")
+
+
+def test_frontier_leaf_max_parallel_one_is_serial_escape_hatch():
+    import os
+    old = os.environ.get("AI_ORG_MAX_PARALLEL")
+    os.environ["AI_ORG_MAX_PARALLEL"] = "1"
+    sequence = []
+    try:
+        def run_leaf(_repo, task):
+            sequence.append(("start", task["id"]))
+            sequence.append(("finish", task["id"]))
+            return "converged"
+        plan = cg.run_goal("/repo", "g", run_leaf=run_leaf,
+                           split=lambda g, c, k: [_leaf("a", ["a.py"]), _leaf("b", ["b.py"])])
+    finally:
+        if old is None:
+            os.environ.pop("AI_ORG_MAX_PARALLEL", None)
+        else:
+            os.environ["AI_ORG_MAX_PARALLEL"] = old
+    assert sequence == [("start", "a"), ("finish", "a"), ("start", "b"), ("finish", "b")], sequence
+    assert _statuses(plan) == {"a": "done", "b": "done"}, _statuses(plan)
+    print("ok  AI_ORG_MAX_PARALLEL=1 preserves serial leaf execution order")
 
 
 def test_stream_emit_appends():
@@ -1292,6 +1690,352 @@ def test_intake_gate_auto_binds_real_refiner_and_proceeds():
     print("ok  default-split path: sufficient intake auto-refines then decomposes (production proceed path)")
 
 
+def test_taskexecutor_flag_defaults_on():
+    old = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    try:
+        os.environ.pop("AI_ORG_USE_TASKEXECUTOR", None)
+        assert cg._use_taskexecutor() is True, "AI_ORG_USE_TASKEXECUTOR must default ON"
+    finally:
+        if old is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old
+    print("ok  AI_ORG_USE_TASKEXECUTOR defaults ON")
+
+
+def test_taskexecutor_path_runs_injected_decompose_leaf_and_acceptance_then_merges():
+    import tempfile, subprocess, shutil
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_gate = cg.conformance.run_goal_acceptance
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            base = _rev(git)
+
+            def split(g, c, ca):
+                return [{"id": "leaf", "objective": "write feature", "scope": ["feature.txt"],
+                         "depends_on": []}]
+
+            def run_leaf(_repo_arg, task):
+                wt = os.path.join(d, "leaf-wt")
+                subprocess.run(["git", "-C", repo, "worktree", "add", "--detach", wt, "HEAD"],
+                               check=True, capture_output=True)
+                try:
+                    with open(os.path.join(wt, "feature.txt"), "w") as fh:
+                        fh.write(task["objective"] + "\n")
+                    subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+                    subprocess.run(["git", "-C", wt, "commit", "-m", "leaf feature"],
+                                   check=True, capture_output=True)
+                    return {"outcome": "converged",
+                            "commit": subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"],
+                                                     check=True, capture_output=True,
+                                                     text=True).stdout.strip()}
+                finally:
+                    subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", wt],
+                                   capture_output=True)
+                    shutil.rmtree(wt, ignore_errors=True)
+
+            gate_seen = {}
+            def gate(profile, composed_repo, **_k):
+                gate_seen["repo"] = composed_repo
+                assert os.path.isfile(os.path.join(composed_repo, "feature.txt")), "acceptance sees composed artifact"
+                return {"verified": True, "evidence": [{"ok": True}], "findings": [], "probes_run": 1}
+
+            cg.conformance.run_goal_acceptance = gate
+            events = []
+            plan = cg.run_goal(repo, "build feature", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+                               goal_id="texec-a", emit=events.append)
+            assert _statuses(plan) == {"leaf": "done"}, plan
+            assert any(e.get("type") == "taskexecutor_start" for e in events), events
+            assert any(e.get("type") == "taskexecutor_done" for e in events), events
+            assert any(e.get("type") == "leaf_start" and e.get("id") == "root" and
+                       e.get("goal_id") == "texec-a" for e in events), events
+            assert any(e.get("type") == "leaf_split" and e.get("id") == "root" and
+                       e.get("children") == ["leaf"] for e in events), events
+            assert any(e.get("type") == "leaf_done" and e.get("id") == "leaf" and
+                       e.get("commit") for e in events), events
+            acc = [e for e in events if e.get("type") == "goal_acceptance"]
+            assert acc and acc[0]["verified"] is True, (acc, events)
+            assert any(e.get("type") == "goal_merged" for e in events), events
+            assert _rev(git, "main") != base, "TaskExecutor result must merge back to local main"
+            assert os.path.isfile(os.path.join(repo, "feature.txt")), "merged main has the final artifact"
+            assert gate_seen.get("repo"), "goal acceptance ran"
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+    print("ok  flag ON: run_goal uses TaskExecutor, injected decompose/leaf, acceptance, and merge")
+
+
+def test_taskexecutor_live_dependent_default_leaf_builds_on_dependency_output():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    old_commit = cg._commit_worktree_off_base
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    commits = {}
+    seen = {}
+
+    def split(g, c, ca):
+        return [{"id": "A", "objective": "write A", "scope": ["a.txt"], "depends_on": []},
+                {"id": "B", "objective": "write B", "scope": ["b.txt"], "depends_on": ["A"]}]
+
+    def record_commit(repo, wt, base, message):
+        sha = old_commit(repo, wt, base, message)
+        if message == "leaf: A":
+            commits["A"] = sha
+        if message == "leaf: B":
+            commits["B"] = sha
+        return sha
+
+    def pipeline(wt, objective, run_id, **_kwargs):
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        if "write A" in objective:
+            seen["A_head"] = head
+            with open(os.path.join(wt, "a.txt"), "w") as fh:
+                fh.write("A\n")
+        else:
+            seen["B_head"] = head
+            seen["B_saw_a"] = os.path.isfile(os.path.join(wt, "a.txt"))
+            with open(os.path.join(wt, "b.txt"), "w") as fh:
+                fh.write("B\n")
+        return {"converged": True, "linon_findings_count": 0, "sessions": {}}
+
+    def run_leaf(repo_arg, task, *, goal_context=None, defer_merge=False):
+        return cg.default_run_leaf(repo_arg, task, run_pipeline=pipeline, goal_context=goal_context,
+                                   defer_merge=defer_merge)
+
+    try:
+        cg._commit_worktree_off_base = record_commit
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            plan = cg.run_goal(repo, "serial build", run_leaf=run_leaf, split=split)
+            assert _statuses(plan) == {"A": "done", "B": "done"}, plan
+            assert commits.get("A"), commits
+            assert seen.get("B_head") == commits["A"], (seen, commits)
+            assert seen.get("B_saw_a") is True, seen
+            assert os.path.isfile(os.path.join(repo, "a.txt")), "dependency output survived final integration"
+            assert os.path.isfile(os.path.join(repo, "b.txt")), "dependent output survived final integration"
+            assert git("show", "HEAD:a.txt").stdout == "A\n", "final tree keeps A's file"
+    finally:
+        cg._commit_worktree_off_base = old_commit
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor live path cuts a dependent default leaf from its dependency output")
+
+
+def test_taskexecutor_live_additive_steering_reaches_dispatched_leaf():
+    import tempfile, subprocess, goal_store
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    seen = []
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "do a", "scope": ["x.py"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        seen.append(task["objective"])
+        with open(os.path.join(repo_arg, "x.py"), "w") as fh:
+            fh.write("x\n")
+        subprocess.run(["git", "-C", repo_arg, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf x"], capture_output=True)
+        return {"outcome": "converged",
+                "commit": subprocess.run(["git", "-C", repo_arg, "rev-parse", "HEAD"],
+                                         capture_output=True, text=True).stdout.strip()}
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _wt_repo(d)
+            st = goal_store.GoalStore(repo)
+            st.create("goal-texec-steer", "build it", "codex")
+            st.steer("goal-texec-steer", "prefer official tools")
+            events = []
+            cg.run_goal(repo, "build it", run_leaf=run_leaf, goal_id="goal-texec-steer",
+                        split=split, emit=events.append)
+            assert seen and "prefer official tools" in seen[0], seen
+            assert "do a" in seen[0], seen
+            assert any(e.get("type") == "steer_applied" and e.get("id") == "a" for e in events), events
+    finally:
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor live path folds additive steering into the dispatched leaf")
+
+
+def test_taskexecutor_root_ci_step_is_opt_in():
+    import tempfile
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_ci = os.environ.get("CI_WRITERS_ENABLED")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    real_root_ci = cg._run_root_ci_writers
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+    calls = []
+
+    def fake_root_ci(repo, goal, context, emit):
+        calls.append((repo, goal, context))
+        emit({"type": "root_ci_test_stub"})
+        return True
+
+    try:
+        cg._run_root_ci_writers = fake_root_ci
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            split = lambda g, c, ca: []
+            run_leaf = lambda r, t: {"outcome": "converged", "commit": _rev(git)}
+
+            os.environ.pop("CI_WRITERS_ENABLED", None)
+            events = []
+            cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+            assert calls == [], calls
+            assert not any(e.get("type") == "root_ci_test_stub" for e in events), events
+            assert any(e.get("type") == "root_ci_skipped" and e.get("reason") == "disabled"
+                       for e in events), events
+
+            os.environ["CI_WRITERS_ENABLED"] = "1"
+            events = []
+            cg.run_goal(repo, "g", run_leaf=run_leaf, split=split, refine=_ok_refine, emit=events.append)
+            assert len(calls) == 1, calls
+            assert any(e.get("type") == "root_ci_test_stub" for e in events), events
+    finally:
+        cg._run_root_ci_writers = real_root_ci
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_ci is None:
+            os.environ.pop("CI_WRITERS_ENABLED", None)
+        else:
+            os.environ["CI_WRITERS_ENABLED"] = old_ci
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  root CI writers run once at root only when CI_WRITERS_ENABLED opts in")
+
+
+def test_taskexecutor_no_acceptance_profile_is_needs_info_and_not_merged():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "1"
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "write feature", "scope": ["feat.py"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        with open(os.path.join(repo_arg, "feat.py"), "w") as fh:
+            fh.write("feature\n")
+        subprocess.run(["git", "-C", repo_arg, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", repo_arg, "commit", "-m", "leaf feature"],
+                       check=True, capture_output=True)
+        return {"outcome": "converged",
+                "commit": subprocess.run(["git", "-C", repo_arg, "rev-parse", "HEAD"],
+                                         check=True, capture_output=True,
+                                         text=True).stdout.strip()}
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            repo, git = _wt_repo(d)
+            base = _rev(git, "main")
+            events = []
+            plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               goal_id="texec-shadow", emit=events.append)
+            assert _statuses(plan) == {"a": "done"}, plan
+            acc = [e for e in events if e.get("type") == "goal_acceptance"]
+            assert acc and acc[0]["verified"] is False and acc[0]["status"] == "needs_info", (acc, events)
+            assert any(e.get("type") == "goal_finished" and e.get("status") == "needs_info"
+                       for e in events), events
+            assert not any(e.get("type") == "goal_done" for e in events), events
+            assert not any(e.get("type") == "goal_merged" for e in events), events
+            assert any(e.get("type") == "goal_worktree_retained" and e.get("status") == "needs_info"
+                       for e in events), events
+            assert _rev(git, "main") == base, "unverified TaskExecutor composition must not merge to main"
+            assert not os.path.exists(os.path.join(repo, "feat.py")), "main must not receive the unverified file"
+            retained = next(e for e in events if e.get("type") == "goal_worktree_retained")
+            cg._cleanup_goal_worktree(repo, retained.get("worktree"), retained.get("branch"), delete_branch=True)
+    finally:
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor no acceptance_profile -> needs_info, goal_done absent, NOT merged")
+
+
+def test_taskexecutor_non_defer_failed_leaf_with_commit_does_not_verify():
+    import tempfile, subprocess
+    old_flag = os.environ.get("AI_ORG_USE_TASKEXECUTOR")
+    old_wt = os.environ.get("AI_ORG_GOAL_WORKTREE")
+    old_gate = cg.conformance.run_goal_acceptance
+    os.environ["AI_ORG_USE_TASKEXECUTOR"] = "1"
+    os.environ["AI_ORG_GOAL_WORKTREE"] = "off"
+
+    def split(g, c, ca):
+        return [{"id": "a", "objective": "do a", "scope": ["seed.txt"], "depends_on": []}]
+
+    def run_leaf(repo_arg, task):
+        tree = subprocess.run(["git", "-C", repo_arg, "rev-parse", f"{task['base_sha']}^{{tree}}"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(["git", "-C", repo_arg, "commit-tree", tree, "-p", task["base_sha"],
+                                 "-m", "failed leaf with commit"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+        return {"outcome": "failed", "reason": "linon", "commit": commit}
+
+    def gate(_profile, _repo, **_kwargs):
+        return {"verified": True, "evidence": [{"ok": True}], "findings": [], "probes_run": 1}
+
+    try:
+        cg.conformance.run_goal_acceptance = gate
+        with tempfile.TemporaryDirectory() as d:
+            repo, _git = _wt_repo(d)
+            events = []
+            plan = cg.run_goal(repo, "do O", run_leaf=run_leaf, split=split, refine=_ok_refine,
+                               context={"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+                               goal_id="texec-failed-commit", emit=events.append)
+            assert _statuses(plan) == {"a": "failed"}, (plan, events)
+            assert any(e.get("type") == "goal_aborted" and "did not converge" in e.get("error", "")
+                       for e in events), events
+            assert any(e.get("type") == "goal_finished" and e.get("status") == "failed"
+                       for e in events), events
+            assert not any(e.get("type") == "goal_acceptance" for e in events), events
+            assert not any(e.get("type") == "goal_done" for e in events), events
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+        if old_flag is None:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = "0"
+        else:
+            os.environ["AI_ORG_USE_TASKEXECUTOR"] = old_flag
+        if old_wt is None:
+            os.environ.pop("AI_ORG_GOAL_WORKTREE", None)
+        else:
+            os.environ["AI_ORG_GOAL_WORKTREE"] = old_wt
+    print("ok  TaskExecutor non-defer failed leaf with attached commit is NOT verified")
+
+
 def test_main_returns_exit_2_on_intake_hold():
     """The public CLI contract: an underdetermined goal HELD at intake makes main() return exit code 2."""
     import goal_refiner
@@ -1506,6 +2250,169 @@ def test_merge_goal_to_main_leaves_main_clean_on_conflict():
     print("ok  (point 2) a conflicting merge aborts -> main stays clean, branch retained")
 
 
+class _FakeDeliveryGit:
+    def __init__(self, push_exit=0):
+        self.push_exit = push_exit
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        import subprocess
+        self.calls.append(list(args))
+        rest = list(args)
+        if len(rest) >= 3 and rest[0] == "git" and rest[1] == "-C":
+            rest = rest[3:]
+        if rest == ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]:
+            return cg.CommandResult(tuple(args), 0, "origin/main\n", "")
+        if rest == ["remote", "get-url", "origin"]:
+            return cg.CommandResult(tuple(args), 0, "git@github.com:owner/repo.git\n", "")
+        if rest[:2] == ["push", "-u"]:
+            err = "push rejected\n" if self.push_exit else ""
+            return cg.CommandResult(tuple(args), self.push_exit, "", err)
+        return subprocess.run(list(args), cwd=str(cwd), capture_output=True, text=True)
+
+
+class _FakeGh:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        if self.exit_code:
+            return cg.CommandResult(tuple(args), self.exit_code, "", "gh failed\n")
+        return cg.CommandResult(tuple(args), 0, "https://github.com/owner/repo/pull/7\n", "")
+
+
+class _FakeMergeGate:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        self.calls.append(list(args))
+        err = "checks failed\n" if self.exit_code else ""
+        return cg.CommandResult(tuple(args), self.exit_code, "", err)
+
+
+def _taskexecutor_goal_branch(d, *, goal_id="deliver-ok"):
+    import os, subprocess
+    repo, git = _wt_repo(d)
+    base = _rev(git)
+    branch = f"goal/{goal_id}"
+    wt = os.path.join(d, "goal-wt")
+    git("worktree", "add", "-q", wt, "-b", branch, "HEAD")
+    open(os.path.join(wt, "feat.py"), "w").write("feature\n")
+    subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", wt, "commit", "-m", "feature"], check=True, capture_output=True)
+    return repo, git, wt, branch, base
+
+
+def _finalize_taskexecutor_delivery(d, *, goal_id="deliver-ok", verified=True, deliver=True,
+                                    auto_merge=False, push_exit=0, gh_exit=0, merge_gate_exit=0):
+    old_gate = cg.conformance.run_goal_acceptance
+    repo, git, wt, branch, base = _taskexecutor_goal_branch(d, goal_id=goal_id)
+    events = []
+    store = cg.goal_store.GoalStore(repo, emit=events.append)
+    store.create(goal_id, "ship feature", org="codex")
+    cg.conformance.run_goal_acceptance = lambda profile, composed_repo, **_k: {
+        "verified": verified, "evidence": [{"ok": verified}], "findings": [] if verified else [{"bad": True}],
+        "probes_run": 1}
+    fake_git = _FakeDeliveryGit(push_exit=push_exit)
+    fake_gh = _FakeGh(exit_code=gh_exit)
+    fake_gate = _FakeMergeGate(exit_code=merge_gate_exit)
+    try:
+        plan = cg._finalize_taskexecutor_goal(
+            wt, "ship feature", [{"id": "leaf", "objective": "ship", "scope": ["feat.py"],
+                                  "depends_on": [], "status": "done"}],
+            {"acceptance_profile": {"probes": [{"request": {}, "expect": {}}]}},
+            store, goal_id, [], True, events.append,
+            iso_wt=wt, orig_repo=repo, goal_branch=branch, orig_head=base, orig_branch_name="main",
+            deliver=deliver, auto_merge=auto_merge, git_runner=fake_git, gh_runner=fake_gh,
+            merge_gate_runner=fake_gate)
+    finally:
+        cg.conformance.run_goal_acceptance = old_gate
+    return repo, git, plan, events, store.read(goal_id), fake_git, fake_gh, fake_gate
+
+
+def test_deliver_verified_taskexecutor_goal_pushes_branch_opens_pr_and_sets_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(d)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "pr_opened", delivery
+        assert delivery["pr_url"] == "https://github.com/owner/repo/pull/7", delivery
+        assert rec["pr_url"] == "https://github.com/owner/repo/pull/7", rec
+        assert rec["delivery"]["status"] == "pr_opened", rec
+        assert any(c[-3:] == ["-u", "origin", "goal/deliver-ok"] for c in fake_git.calls), fake_git.calls
+        assert fake_gh.calls and fake_gh.calls[0][:3] == ["gh", "pr", "create"], fake_gh.calls
+        assert _rev(git, "main") != "", "local merge still completed"
+    print("ok  --deliver on verified TaskExecutor goal pushes branch, opens PR, and records real pr_url")
+
+
+def test_deliver_unverified_taskexecutor_goal_skips_push_pr_and_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-bad", verified=False)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "skipped_unverified", delivery
+        assert not any(c and c[-3:] == ["-u", "origin", "goal/deliver-bad"] for c in fake_git.calls), fake_git.calls
+        assert fake_gh.calls == [], fake_gh.calls
+        assert "pr_url" not in rec, rec
+        assert rec["status"] == "failed", rec
+    print("ok  --deliver on unverified TaskExecutor goal skips push/PR and fabricates no pr_url")
+
+
+def test_deliver_push_failure_is_fail_soft_and_fabricates_no_pr_url():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, _gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-push-fail", push_exit=1)
+        delivery = [e for e in events if e.get("type") == "goal_delivery"][-1]
+        assert delivery["status"] == "pushed_push_failed", delivery
+        assert rec["delivery"]["status"] == "pushed_push_failed", rec
+        assert "pr_url" not in rec, rec
+        assert fake_gh.calls == [], fake_gh.calls
+        assert any(e.get("type") == "goal_merged" for e in events), "delivery failure must not crash closeout"
+    print("ok  push failure records pushed_*_failed, does not crash, and fabricates no pr_url")
+
+
+def test_auto_merge_invokes_merge_gate_and_records_merge_on_passing_checks():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-automerge-ok", auto_merge=True, merge_gate_exit=0)
+        assert fake_gate.calls, "merge-gate must be invoked after PR creation"
+        assert "https://github.com/owner/repo/pull/7" in fake_gate.calls[0], fake_gate.calls
+        assert rec["delivery"]["merge_gate"]["status"] == "merged", rec
+    print("ok  --auto-merge invokes merge-gate and records merged when checks pass")
+
+
+def test_auto_merge_leaves_pr_open_when_merge_gate_fails():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-automerge-fail", auto_merge=True, merge_gate_exit=1)
+        assert fake_gate.calls, "merge-gate must be invoked after PR creation"
+        assert rec["delivery"]["status"] == "pr_opened", rec
+        assert rec["delivery"]["merge_gate"]["status"] == "left_open", rec
+        assert rec["delivery"]["merge_gate"]["ok"] is False, rec
+    print("ok  --auto-merge leaves PR open when merge-gate reports failing checks")
+
+
+def test_default_taskexecutor_finalize_local_merge_no_delivery():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo, git, plan, events, rec, fake_git, fake_gh, fake_gate = _finalize_taskexecutor_delivery(
+            d, goal_id="deliver-default", deliver=False)
+        assert not any(e.get("type") == "goal_delivery" for e in events), events
+        assert fake_git.calls == [] and fake_gh.calls == [] and fake_gate.calls == [], (
+            fake_git.calls, fake_gh.calls, fake_gate.calls)
+        assert any(e.get("type") == "goal_merged" for e in events), events
+        assert "pr_url" not in rec, rec
+    print("ok  default closeout remains local merge only, with no delivery calls")
+
+
 # ---------------------------------------------------------------------------------------------------------
 # ADR-0016 D7 — GOAL-LEVEL ACCEPTANCE GATE wiring. After all leaves are green + composed, BEFORE merge-to-main,
 # run_goal boots the COMPOSED goal artifact (this worktree) against the OWNER's intake-fixed executable
@@ -1670,6 +2577,25 @@ def test_goal_acceptance_gate_is_deliverable_kind_independent():
         assert acc and acc[0]["verified"] is True, ("the goal probe runs regardless of the leaf kind", acc, events)
         assert any(e.get("type") == "goal_merged" for e in events), events
     print("ok  (d) goal acceptance is deliverable_kind-INDEPENDENT (library leaf, goal probe still runs)")
+
+
+def test_root_tree_forbidden_gate_blocks_delivery_when_final_repo_has_tree_scope_match():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d)
+        (repo / "src").mkdir()
+        (repo / "src" / "legacy.py").write_text("TREE_TOKEN\n", encoding="utf-8")
+        verified = cg.task_executor.VerifiedCommit("root", "sha", {
+            "tree_forbidden_patterns": [{"pattern": "TREE_TOKEN", "scope": "tree"}],
+        })
+        events = []
+        ok = cg._run_root_tree_forbidden_gate(repo, verified, events.append)
+    assert ok is False, events
+    root_events = [e for e in events if e.get("type") == "root_tree_forbidden_gate"]
+    blocked = [e for e in events if e.get("type") == "goal_blocked" and e.get("source") == "forbidden-pattern"]
+    assert root_events and root_events[0]["passed"] is False, events
+    assert blocked and blocked[0]["findings"][0]["hits"] == ["src/legacy.py:1"], events
+    print("ok  root tree-wide forbidden-pattern gate blocks delivery on final composed straggler")
 
 
 if __name__ == "__main__":

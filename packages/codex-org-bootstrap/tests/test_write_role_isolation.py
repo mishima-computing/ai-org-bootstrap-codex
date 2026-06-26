@@ -46,6 +46,11 @@ class WriteRoleIsolationTests(unittest.TestCase):
         self._orig = controller_run.run
         self._orig_env = os.environ.get("AI_ORG_ROOT")
         os.environ["AI_ORG_ROOT"] = str(ROOT)          # org install = codex; workspace = the temp repo
+        # CI writers are OFF by default now (moved to a single ROOT step, not the per-leaf path;
+        # opt in via CI_WRITERS_ENABLED). This test PROVES per-leaf write-role isolation + merge-back,
+        # which needs the CI writers active as a second write role, so it opts them back in.
+        self._orig_ci = os.environ.get("CI_WRITERS_ENABLED")
+        os.environ["CI_WRITERS_ENABLED"] = "1"
         self.tmp = tempfile.mkdtemp(prefix="iso-ws-")
         self.work = Path(self.tmp) / "work"
         self.work.mkdir(parents=True)
@@ -95,6 +100,10 @@ class WriteRoleIsolationTests(unittest.TestCase):
             os.environ.pop("AI_ORG_ROOT", None)
         else:
             os.environ["AI_ORG_ROOT"] = self._orig_env
+        if self._orig_ci is None:
+            os.environ.pop("CI_WRITERS_ENABLED", None)
+        else:
+            os.environ["CI_WRITERS_ENABLED"] = self._orig_ci
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 

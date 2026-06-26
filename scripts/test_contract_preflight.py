@@ -7,14 +7,20 @@ after a wasted build + review. These tests pin the deterministic checks; the las
 wiring (streams before the implementer, shadow never blocks, block folds into the repair findings)."""
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "codex-org-bootstrap" / "src"))
 import contract_preflight as pf
+import controller_output
 import controller_pipeline as cp
+
+REPO = Path(__file__).resolve().parents[1]
+IMPLEMENTATION_SCHEMA = REPO / "schemas" / "implementation-contract.schema.json"
 
 
 def _complete_cli_contract():
@@ -33,6 +39,30 @@ def _complete_cli_contract():
                 {"invocation": "", "expected_status": 2},
             ],
         }},
+    }
+
+
+def _schema_complete_none_contract():
+    return {
+        "role_id": "aufheben-designer",
+        "contract_id": "c1",
+        "objective": "Rename internal helper without behavior change.",
+        "selected_direction": "Behavior-preserving rename with deterministic regression gates.",
+        "rejected_parts": [],
+        "implementation_summary": "Rename the internal helper without changing public behavior.",
+        "acceptance_criteria": ["existing tests still pass"],
+        "files_allowed_to_change": ["tool.py"],
+        "files_not_allowed_to_change": [],
+        "required_checks": ["python3 -m py_compile tool.py"],
+        "security_requirements": [],
+        "nonfunctional_requirements": [],
+        "non_goals": ["no public interface change"],
+        "risks": [],
+        "fallback_plan": "revert the rename",
+        "handoff_to_implementer": "Perform only the rename and run the stated check.",
+        "deliverable_kind": "none",
+        "regression_suite": {"command": "python3 -m py_compile tool.py",
+                             "reason": "no-surface refactor must preserve importability"},
     }
 
 
@@ -113,6 +143,17 @@ def test_deliverable_kind_none_passes():
     assert "deliverable_kind" not in checks and "conformance_profile" not in checks, rep
     assert rep["passed"], rep
     print("ok  deliverable_kind 'none' explicitly discharges the interface obligation -> passes")
+
+
+def test_change_intent_cannot_leak_into_implementation_contract_schema():
+    c = _schema_complete_none_contract()
+    ok = controller_output.gate_output(json.dumps(c), str(IMPLEMENTATION_SCHEMA))
+    assert ok["output_ok"], ok
+    c["change_intent"] = {"interface_delta": "no_surface_change"}
+    leaked = controller_output.gate_output(json.dumps(c), str(IMPLEMENTATION_SCHEMA))
+    assert not leaked["output_ok"], leaked
+    assert any("additional" in e.lower() and "change_intent" in e for e in leaked["errors"]), leaked
+    print("ok  implementation contract schema rejects leaked change_intent (advisory substrate only)")
 
 
 def test_interface_kind_without_profile_is_flagged():
@@ -226,6 +267,69 @@ def test_non_service_kinds_are_not_forced_to_declare_service_probe():
     print("ok  cli/library/none contracts are not forced to declare service production-boundary probes")
 
 
+def test_tree_scope_forbidden_pattern_out_of_scope_match_fails_preflight():
+    c = _schema_complete_none_contract()
+    c["files_allowed_to_change"] = ["src/in_scope.py"]
+    c["forbidden_patterns"] = [{"pattern": "TREE_TOKEN", "scope": "tree"}]
+    with tempfile.TemporaryDirectory(prefix="pf-tree-scope-") as d:
+        root = Path(d)
+        (root / "src").mkdir()
+        (root / "docs").mkdir()
+        (root / "src" / "in_scope.py").write_text("clean\n", encoding="utf-8")
+        (root / "docs" / "legacy.md").write_text("TREE_TOKEN\n", encoding="utf-8")
+        rep = pf.preflight(c, cwd=root)
+    hits = [f for f in rep["findings"] if f["check"] == "tree_forbidden_pattern_scope"]
+    assert not rep["passed"] and hits, rep
+    assert hits[0]["source"] == "contract-preflight" and hits[0]["scope"] == "tree", hits
+    assert hits[0]["hits"] == ["docs/legacy.md:1"], hits
+    print("ok  tree-scope forbidden pattern with out-of-scope current match -> preflight failure")
+
+
+def test_bare_word_forbidden_pattern_is_flagged_overbroad():
+    # the incident: a bare word `\b[Ss]caffold\b` matches BOTH the demo references to rename AND the real
+    # ADR-0008 mechanism the goal KEEPS -> the contract is unsatisfiable. The guard must flag it.
+    c = _schema_complete_none_contract()
+    c["forbidden_patterns"] = [{"pattern": r"\b[Ss]caffold\b", "scope": "leaf"}]
+    rep = pf.preflight(c)
+    ob = [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"]
+    assert not rep["passed"] and ob, rep
+    assert ob[0]["severity"] == "major" and ob[0]["source"] == "contract-preflight", ob
+    assert ob[0]["bare_word"].lower() == "scaffold" and ob[0]["pattern"] == r"\b[Ss]caffold\b", ob
+    # routes to the designer (full re-synthesis), not implementer-only repair
+    roles = cp._repair_roles_for([{"source": "contract-preflight"}], ["aufheben-designer", "implementer"])
+    assert roles == ["aufheben-designer", "implementer"], roles
+    print("ok  bare-word forbidden pattern -> forbidden_pattern_overbroad major, routes to designer")
+
+
+def test_namespace_anchored_forbidden_patterns_not_flagged():
+    # every namespace-precise authoring is backward compatible: NONE flagged overbroad.
+    for pattern in (r"cockpit\.scaffold", "cockpit/scaffold", "import scaffold", "from cockpit import scaffold",
+                    "SHAGIRI_SCAFFOLD", "def scaffold_runner", "class Scaffold", "_scaffold_seed_commit"):
+        c = _schema_complete_none_contract()
+        c["forbidden_patterns"] = [{"pattern": pattern, "scope": "leaf"}]
+        rep = pf.preflight(c)
+        assert not [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"], (pattern, rep)
+        assert rep["passed"], (pattern, rep)
+    print("ok  namespace-anchored patterns (module/import/env/def/class/underscore-joined) -> not flagged")
+
+
+def test_bare_word_overbroad_enriches_with_collision_hits_when_cwd_available():
+    # advisory enrichment: when cwd is available, surface a few actual collision hits so re-author is mechanical
+    # (the BLOCK decision is still the syntactic bare-word test).
+    c = _schema_complete_none_contract()
+    c["files_allowed_to_change"] = ["demo.py"]
+    c["forbidden_patterns"] = [{"pattern": r"\b[Ss]caffold\b", "scope": "leaf"}]
+    with tempfile.TemporaryDirectory(prefix="pf-overbroad-") as d:
+        root = Path(d)
+        (root / "demo.py").write_text("scaffold demo reference\n", encoding="utf-8")
+        (root / "server.py").write_text("def _scaffold_seed_commit():\n    return scaffold\n", encoding="utf-8")
+        rep = pf.preflight(c, cwd=root)
+    ob = [f for f in rep["findings"] if f["check"] == "forbidden_pattern_overbroad"]
+    assert ob and ob[0].get("collision_hits"), ob
+    assert any("server.py" in h for h in ob[0]["collision_hits"]), ob
+    print("ok  bare-word overbroad finding enriches with actual collision hits when cwd is available")
+
+
 def test_wired_preflight_streams_before_block_folds():
     results = {"aufheben-designer": dict(_complete_cli_contract(), acceptance_criteria=[])}  # a flawed contract
     events = []
@@ -284,6 +388,18 @@ def test_preflight_gate_block_reruns_aufheben_then_proceeds():
     assert floored is False and rep["passed"], (floored, rep)
     assert len(runs) == 1 and runs[0]["findings"], "one aufheben re-run, fed the preflight findings"
     print("ok  preflight gate (block): a contract defect re-runs aufheben only, then proceeds")
+
+
+def test_preflight_gate_tree_scope_failure_routes_to_aufheben_not_implementer():
+    rep, floored, runs = _drive_preflight_gate(
+        [{"applicable": True, "passed": False,
+          "findings": [{"source": "contract-preflight", "check": "tree_forbidden_pattern_scope"}]},
+         {"applicable": True, "passed": True, "findings": []}], mode="block")
+    roles = cp._repair_roles_for([{"source": "contract-preflight"}], ["aufheben-designer", "implementer"])
+    assert floored is False and rep["passed"], (floored, rep)
+    assert len(runs) == 1 and runs[0]["findings"][0]["check"] == "tree_forbidden_pattern_scope", runs
+    assert roles == ["aufheben-designer", "implementer"], roles
+    print("ok  tree-scope preflight failure feeds aufheben redesign path, not implementer-only repair")
 
 
 def test_preflight_gate_block_fails_closed_after_cap():
