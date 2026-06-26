@@ -1615,7 +1615,28 @@ def _skip_tree_scan_file(rel: str, full: str, root: str) -> bool:
     return False
 
 
-def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict]:
+def _normalize_scan_rel(path: str) -> str:
+    rel = path.replace(os.sep, "/").replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel
+
+
+def _allowed_file_matcher(allowed_files) -> Optional[Callable[[str], bool]]:
+    if not isinstance(allowed_files, list):
+        return None
+    globs = [_normalize_scan_rel(str(g).strip()) for g in allowed_files if str(g).strip()]
+    if not globs:
+        return None
+
+    def _matches(rel: str) -> bool:
+        rel_norm = _normalize_scan_rel(rel)
+        return any(fnmatch.fnmatch(rel_norm, g) for g in globs)
+
+    return _matches
+
+
+def _forbidden_pattern_findings(patterns: list, cwd: Optional[str], allowed_files=None) -> tuple[list[dict], list[dict]]:
     """For each declared pattern, grep the produced tree at `cwd` (text files only; .git / node_modules / vendor
     dirs and binary files skipped) and count matches in files NOT matching the pattern's `exclude` globs. When
     the count exceeds `max_occurrences` (default 0), emit ONE BLOCKING `forbidden-pattern` finding naming the
@@ -1623,6 +1644,8 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
     regex it is matched as a literal substring (so a bare token like `_scaffold_seed_commit` works either way)."""
     root = cwd or "."
     findings: list[dict] = []
+    advisory_findings: list[dict] = []
+    in_scope = _allowed_file_matcher(allowed_files)
     for spec in patterns:
         if not isinstance(spec, dict):
             continue
@@ -1637,6 +1660,8 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
         max_occ = spec.get("max_occurrences", 0)
         count = 0
         hits: list[str] = []
+        out_of_scope_count = 0
+        out_of_scope_hits: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
                 d for d in dirnames
@@ -1645,9 +1670,10 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
             for fn in sorted(filenames):
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, root)
+                rel_norm = _normalize_scan_rel(rel)
                 if _skip_tree_scan_file(rel, full, root):
                     continue
-                if any(fnmatch.fnmatch(rel, g) for g in excludes):
+                if any(fnmatch.fnmatch(rel_norm, _normalize_scan_rel(g)) for g in excludes):
                     continue
                 if _is_probably_binary(full):
                     continue
@@ -1655,11 +1681,29 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
                     with open(full, encoding="utf-8") as fh:
                         for lineno, line in enumerate(fh, 1):
                             if rx.search(line):
-                                count += len(rx.findall(line))
+                                line_count = len(rx.findall(line))
+                                if in_scope is not None and not in_scope(rel_norm):
+                                    out_of_scope_count += line_count
+                                    if len(out_of_scope_hits) < _FORBIDDEN_MAX_HITS_REPORTED:
+                                        out_of_scope_hits.append(f"{rel_norm}:{lineno}")
+                                    continue
+                                count += line_count
                                 if len(hits) < _FORBIDDEN_MAX_HITS_REPORTED:
-                                    hits.append(f"{rel}:{lineno}")
+                                    hits.append(f"{rel_norm}:{lineno}")
                 except (OSError, UnicodeDecodeError):
                     continue                           # unreadable / non-utf8 text: skip, never crash the gate
+        if out_of_scope_count:
+            reason = spec.get("reason")
+            detail = (f"forbidden pattern {raw!r} appears {out_of_scope_count} time(s) outside "
+                      "files_allowed_to_change")
+            if reason:
+                detail += f" — {reason}"
+            if out_of_scope_hits:
+                detail += "; e.g. " + ", ".join(out_of_scope_hits)
+            advisory_findings.append(_forbidden_finding(
+                "forbidden_pattern_out_of_scope", "advisory", True, detail,
+                pattern=raw, count=out_of_scope_count, max_occurrences=max_occ, hits=out_of_scope_hits,
+                out_of_scope=True))
         if count > max_occ:
             reason = spec.get("reason")
             detail = (f"forbidden pattern {raw!r} appears {count} time(s) in the produced tree "
@@ -1683,7 +1727,7 @@ def _forbidden_pattern_findings(patterns: list, cwd: Optional[str]) -> list[dict
                 "forbidden_pattern", "major", False, detail,
                 pattern=raw, count=count, max_occurrences=max_occ, hits=hits, fix_hint=fix_hint,
                 failure_classification="code"))   # incr #3: a grep hit in delivered source is a fact -> product defect
-    return findings
+    return findings, advisory_findings
 
 
 def run_forbidden_patterns(contract: dict, *, cwd: Optional[str] = None) -> dict:
@@ -1693,11 +1737,12 @@ def run_forbidden_patterns(contract: dict, *, cwd: Optional[str] = None) -> dict
     patterns = contract.get("forbidden_patterns")
     if not isinstance(patterns, list) or not patterns:
         return {"applicable": False, "passed": True, "findings": [], "checks_run": 0}
-    findings = _forbidden_pattern_findings(patterns, cwd)
+    findings, advisory_findings = _forbidden_pattern_findings(patterns, cwd, contract.get("files_allowed_to_change"))
     return {
         "applicable": True,
         "passed": all(f["passed"] for f in findings),
         "findings": findings,
+        "advisory_findings": advisory_findings,
         "checks_run": len(patterns),
     }
 
@@ -1942,6 +1987,9 @@ def _merge_reports(base: dict, extra: dict) -> dict:
     merged = dict(base)
     merged["applicable"] = True
     merged["findings"] = list(base.get("findings") or []) + list(extra.get("findings") or [])
+    merged["advisory_findings"] = (
+        list(base.get("advisory_findings") or []) + list(extra.get("advisory_findings") or [])
+    )
     merged["passed"] = bool(base.get("passed", True)) and bool(extra.get("passed", True))
     merged["checks_run"] = int(base.get("checks_run", 0)) + int(extra.get("checks_run", 0))
     return merged

@@ -342,6 +342,7 @@ def _ws(files: dict):
     import tempfile
     d = tempfile.TemporaryDirectory()
     for rel, content in files.items():
+        os.makedirs(os.path.dirname(os.path.join(d.name, rel)), exist_ok=True)
         with open(os.path.join(d.name, rel), "w", encoding="utf-8") as fh:
             fh.write(content)
     return d
@@ -1370,10 +1371,13 @@ def test_http_service_not_applicable_for_non_http():
 
 # --- forbidden-pattern gate (ADR-0016 D7): the cheap, kind-agnostic grep gate ----------------------------
 
-def _fp_contract(patterns, kind="none"):
+def _fp_contract(patterns, kind="none", allowed_files=None):
     """A contract carrying forbidden_patterns. kind='none' proves the gate is kind-agnostic — it fires even
     where no per-kind conformance profile exists."""
-    return {"role_id": "aufheben-designer", "deliverable_kind": kind, "forbidden_patterns": patterns}
+    contract = {"role_id": "aufheben-designer", "deliverable_kind": kind, "forbidden_patterns": patterns}
+    if allowed_files is not None:
+        contract["files_allowed_to_change"] = allowed_files
+    return contract
 
 
 def test_forbidden_pattern_straggler_blocks_with_file_line():
@@ -1440,6 +1444,62 @@ def test_forbidden_pattern_max_occurrences_honored():
     f = next(f for f in bad["findings"] if f["source"] == "forbidden-pattern")
     assert not bad["passed"] and f["count"] == 3 and f["max_occurrences"] == 2, f
     print("ok  forbidden-pattern: max_occurrences honored (N allowed, N+1 blocks)")
+
+
+def test_forbidden_pattern_partitions_allowed_scope_and_advisory_hits():
+    with _ws({
+        "src/in_scope.py": "TOKEN\n",
+        "tests/out_of_scope.py": "TOKEN\nTOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract([{"pattern": "TOKEN"}], allowed_files=["src/in_scope.py"]),
+            cwd=d,
+        )
+    assert rep["applicable"] and not rep["passed"], rep
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert f["check"] == "forbidden_pattern" and f["count"] == 1, f
+    assert f["hits"] == ["src/in_scope.py:1"], f
+    assert all("tests/out_of_scope.py" not in hit for hit in f["hits"]), f
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1, rep
+    a = advisory[0]
+    assert a["check"] == "forbidden_pattern_out_of_scope" and a["passed"] is True, a
+    assert a["count"] == 2 and a["hits"] == ["tests/out_of_scope.py:1", "tests/out_of_scope.py:2"], a
+    print("ok  forbidden-pattern: allowed-scope hits block; out-of-scope hits are advisory only")
+
+
+def test_forbidden_pattern_without_allowed_files_keeps_legacy_tree_wide_blocking():
+    with _ws({
+        "src/in_scope.py": "TOKEN\n",
+        "tests/out_of_scope.py": "TOKEN\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(_fp_contract([{"pattern": "TOKEN"}]), cwd=d)
+    f = next(f for f in rep["findings"] if f["source"] == "forbidden-pattern")
+    assert not rep["passed"] and f["count"] == 2, f
+    assert set(f["hits"]) == {"src/in_scope.py:1", "tests/out_of_scope.py:1"}, f
+    assert rep.get("advisory_findings") == [], rep
+    print("ok  forbidden-pattern: missing files_allowed_to_change keeps legacy tree-wide blocking")
+
+
+def test_forbidden_pattern_out_of_scope_only_passes_leaf_with_advisory():
+    with _ws({
+        "cockpit/scaffold.py": "def scaffold():\n    return 'new'\n",
+        "cockpit/demo_org.py": "def demo():\n    return 'new'\n",
+        "scripts/test_rename_discovery.py": "def scaffold_runner():\n    return 'legacy'\n",
+        "scripts/test_rename_guards.py": "def renamed():\n    return 'clean'\n",
+    }) as d:
+        rep = conf.run_forbidden_patterns(
+            _fp_contract(
+                [{"pattern": "def scaffold_runner"}],
+                allowed_files=["cockpit/scaffold.py", "cockpit/demo_org.py"],
+            ),
+            cwd=d,
+        )
+    assert rep["applicable"] and rep["passed"], rep
+    assert rep["findings"] == [], rep
+    advisory = rep.get("advisory_findings") or []
+    assert len(advisory) == 1 and advisory[0]["hits"] == ["scripts/test_rename_discovery.py:1"], rep
+    print("ok  forbidden-pattern: scaffold-real-3 out-of-scope straggler is advisory and leaf passes")
 
 
 def test_forbidden_pattern_absent_is_noop():
