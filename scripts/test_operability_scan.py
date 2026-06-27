@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import operability_scan as ops  # noqa: E402
 import deliverable_kind as dk  # noqa: E402
+import deterministic_transform_tools as tools  # noqa: E402
 import pre_localizer  # noqa: E402
 
 
@@ -138,6 +139,23 @@ class OperabilityScanTest(unittest.TestCase):
 
             unsupported = ops.TransformKindScan(repo, "rename missing_symbol to other_symbol").build()
             self.assertEqual(unsupported["route"], "llm")
+
+    def test_transform_kind_routes_scaffold_path_rename_with_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            write(repo, "cockpit/scaffold.py", "def scaffold_runner():\n    return 'scaffold'\n")
+            write(repo, "cockpit/__init__.py", "")
+            objective = "rename cockpit/scaffold.py to cockpit/demo_org.py off the word scaffold and preserve real behavior"
+            candidates = pre_localizer.PreLocalizer(repo).candidates(objective)
+
+            routed = ops.TransformKindScan(repo, objective, candidates=candidates).build()
+
+            self.assertEqual(routed["route"], "tool", routed)
+            self.assertEqual(routed["tool_id"], "rename-codemod")
+            self.assertEqual(routed["transform_kind"], "rename")
+            self.assertEqual(routed["params"]["old"], "scaffold")
+            self.assertEqual(routed["params"]["new"], "demo_org")
+            self.assertTrue(tools.can_handle(repo, routed["params"]))
 
     def test_transform_kind_routes_new_kinds_in_shadow_only_when_tools_accept(self):
         with tempfile.TemporaryDirectory() as d:

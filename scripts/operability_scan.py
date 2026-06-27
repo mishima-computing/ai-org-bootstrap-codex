@@ -84,9 +84,21 @@ _SIGNATURE_CHANGE_RE = re.compile(
     re.IGNORECASE,
 )
 _FILE_HINT_RE = re.compile(r"\b(?P<file>[A-Za-z_][A-Za-z0-9_./-]*\.py)\b")
+_RENAME_WORD_HINT_RE = re.compile(
+    r"\b(?:word|token|symbol|identifier|name)\s+(?P<word>[A-Za-z_][A-Za-z0-9_]*)\b",
+    re.IGNORECASE,
+)
 _SCAFFOLD_DEMO_RE = re.compile(r"\bscaffold\b", re.IGNORECASE)
 _DEMO_ORG_RE = re.compile(r"\bdemo[-_ ]org\b|\bDEMO_ORG\b")
 _CONJUNCTION_RE = re.compile(r"\s+(?:and|, plus|;)\s+", re.IGNORECASE)
+_BENIGN_TRANSFORM_RESIDUAL_RES = (
+    re.compile(r"\b(?:preserve|preserving|keep|keeping|maintain|maintaining)\s+"
+               r"(?:real\s+)?(?:behavior|behaviour|semantics|functionality)\b", re.IGNORECASE),
+    re.compile(r"\b(?:without|no)\s+(?:public\s+)?(?:surface|interface|api|behavior|behaviour|semantic)\s+"
+               r"(?:change|changes)\b", re.IGNORECASE),
+    re.compile(r"\boff\s+the\s+(?:word|token|symbol|identifier|name)\s+"
+               r"[A-Za-z_][A-Za-z0-9_]*\b", re.IGNORECASE),
+)
 
 
 class OperabilityScan:
@@ -567,6 +579,7 @@ class TransformKindScan:
                 subops.append(chunk)
                 residual = residual.replace(chunk, "").strip(" ,;")
         residual = re.sub(r"^(and|plus)\s+", "", residual, flags=re.IGNORECASE).strip()
+        residual = _strip_benign_transform_residual(residual)
         return bool(subops and residual and (_reference_tokens_for_transform(residual) - {"and", "plus"}))
 
     def _rename_params(self) -> dict | None:
@@ -578,32 +591,70 @@ class TransformKindScan:
             new = matches[0].group("new").strip("`'\".,")
             if old == new:
                 return None
+            path_params = self._path_rename_params(old, new)
+            if path_params is not None:
+                return path_params
             return {
                 "old": old,
                 "new": new,
-                "replacements": deterministic_transform_tools._default_replacements(old, new),
+                "replacements": _rename_replacements(old, new),
                 "objective": self.objective,
             }
         lower = self.objective.lower()
         if _SCAFFOLD_DEMO_RE.search(self.objective) and _DEMO_ORG_RE.search(self.objective):
-            replacements = {
-                "cockpit.scaffold": "cockpit.demo_org",
-                "cockpit/scaffold.py": "cockpit/demo_org.py",
-                "scaffold.py": "demo_org.py",
-                "SHAGIRI_SCAFFOLD": "SHAGIRI_DEMO_ORG",
-                "SCAFFOLD": "DEMO_ORG_MODE",
-                "scaffold_runner": "demo_runner",
-                "scaffold_activity": "demo_activity",
-                "scaffold": "demo_org",
-            }
             if "preserve" in lower or "real" in lower or "adr-0008" in lower:
                 return {
                     "old": "scaffold",
                     "new": "demo_org",
-                    "replacements": replacements,
+                    "replacements": _scaffold_demo_replacements(),
                     "objective": self.objective,
                 }
         return None
+
+    def _path_rename_params(self, old: str, new: str) -> dict | None:
+        old_path = Path(old)
+        new_path = Path(new)
+        if old_path.suffix != ".py" or new_path.suffix != ".py":
+            return None
+        old_rel = old_path.as_posix()
+        new_rel = new_path.as_posix()
+        candidate_paths = self._candidate_paths()
+        old_exists = old_rel in set(self.index.paths) or old_rel in candidate_paths or (self.repo / old_rel).is_file()
+        if not old_exists or (self.repo / new_rel).exists():
+            return None
+        old_stem = old_path.stem
+        new_stem = new_path.stem
+        if not old_stem or not new_stem or old_stem == new_stem:
+            return None
+        word_hint = self._rename_word_hint()
+        if word_hint and word_hint != old_stem:
+            return None
+        if not word_hint and old_rel not in candidate_paths and old_stem not in _reference_tokens_for_transform(self.objective):
+            return None
+        replacements = _rename_replacements(old_stem, new_stem)
+        old_module = old_path.with_suffix("").as_posix().replace("/", ".")
+        new_module = new_path.with_suffix("").as_posix().replace("/", ".")
+        replacements[old_module] = new_module
+        replacements[old_rel] = new_rel
+        replacements[old_path.name] = new_path.name
+        return {
+            "old": old_stem,
+            "new": new_stem,
+            "replacements": replacements,
+            "objective": self.objective,
+        }
+
+    def _candidate_paths(self) -> set[str]:
+        out: set[str] = set()
+        for item in self.candidates:
+            path = getattr(item, "path", item)
+            if isinstance(path, str) and path:
+                out.add(path.replace("\\", "/"))
+        return out
+
+    def _rename_word_hint(self) -> str | None:
+        matches = {m.group("word") for m in _RENAME_WORD_HINT_RE.finditer(self.objective)}
+        return next(iter(matches)) if len(matches) == 1 else None
 
     def _candidate_transforms(self, objective: str) -> list[tuple[str, str, dict]]:
         candidates: list[tuple[str, str, dict]] = []
@@ -671,3 +722,29 @@ class TransformKindScan:
 def _reference_tokens_for_transform(text: str) -> set[str]:
     return {m.group(0).lower() for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_./-]*", text or "")
             if len(m.group(0)) > 2}
+
+
+def _strip_benign_transform_residual(text: str) -> str:
+    out = text or ""
+    for rx in _BENIGN_TRANSFORM_RESIDUAL_RES:
+        out = rx.sub(" ", out)
+    return re.sub(r"\s+", " ", out).strip(" ,;")
+
+
+def _scaffold_demo_replacements() -> dict[str, str]:
+    return {
+        "cockpit.scaffold": "cockpit.demo_org",
+        "cockpit/scaffold.py": "cockpit/demo_org.py",
+        "scaffold.py": "demo_org.py",
+        "SHAGIRI_SCAFFOLD": "SHAGIRI_DEMO_ORG",
+        "SCAFFOLD": "DEMO_ORG_MODE",
+        "scaffold_runner": "demo_runner",
+        "scaffold_activity": "demo_activity",
+        "scaffold": "demo_org",
+    }
+
+
+def _rename_replacements(old: str, new: str) -> dict[str, str]:
+    if old == "scaffold" and new in {"demo_org", "demo-org", "demo org"}:
+        return _scaffold_demo_replacements()
+    return deterministic_transform_tools._default_replacements(old, new)

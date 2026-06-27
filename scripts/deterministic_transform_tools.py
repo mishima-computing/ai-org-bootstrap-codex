@@ -487,13 +487,18 @@ def _clean_rel_list(value) -> list[str]:
 def _default_replacements(old: str, new: str) -> dict[str, str]:
     old_snake = old.replace("-", "_")
     new_snake = new.replace("-", "_")
-    return {
-        old: new,
-        old_snake: new_snake,
-        old_snake.upper(): new_snake.upper(),
-        old_snake.capitalize(): new_snake.capitalize(),
-        old_snake.replace("_", "-"): new_snake.replace("_", "-"),
-    }
+    replacements: dict[str, str] = {}
+
+    def add(key: str, value: str) -> None:
+        if key and key not in replacements:
+            replacements[key] = value
+
+    add(old, new)
+    add(old_snake, new_snake)
+    add(old_snake.upper(), new_snake.upper())
+    add(old_snake.capitalize(), new_snake.capitalize())
+    add(old_snake.replace("_", "-"), new_snake.replace("_", "-"))
+    return replacements
 
 
 def _module_name(rel: str) -> str:
