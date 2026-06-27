@@ -374,6 +374,56 @@ def test_dependency_cycle_fails_closed():
     print("ok  dependency cycles fail closed before dispatch/integration")
 
 
+def test_depends_on_unknown_sibling_id_fails_closed():
+    leaves_executed: list[str] = []
+
+    def run_leaf(node):
+        leaves_executed.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("A", kind=S.LEAF, objective="do A"),
+        S.TaskNode("B", kind=S.LEAF, objective="do B", depends_on=["TypoA"]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=lambda *_args: {"verified": True},
+                      integrate=lambda node, base, commits: (f"integrated-{node.id}", None),
+                      commit_integration=lambda node, base, head, wt, evidence: f"integ-{node.id}",
+                      max_parallel=2)
+    try:
+        task_executor.execute(root)
+        raise AssertionError("unknown depends_on id must fail closed")
+    except S.TaskExecutorIntegrationError as exc:
+        assert "task 'B' depends_on unknown id 'TypoA'" in str(exc), exc
+    assert leaves_executed == [], leaves_executed
+    print("ok  unknown depends_on sibling id fails closed before parallel dispatch")
+
+
+def test_depends_on_cross_level_id_fails_closed():
+    leaves_executed: list[str] = []
+
+    def run_leaf(node):
+        leaves_executed.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("A", kind=S.COMPOSITE, objective="compose A", subtasks=[
+            S.TaskNode("A1", kind=S.LEAF, objective="do A1"),
+        ]),
+        S.TaskNode("B", kind=S.LEAF, objective="do B", depends_on=["A1"]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=lambda *_args: {"verified": True},
+                      integrate=lambda node, base, commits: (f"integrated-{node.id}", None),
+                      commit_integration=lambda node, base, head, wt, evidence: f"integ-{node.id}",
+                      max_parallel=2)
+    try:
+        task_executor.execute(root)
+        raise AssertionError("cross-level depends_on id must fail closed")
+    except S.TaskExecutorIntegrationError as exc:
+        assert "task 'B' depends_on unknown id 'A1'" in str(exc), exc
+    assert leaves_executed == [], leaves_executed
+    print("ok  cross-level depends_on id is rejected as a non-sibling dependency")
+
+
 # --------------------------------------------------------------------------------------------------
 # 4) multi-dep threading: a child depending on SEVERAL siblings resumes from their INTEGRATED head
 # --------------------------------------------------------------------------------------------------
@@ -416,6 +466,43 @@ def test_serial_child_with_multiple_deps_resumes_from_integrated_head():
     assert ["A", "B"] in integrate_calls, integrate_calls
 
     print("ok  multi-dep child resumes from its dependencies' integrated head")
+
+
+def test_multi_dep_base_preintegration_uses_topo_order_not_literal_order():
+    recorded_base: dict[str, str] = {}
+    integrate_calls: list[list[str]] = []
+
+    def run_leaf(node):
+        recorded_base[node.id] = node.base_sha
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    def verify(node, integrated_head, child_commits):
+        return {"verified": True}
+
+    def integrate(node, base, child_commits):
+        ids = [c.task_id for c in child_commits]
+        integrate_calls.append(ids)
+        return ("integ-head-" + "+".join(ids), None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        return f"integ-sha-{node.id}"
+
+    # D lists ["B", "A"], but B depends on A. D's pre-integration base must integrate A before B.
+    p = S.TaskNode("P", kind=S.COMPOSITE, base_sha="BASE0", objective="compose P", subtasks=[
+        S.TaskNode("A", kind=S.LEAF, objective="do A"),
+        S.TaskNode("B", kind=S.LEAF, objective="do B", depends_on=["A"]),
+        S.TaskNode("D", kind=S.LEAF, objective="do D", depends_on=["B", "A"]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, max_parallel=1)
+    task_executor.execute(p)
+
+    assert recorded_base["A"] == "BASE0", recorded_base
+    assert recorded_base["B"] == "leaf-sha-A", recorded_base
+    assert recorded_base["D"] == "integ-head-A+B", recorded_base
+    assert ["A", "B"] in integrate_calls, integrate_calls
+    assert ["B", "A"] not in integrate_calls, integrate_calls
+    print("ok  multi-dep base pre-integration uses dependency topo order, not literal depends_on order")
 
 
 def test_nested_parallel_composites_complete_under_timeout():
@@ -1057,7 +1144,10 @@ if __name__ == "__main__":
     test_dependency_forces_branch_base_and_integration_order()
     test_duplicate_sibling_task_ids_fail_closed()
     test_dependency_cycle_fails_closed()
+    test_depends_on_unknown_sibling_id_fails_closed()
+    test_depends_on_cross_level_id_fails_closed()
     test_serial_child_with_multiple_deps_resumes_from_integrated_head()
+    test_multi_dep_base_preintegration_uses_topo_order_not_literal_order()
     test_nested_parallel_composites_complete_under_timeout()
     test_default_max_depth_is_floor_when_env_unset()
     test_root_decompose_result_sets_max_depth_once()

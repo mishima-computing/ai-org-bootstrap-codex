@@ -158,11 +158,82 @@ class DecomposeResult:
 # --------------------------------------------------------------------------------------------------
 # Topological ordering + dependency waves over a node's siblings (depends_on within one level)
 # --------------------------------------------------------------------------------------------------
-def _topo_order(children: list[TaskNode]) -> list[TaskNode]:
+def _cycle_key(cycle: list[str]) -> tuple[str, ...]:
+    core = cycle[:-1]
+    rotations = [tuple(core[index:] + core[:index]) for index in range(len(core))]
+    return min(rotations)
+
+
+def _sibling_dependency_errors(children: list[TaskNode]) -> list[str]:
+    """Validate sibling-scoped ``depends_on`` edges, ported from scripts/frontier.py.
+
+    ``depends_on`` is a same-level planning primitive: any unknown id is malformed, including a valid
+    task id from another level of the tree.
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+    duplicate_ids: list[str] = []
+    ids: list[str] = []
+    for child in children:
+        ids.append(child.id)
+        if child.id in seen and child.id not in duplicate_ids:
+            duplicate_ids.append(child.id)
+        seen.add(child.id)
+
+    for task_id in duplicate_ids:
+        errors.append(f"duplicate sibling task ids are not allowed: {task_id}")
+
+    known_ids = set(ids)
+    graph: dict[str, list[str]] = {}
+    for child in children:
+        graph.setdefault(child.id, [])
+        for dependency in child.depends_on or ():
+            if dependency not in known_ids:
+                errors.append(f"task {child.id!r} depends_on unknown id {dependency!r}")
+            else:
+                graph[child.id].append(dependency)
+
+    state: dict[str, str] = {}
+    stack: list[str] = []
+    reported_cycles: set[tuple[str, ...]] = set()
+
+    def visit(task_id: str) -> None:
+        state[task_id] = "visiting"
+        stack.append(task_id)
+        for dependency in graph.get(task_id, ()):
+            dependency_state = state.get(dependency)
+            if dependency_state == "visiting":
+                start = stack.index(dependency)
+                cycle = stack[start:] + [dependency]
+                key = _cycle_key(cycle)
+                if key not in reported_cycles:
+                    reported_cycles.add(key)
+                    errors.append(f"dependency cycle: {' -> '.join(cycle)}")
+            elif dependency_state != "done":
+                visit(dependency)
+        stack.pop()
+        state[task_id] = "done"
+
+    for task_id in graph:
+        if state.get(task_id) is None:
+            visit(task_id)
+
+    return errors
+
+
+def _validate_sibling_dependencies(children: list[TaskNode]) -> None:
+    errors = _sibling_dependency_errors(children)
+    if errors:
+        raise TaskExecutorIntegrationError("; ".join(errors))
+
+
+def _topo_order(children: list[TaskNode], *, validate: bool = True) -> list[TaskNode]:
     """Order sibling children so a child comes after every (sibling) dependency it ``depends_on``.
-    Kahn's algorithm; ids outside the sibling set are ignored (a cross-level dep is not a sibling edge).
-    Stable in plan order for independent children. Dependency cycles fail closed instead of being emitted
-    as runnable work."""
+    Kahn's algorithm; stable in plan order for independent children. Full sibling sets are validated
+    fail-closed before ordering. Dependency subsets can opt out of validation so the sort only respects
+    edges among the selected dependencies."""
+    if validate:
+        _validate_sibling_dependencies(children)
     by_id = {child.id: child for child in children}
     indeg = {child.id: sum(1 for d in child.depends_on if d in by_id) for child in children}
     ready = [child for child in children if indeg[child.id] == 0]
@@ -191,13 +262,14 @@ def _topo_order(children: list[TaskNode]) -> list[TaskNode]:
 def _dependency_waves(children: list[TaskNode]) -> list[list[TaskNode]]:
     """Group sibling children into successive waves where each wave's nodes have all their sibling
     ``depends_on`` satisfied by an earlier wave. Independent children share a wave and run concurrently
-    (the PR1 within-batch frontier-leaf parallelism shape). A cycle fails closed before dispatch."""
-    by_id = {child.id for child in children}
+    (the PR1 within-batch frontier-leaf parallelism shape). Malformed ids and cycles fail closed before
+    dispatch."""
+    _validate_sibling_dependencies(children)
     done: set[str] = set()
     remaining = list(children)
     waves: list[list[TaskNode]] = []
     while remaining:
-        wave = [c for c in remaining if all(d in done or d not in by_id for d in c.depends_on)]
+        wave = [c for c in remaining if all(d in done for d in c.depends_on)]
         if not wave:
             unresolved = [child.id for child in remaining]
             raise TaskExecutorIntegrationError(
@@ -503,6 +575,7 @@ class TaskExecutor:
                 return self.execute_leaf(node)
             self._emit({"type": "leaf_split", "id": node.id, "n": len(node.subtasks),
                         "children": [child.id for child in node.subtasks]})
+        _validate_sibling_dependencies(node.subtasks)
         # 1. execute children recursively (this is where execute calls execute)
         child_commits = self._execute_children(node, base)
         # 2. integrate the children's commits in TOPOLOGICAL order on a branch off base
@@ -686,7 +759,13 @@ class TaskExecutor:
         metadata when it is an immutable ancestor of the current parent base; unrelated or mutable values
         fail closed before dispatch."""
         self._validate_inherited_child_base(base, child)
-        dep_commits = [results[d] for d in child.depends_on if d in results]
+        missing = [d for d in child.depends_on if d not in results]
+        if missing:
+            raise TaskExecutorIntegrationError(
+                f"task {child.id!r} dependency results are not available: {', '.join(missing)}")
+        dependency_nodes = [self._child_by_id(node.subtasks, d) for d in child.depends_on]
+        ordered_dependencies = _topo_order(dependency_nodes, validate=False)
+        dep_commits = [results[d.id] for d in ordered_dependencies]
         if not dep_commits:                                 # independent / parallel: no inheritance
             return self._validate_immutable_base(base, f"base for task {child.id}")
         if len(dep_commits) == 1:                           # serial: resume from the dep's output commit
