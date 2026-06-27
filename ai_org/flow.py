@@ -5,9 +5,10 @@
      (which dimensions resolved, which objections remain).
   3. decompose.decompose(rfc) -> a flat list of contributor-sized Tasks (independent baseline;
      the RFC owns the split, this only materializes it).
-  4. each Task -> contributor.contribute -> a PR. Independent, so contributors run in parallel
-     on their own branches (no graph).
-  5. [next, not built]: review each PR, then integrate the PRs upward to mainline.
+  4. each Task -> contributor.contribute -> a git BRANCH ref (the "PR" is the branch; git holds
+     the diff/commits/cover-letter). Independent, so contributors run in parallel on their own
+     branches (no graph, no PR object).
+  5. [next, not built]: review each branch, then integrate the branches upward to mainline.
 
 STUB: orchestration is real; roles/git go through the carrier seam (not wired), so running this
 raises at the first role call.
@@ -24,5 +25,5 @@ def run(rfc: RFC) -> dict:
         return {"status": review.status, "review": review}   # NAK -> stop (resolved/unresolved on review)
 
     tasks = _decompose.decompose(rfc)                        # flat, contributor-sized, independent
-    prs = [contributor.contribute(t) for t in tasks]        # each -> one PR (parallel, own branches)
-    return {"status": "prs-open", "prs": prs}               # next: review + integrate (not built)
+    branches = [contributor.contribute(t) for t in tasks]   # each -> a git branch ref (parallel)
+    return {"status": "branches-open", "branches": branches}  # next: review + integrate (not built)
