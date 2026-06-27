@@ -28,13 +28,13 @@ before tuning or removing it. There is no separate "revise" outcome: revision IS
 aufheben revises, the five re-critique); only convergence (OK) and non-convergence (NAK) are terminal.
 
 STUB: the loop/orchestration below is real; the reviewer and aufheben calls go through the
-carrier seam in ``llm.py`` (not wired yet), so running this raises until a carrier is connected.
+carrier seam in ``carrier.py`` (not wired yet), so running this raises until a carrier is connected.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import llm
+from . import carrier
 from .rfc import RFC
 
 
@@ -87,7 +87,7 @@ def _review_one(dim: Dimension, rfc: RFC, current_view: str | None) -> Objection
         + (f"\nLatest consolidated view to re-critique:\n{current_view}\n" if current_view else "")
         + "\nState any objection on YOUR concern only, or that you have none."
     )
-    resp = llm.invoke(llm.CarrierRequest(role=f"rfc-review:{dim.key}", prompt=prompt))
+    resp = carrier.invoke(carrier.CarrierRequest(role=f"rfc-review:{dim.key}", prompt=prompt))
     # TODO(parse): map resp.text -> Objection(has_objection, detail)
     raise NotImplementedError("rfc reviewer parse not wired (stub)")  # pragma: no cover
 
@@ -106,7 +106,7 @@ def _aufheben_consolidate(rfc: RFC, objections: list[Objection], current_view: s
         + (f"Current view:\n{current_view}\n" if current_view else "")
         + f"Objections this round:\n{joined}\n"
     )
-    resp = llm.invoke(llm.CarrierRequest(role="aufheben", prompt=prompt))
+    resp = carrier.invoke(carrier.CarrierRequest(role="aufheben", prompt=prompt))
     return resp.text
 
 
