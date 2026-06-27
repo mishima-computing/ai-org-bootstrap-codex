@@ -17,8 +17,8 @@ STUB: reads the RFC through the carrier and emits Tasks; raises until wired.
 """
 from __future__ import annotations
 
-from . import carrier
-from .rfc import RFC
+from .. import carrier
+from .receive import RFC
 from .task import Task
 
 

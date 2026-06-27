@@ -34,8 +34,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import carrier
-from .rfc import RFC
+from .. import carrier
+from .receive import RFC
 
 
 # --- the five review dimensions -------------------------------------------------------------

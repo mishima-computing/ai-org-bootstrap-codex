@@ -13,7 +13,7 @@ On fail -> back to the Contributor (the only one who can fix non-working code). 
 """
 from __future__ import annotations
 
-from .rfc import RFC
+from ..rfc.receive import RFC
 
 
 def check(rfc: RFC, branch: str) -> str:

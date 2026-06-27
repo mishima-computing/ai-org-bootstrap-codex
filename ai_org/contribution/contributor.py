@@ -8,8 +8,8 @@ STUB: the implementation runs through the carrier (in an isolated worktree); git
 """
 from __future__ import annotations
 
-from . import carrier
-from .task import Task
+from .. import carrier
+from ..rfc.task import Task
 
 
 def implement(task: Task) -> str:

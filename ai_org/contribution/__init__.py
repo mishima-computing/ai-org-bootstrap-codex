@@ -13,8 +13,8 @@ STUB: the loop shape is real; implement/check go through the carrier (not wired)
 from __future__ import annotations
 
 from . import acceptance, contributor
-from .rfc import RFC
-from .task import Task
+from ..rfc.receive import RFC
+from ..rfc.task import Task
 
 CAP = 5
 
