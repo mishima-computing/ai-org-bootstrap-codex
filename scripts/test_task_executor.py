@@ -15,6 +15,7 @@ Run:  python3 scripts/test_executer.py
 from __future__ import annotations
 
 import os
+import inspect
 import shutil
 import subprocess
 import sys
@@ -136,6 +137,13 @@ def _assert_only_main_worktree(repo):
     assert [str(Path(p).resolve()) for p in paths] == [str(Path(repo).resolve())], paths
 
 
+def _task_branch_refs(repo) -> list[str]:
+    out = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname:short)",
+                          "refs/heads/ai-org/tasks"],
+                         check=True, capture_output=True, text=True).stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def _make_child_commit(repo, base: str, rel: str, content: str) -> str:
     wt = Path(tempfile.mkdtemp(prefix="t-child-commit-"))
     _git(repo, "worktree", "add", "--detach", str(wt), base)
@@ -211,6 +219,37 @@ def test_real_git_integration():
         print("ok  real-git recursion: cherry-pick integration + commit-tree -> real commit-per-node")
 
 
+def test_parallel_independent_tasks_integrate_as_isolated_branches():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        started = {"A": threading.Event(), "B": threading.Event()}
+
+        def run_leaf(node):
+            started[node.id].set()
+            other = "B" if node.id == "A" else "A"
+            assert started[other].wait(5), f"{node.id} did not overlap with independent sibling"
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, f"{node.id}.txt", f"{node.id}\n"),
+                {"kind": "leaf"},
+            )
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=_git(repo, "rev-parse", "HEAD").strip(),
+                          objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, objective="do A"),
+            S.TaskNode("B", kind=S.LEAF, objective="do B"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=2)
+        result = task_executor.execute(root)
+
+        files_root = set(_git(repo, "ls-tree", "-r", "--name-only", result.commit_sha).split())
+        assert {"A.txt", "B.txt", "seed.txt"} <= files_root, files_root
+        refs = _task_branch_refs(repo)
+        assert any("/A-" in ref for ref in refs) and any("/B-" in ref for ref in refs), refs
+        _assert_only_main_worktree(repo)
+    print("ok  independent tasks run concurrently, publish isolated task branches, and integrate")
+
+
 # --------------------------------------------------------------------------------------------------
 # 3) commit threading: a SERIAL child resumes from its dependency's OUTPUT commit (recorded-base assert)
 #    — independent siblings still cut from the parent base. Uses recorded bases so disjoint files can't
@@ -253,6 +292,38 @@ def test_serial_child_inherits_dependency_output_commit():
     assert recorded_base["B"] != "BASE0", recorded_base
 
     print("ok  serial child resumes from its dependency's output commit; independent siblings use parent base")
+
+
+def test_dependency_forces_branch_base_and_integration_order():
+    ordered_leaves: list[str] = []
+    integrated_orders: list[list[str]] = []
+
+    def run_leaf(node):
+        ordered_leaves.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    def verify(_node, _integrated_head, _child_commits):
+        return {"verified": True}
+
+    def integrate(node, base, child_commits):
+        integrated_orders.append([c.task_id for c in child_commits])
+        return (f"integrated-head-{node.id}", None)
+
+    def commit_integration(node, base, integrated_head, integ_wt, evidence):
+        return f"integ-sha-{node.id}"
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("A", kind=S.LEAF, objective="do A"),
+        S.TaskNode("B", kind=S.LEAF, objective="do B", depends_on=["A"]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=verify, integrate=integrate,
+                      commit_integration=commit_integration, max_parallel=2)
+    result = task_executor.execute(root)
+
+    assert ordered_leaves == ["A", "B"], ordered_leaves
+    assert integrated_orders[-1] == ["A", "B"], integrated_orders
+    assert result.evidence["integrated_children"] == ["leaf-sha-A", "leaf-sha-B"], result.evidence
+    print("ok  dependency forces task branch base selection and controller integration order")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -436,6 +507,79 @@ def test_failing_composite_verify_blocks_integration_commit():
         assert "composite verification failed" in str(exc), exc
     assert committed == [], committed
     print("ok  failing composite verify blocks integration commit")
+
+
+def test_cherry_pick_conflict_is_detected_and_aborts_integration():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        Path(repo, "shared.txt").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "shared.txt")
+        _git(repo, "commit", "-q", "-m", "shared base")
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        def run_leaf(node):
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, "shared.txt", f"{node.id}\n"),
+                {"kind": "leaf"},
+            )
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, objective="write A"),
+            S.TaskNode("B", kind=S.LEAF, objective="write B"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=2)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("conflicting task branches must not be silently dropped")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "cherry-pick failed" in str(exc) and "B" in str(exc), exc
+        _assert_only_main_worktree(repo)
+    print("ok  textual cherry-pick conflict is detected, aborted, and reported")
+
+
+def test_semantic_conflict_is_caught_by_integration_verifier():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        def run_leaf(node):
+            rel = "a.flag" if node.id == "A" else "b.flag"
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, rel, "enabled\n"),
+                {"kind": "leaf"},
+            )
+
+        def verify(_node, integrated_head, _child_commits):
+            files = set(_git(repo, "ls-tree", "-r", "--name-only", integrated_head).split())
+            both_enabled = {"a.flag", "b.flag"} <= files
+            return {"verified": not both_enabled, "method": "integration-test",
+                    "finding": "a.flag and b.flag cannot both be enabled"}
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, objective="enable a"),
+            S.TaskNode("B", kind=S.LEAF, objective="enable b"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, verify=verify, max_parallel=2)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("semantic conflict must fail integration verification")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "composite verification failed" in str(exc), exc
+            assert "integration-test" in str(exc), exc
+        _assert_only_main_worktree(repo)
+    print("ok  semantic merge conflict is caught by integration verification")
+
+
+def test_executor_model_has_no_shared_lock_across_blocking_wait():
+    source = inspect.getsource(S.TaskExecutor)
+    assert "threading.Lock" not in source, source
+    assert "_trace_guard" not in source and "_resource_guard" not in source, source
+    assert "future.result()" in source, "the regression check must cover the blocking wait site"
+    assert "with self." not in source[source.find("future.result()") - 200:source.find("future.result()") + 80]
+    print("ok  executor has no shared lock guard around Future.result blocking waits")
 
 
 def test_default_leaf_exception_leaves_no_worktree():
@@ -637,12 +781,17 @@ def test_tree_forbidden_patterns_aggregate_through_composite_evidence():
 if __name__ == "__main__":
     test_true_recursion_commit_per_node()
     test_real_git_integration()
+    test_parallel_independent_tasks_integrate_as_isolated_branches()
     test_serial_child_inherits_dependency_output_commit()
+    test_dependency_forces_branch_base_and_integration_order()
     test_serial_child_with_multiple_deps_resumes_from_integrated_head()
     test_nested_parallel_composites_complete_under_timeout()
     test_default_max_depth_is_floor_when_env_unset()
     test_root_decompose_result_sets_max_depth_once()
     test_failing_composite_verify_blocks_integration_commit()
+    test_cherry_pick_conflict_is_detected_and_aborts_integration()
+    test_semantic_conflict_is_caught_by_integration_verifier()
+    test_executor_model_has_no_shared_lock_across_blocking_wait()
     test_default_leaf_exception_leaves_no_worktree()
     test_composite_verify_failure_leaves_no_integration_worktree()
     test_worktree_cleanup_is_idempotent()
