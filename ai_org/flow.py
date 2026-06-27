@@ -1,29 +1,39 @@
-"""Top-level flow (flat baseline) — RFC -> RFC review -> decompose -> contributors -> PRs.
+"""End-to-end flow (skeleton; every node is a thin stub — placed to confirm the FLOW, not built out).
 
-  1. RFC inserted (manual for now; it is the translated, implementable requirement).
-  2. rfc_review.run_rfc_review -> "direction-ok" or "nak". NAK stops here, returning the review
-     (which dimensions resolved, which objections remain).
-  3. decompose.decompose(rfc) -> a flat list of contributor-sized Tasks (independent baseline;
-     the RFC owns the split, this only materializes it).
-  4. each Task -> contributor.contribute -> a git BRANCH ref (the "PR" is the branch; git holds
-     the diff/commits/cover-letter). Independent, so contributors run in parallel on their own
-     branches (no graph, no PR object).
-  5. [next, not built]: review each branch, then integrate the branches upward to mainline.
+  1. RFC inserted (manual for now; the translated, implementable requirement).
+  2. rfc_review.run_rfc_review            -> "direction-ok" | "nak". NAK stops here.
+  3. decompose.decompose(rfc)             -> flat list of contributor-sized Tasks (RFC owns the split).
+  4. contributor.contribute(task)         -> a git BRANCH ref per task (parallel; the "PR" is the branch).
+  --- layer 1 (subsystem) ---
+  5. review.subsystem_review(branch)      -> verdict (PR diff + GitHub CI checks; revise loop). [stub]
+  6. integrate.accept_into_subsystem(...) -> subsystem tree ref. [stub]
+  --- layer 2 (mainline / Linus) ---
+  7. review.mainline_review(subsystem_ref)-> verdict (review the subsystem tree). [stub]
+  8. integrate.pull_into_mainline([...])  -> mainline ref. [stub]
 
-STUB: orchestration is real; roles/git go through the carrier seam (not wired), so running this
-raises at the first role call.
+Two tiers only (subsystem maintainer + Linus); deeper nesting added only if a subsystem needs it.
+Everything is a stub: orchestration shape is real; roles/git/GitHub go through the carrier seam.
 """
 from __future__ import annotations
 
-from . import contributor, decompose as _decompose, rfc_review
+from . import contributor, decompose as _decompose, integrate, review, rfc_review
 from .rfc import RFC
 
 
 def run(rfc: RFC) -> dict:
-    review = rfc_review.run_rfc_review(rfc)
-    if review.status != "direction-ok":
-        return {"status": review.status, "review": review}   # NAK -> stop (resolved/unresolved on review)
+    rev = rfc_review.run_rfc_review(rfc)
+    if rev.status != "direction-ok":
+        return {"status": rev.status, "review": rev}          # NAK -> stop
 
-    tasks = _decompose.decompose(rfc)                        # flat, contributor-sized, independent
-    branches = [contributor.contribute(t) for t in tasks]   # each -> a git branch ref (parallel)
-    return {"status": "branches-open", "branches": branches}  # next: review + integrate (not built)
+    tasks = _decompose.decompose(rfc)                          # flat, contributor-sized
+    branches = [contributor.contribute(t) for t in tasks]     # each -> a git branch (parallel)
+
+    # layer 1: review each PR + take it into the subsystem tree
+    accepted = [b for b in branches if review.subsystem_review(b) == "accept"]
+    subsystem_ref = integrate.accept_into_subsystem(accepted)  # (shape stub)
+
+    # layer 2: Linus reviews the subsystem tree + pulls into mainline
+    if review.mainline_review(subsystem_ref) != "accept":
+        return {"status": "mainline-rejected", "subsystem": subsystem_ref}
+    mainline = integrate.pull_into_mainline([subsystem_ref])
+    return {"status": "merged", "mainline": mainline}
