@@ -1,16 +1,21 @@
-"""Goal acceptance — close the loop back to the RFC (thin placeholder; not built out).
+"""Acceptance — independent goal-reachability check (part of a Contribution).
 
-"merged" is not "goal achieved". After the work is in mainline, verify the merged result actually
-satisfies the RFC's intent end-to-end (the RFC's acceptance criteria), then the RFC is done.
-Without this the loop never closes back to the requirement.
+A human contributor would self-check; an LLM contributor cannot be trusted to (all tests green is NOT
+the same as "the user reached the goal"). So Acceptance is a SEPARATE, INDEPENDENT actor inside the
+Contribution unit: given the RFC (the user goal to reach) and the implemented branch, it verifies the
+user can ACTUALLY reach the goal end-to-end -- not that endpoints return 200.
 
-STUB: placeholder only.
+Method: a two-agent static walkthrough -- a stubborn user persona keeps trying until truly blocked,
+while a code-grounded "app" traces the real source (file:line) and confesses gaps / false successes,
+without launching the app. Produces a reachability verdict + where intent meets broken reality.
+
+On fail -> back to the Contributor (the only one who can fix non-working code). STUB.
 """
 from __future__ import annotations
 
 from .rfc import RFC
 
 
-def goal_met(rfc: RFC, mainline_ref: str) -> bool:
-    """Does the merged mainline actually satisfy the RFC's intent? STUB."""
-    raise NotImplementedError("goal_met placeholder")  # pragma: no cover
+def check(rfc: RFC, branch: str) -> str:
+    """Independent goal-reachability check of a branch. "ok" | "fail" (-> Contributor). STUB."""
+    raise NotImplementedError("acceptance.check placeholder")  # pragma: no cover

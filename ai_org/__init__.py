@@ -2,22 +2,20 @@
 
 The prior engine (all executor generations + its ADRs) is under ../archive/ and is NOT reused.
 
-Design premise: Git was built for a distributed OSS community (Linux). We model the system on
-the *people* that appear in such a community rather than on invented abstractions:
+Roles (named so each is clear; the only code author/fixer is the Contributor — everything else reviews):
 
-  - Contributor   — does one scoped piece of work on its own branch, submits a patch for review.
-  - Reviewer(s)   — review the direction (RFC) and later the patch.
-  - (maintainer-role — to be named later; owns an area, integrates upward. NOT called "maintainer"
-                       in code, by request — like "Linon" for the reviewer.)
-  - Top integrator — pulls subsystem trees into mainline (Linus).
+  RFC Creation                  the apex: the translated, implementable requirement (manual for now).
+  RFC reviewers (5) + Aufheben  judge the RFC's direction (need/approach/compat/scope/maintenance);
+                                Aufheben consolidates objections into a revised RFC; loop to convergence.
+  decompose                     materialize the converged RFC's split into Contributor-sized Tasks.
+  Contribution { Implement + Acceptance }
+                                Contributor implements (the sole code author/fixer); Acceptance
+                                independently checks the user can reach the goal; internal revise loop.
+  Subsystem_tree_maintainer     layer 1: review a Contribution + (on accept) integrate to the subsystem tree.
+  Mainline_maintainer (Linus)   layer 2: review the subsystem tree + (on accept) pull to mainline.
 
-Flow being built, top-down:
+Every fail/reject routes back to the Contributor. Two integration tiers (subsystem + mainline); deeper
+nesting only if a subsystem needs it. LLM-backed roles go through the carrier seam (``carrier.py``).
 
-  RFC (apex; for now inserted manually)
-    -> RFC review: 5 independent reviewers debate the DIRECTION, an (archived) aufheben
-       consolidates, the 5 re-critique, looping until no unresolved objection (no cap)
-    -> [next: a real patch series written by Contributor(s)]  <-- not built yet
-
-Everything here is currently a STUB: orchestration is real Python; LLM-backed roles go through
-the carrier seam in ``llm.py`` (subprocess to a coding-agent CLI), which is not wired yet.
+Everything here is currently a STUB: orchestration shape is real; the carrier is not wired.
 """

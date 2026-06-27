@@ -1,51 +1,41 @@
-"""End-to-end flow (skeleton; every node is a thin stub — placed to confirm the FLOW, not built out).
+"""End-to-end flow (skeleton; thin stubs). Only the Contributor writes/fixes code; all else reviews.
 
-  1. RFC inserted (manual for now; the translated, implementable requirement).
-  2. rfc_review.run_rfc_review            -> "direction-ok" | "nak". NAK stops here.
-  3. decompose.decompose(rfc)             -> flat list of contributor-sized Tasks (RFC owns the split).
-  4. contributor.contribute(task)         -> a git BRANCH ref per task (parallel; the "PR" is the branch).
-  --- layer 1 (subsystem) ---
-  5. review.subsystem_review(branch)      -> bounded revise loop (PR diff + GitHub CI checks; reject ->
-                                            contributor v2 -> re-review; terminal reject only after CAP). [stub]
-  6. integrate.accept_into_subsystem(...) -> subsystem tree ref. [stub]
-  --- layer 2 (mainline / Linus) ---
-  7. review.mainline_review(subsystem_ref)-> bounded revise loop (reject -> subsystem fixes, maybe pushing
-                                            down to contributors -> re-review; terminal reject only after CAP). [stub]
-  8. integrate.pull_into_mainline([...])  -> mainline ref. [stub]
+  1. RFC Creation                  (manual for now; the translated, implementable requirement).
+  2. RFC review                    RFC reviewers (5) + Aufheben (consolidates); direction-ok | nak. NAK stops.
+  3. decompose                     -> flat Contributor-sized Tasks (RFC owns the split).
+  4. Contribution { Implement + Acceptance }
+                                   Contributor implements a branch per Task; Acceptance independently
+                                   checks goal-reachability; internal revise loop (fail -> Contributor);
+                                   only an accepted branch leaves. Tasks are independent -> parallel.
+  5. Subsystem_tree_maintainer     review + (on accept) integrate into the subsystem tree. reject -> Contributor.
+  6. Mainline_maintainer (Linus)   review the subsystem tree (incl. RFC met?) + (on accept) pull to mainline.
+                                   reject -> Contributor.
 
-A reject at any tier is NOT terminal: it sends the work back downstream to be fixed and re-reviewed, up to
-CAP. Only a cap-exhausted (or fundamental NAK) reject is terminal and surfaces here.
-
-Two tiers only (subsystem maintainer + Linus); deeper nesting added only if a subsystem needs it.
-Everything is a stub: orchestration shape is real; roles/git/GitHub go through the carrier seam.
+Every fail/reject routes BACK to the Contributor (the sole code-fixer), revise, re-check (bounded CAP).
+A maintainer's act is "review and, if accepted, integrate" (one act). Stubs only.
 """
 from __future__ import annotations
 
-from . import acceptance, contributor, decompose as _decompose, integrate, review, rfc_review
+from . import (
+    contribution,
+    decompose as _decompose,
+    mainline_maintainer,
+    rfc_review,
+    subsystem_tree_maintainer,
+)
 from .rfc import RFC
 
 
 def run(rfc: RFC) -> dict:
     rev = rfc_review.run_rfc_review(rfc)
     if rev.status != "direction-ok":
-        return {"status": rev.status, "review": rev}          # NAK -> stop
+        return {"status": rev.status, "review": rev}              # NAK -> stop
 
-    tasks = _decompose.decompose(rfc)                          # flat, contributor-sized
-    branches = [contributor.contribute(t) for t in tasks]     # each -> a git branch (parallel)
+    tasks = _decompose.decompose(rfc)                             # flat, Contributor-sized
+    subsystem_refs = []
+    for t in tasks:
+        branch = contribution.make(rfc, t)                       # Implement + Acceptance -> accepted branch
+        subsystem_refs.append(subsystem_tree_maintainer.review_and_integrate(branch))  # reject -> Contributor
 
-    # layer 1: each review runs its OWN bounded revise loop; "reject" here = terminal after CAP
-    verdicts = {b: review.subsystem_review(b) for b in branches}
-    if any(v != "accept" for v in verdicts.values()):
-        return {"status": "subsystem-rejected",
-                "rejected": [b for b, v in verdicts.items() if v != "accept"]}
-    subsystem_ref = integrate.accept_into_subsystem(list(verdicts))
-
-    # layer 2 (Linus): bounded revise loop too; "reject" = terminal after CAP
-    if review.mainline_review(subsystem_ref) != "accept":
-        return {"status": "mainline-rejected", "subsystem": subsystem_ref}
-    mainline = integrate.pull_into_mainline([subsystem_ref])
-
-    # close the loop: "merged" is not "goal achieved" — verify the RFC's intent is actually met
-    if not acceptance.goal_met(rfc, mainline):
-        return {"status": "merged-but-goal-unmet", "mainline": mainline}
+    mainline = mainline_maintainer.review_and_integrate(subsystem_refs)  # Linus; reject -> Contributor
     return {"status": "done", "mainline": mainline}
