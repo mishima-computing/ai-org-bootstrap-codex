@@ -21,7 +21,7 @@ Everything is a stub: orchestration shape is real; roles/git/GitHub go through t
 """
 from __future__ import annotations
 
-from . import contributor, decompose as _decompose, integrate, review, rfc_review
+from . import acceptance, contributor, decompose as _decompose, integrate, review, rfc_review
 from .rfc import RFC
 
 
@@ -44,4 +44,8 @@ def run(rfc: RFC) -> dict:
     if review.mainline_review(subsystem_ref) != "accept":
         return {"status": "mainline-rejected", "subsystem": subsystem_ref}
     mainline = integrate.pull_into_mainline([subsystem_ref])
-    return {"status": "merged", "mainline": mainline}
+
+    # close the loop: "merged" is not "goal achieved" — verify the RFC's intent is actually met
+    if not acceptance.goal_met(rfc, mainline):
+        return {"status": "merged-but-goal-unmet", "mainline": mainline}
+    return {"status": "done", "mainline": mainline}
