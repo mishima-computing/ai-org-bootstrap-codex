@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -1047,6 +1048,63 @@ def _transform_route(repo: Path, objective: str) -> dict:
                 "reason": f"classifier error: {exc!r}"}
 
 
+def _diff_text(repo: Path) -> str:
+    if (repo / ".git").exists():
+        return subprocess.run(["git", "-C", str(repo), "diff", "--", "."], capture_output=True, text=True,
+                              check=False).stdout
+    rows = []
+    for path in sorted(p for p in repo.rglob("*") if p.is_file() and ".agent-runs" not in p.parts):
+        try:
+            rows.append(f"--- {path.relative_to(repo).as_posix()}\n{path.read_text(encoding='utf-8', errors='replace')}")
+        except OSError:
+            pass
+    return "\n".join(rows)
+
+
+def _shadow_transform_probe(repo: Path, objective: str, run_id: str, verdict: dict,
+                            *, llm_diff: str | None = None) -> dict:
+    """Run a new transform kind on a copy and compare to the live LLM diff when available.
+
+    Shadow telemetry never blocks. It exists to collect the same promotion evidence discipline as the
+    deterministic gates: tool-vs-LLM diff equality/coverage before any new kind becomes a blocking route.
+    """
+    tmp_parent = Path(tempfile.mkdtemp(prefix="transform-shadow-"))
+    shadow_repo = tmp_parent / "repo"
+    try:
+        ignore = shutil.ignore_patterns(".agent-runs", ".git/worktrees")
+        shutil.copytree(repo, shadow_repo, ignore=ignore)
+        tool_result = deterministic_transform_tools.apply_tool(verdict.get("tool_id"),
+                                                               shadow_repo, verdict.get("params") or {})
+        tool_diff = _diff_text(shadow_repo)
+        comparison = {
+            "source": "deterministic-transform-tool",
+            "type": "transform_shadow_compare",
+            "run_id": run_id,
+            "objective": objective,
+            "tool_id": verdict.get("tool_id"),
+            "transform_kind": verdict.get("transform_kind"),
+            "tool_self_verify_passed": bool((tool_result.get("self_verify") or {}).get("passed")),
+            "tool_escalated": bool(tool_result.get("escalate")),
+            "tool_diff_sha256": hashlib.sha256(tool_diff.encode("utf-8")).hexdigest(),
+            "llm_diff_sha256": hashlib.sha256((llm_diff or "").encode("utf-8")).hexdigest() if llm_diff is not None else None,
+            "diffs_match": (tool_diff == llm_diff) if llm_diff is not None else None,
+            "promotion_state": "shadow",
+            "ts": _iso8601_utc(),
+        }
+        if llm_diff is not None and tool_diff != llm_diff:
+            comparison["divergence"] = "tool and LLM diffs differ"
+        _stream_append(repo, comparison)
+        return comparison
+    except Exception as exc:  # noqa: BLE001 - shadow must not fail the live route
+        event = {"source": "deterministic-transform-tool", "type": "transform_shadow_compare",
+                 "run_id": run_id, "tool_id": verdict.get("tool_id"), "promotion_state": "shadow",
+                 "error": repr(exc), "ts": _iso8601_utc()}
+        _stream_append(repo, event)
+        return event
+    finally:
+        shutil.rmtree(tmp_parent, ignore_errors=True)
+
+
 def _tool_attention_payload(tool_result: dict) -> dict:
     return {
         "role_id": "deterministic-transform-tool",
@@ -1057,6 +1115,45 @@ def _tool_attention_payload(tool_result: dict) -> dict:
         "residual_unverifiable": list(tool_result.get("residual_unverifiable") or []),
         "note": "self_verify is consistency evidence only; Linon must independently review this tool leaf",
     }
+
+
+def _test_oracle_covering_files(repo: Path, files: list[str]) -> dict:
+    """Best-effort static oracle detector for the always-Linon exception.
+
+    The substitute must be pre-existing and unmodified by the tool. This function does not treat idempotence
+    or self_verify as an oracle; it only accepts repo test files that import or mention the touched module.
+    """
+    touched = sorted({f for f in files if f and not _is_oracle_rel(f)})
+    if not touched:
+        return {"covered": False, "tests": [], "reason": "only test/oracle files touched"}
+    tests = []
+    for path in repo.rglob("*.py"):
+        rel = path.relative_to(repo).as_posix()
+        if not _is_oracle_rel(rel):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if rel in files:
+            continue
+        for changed in touched:
+            module = changed[:-3].replace("/", ".") if changed.endswith(".py") else changed.replace("/", ".")
+            stem = Path(changed).stem
+            if module in text or stem in text:
+                tests.append(rel)
+                break
+    return {
+        "covered": bool(tests) and all(Path(f).suffix == ".py" for f in touched),
+        "tests": sorted(dict.fromkeys(tests)),
+        "reason": "pre-existing unmodified test files mention touched modules" if tests else "no relevant independent repo test found",
+    }
+
+
+def _is_oracle_rel(rel: str) -> bool:
+    p = rel.replace("\\", "/")
+    name = Path(p).name
+    return name.startswith("test_") or "/test_" in p or p.startswith("tests/") or "/tests/" in p
 
 
 def _finding_blocks_convergence(finding: dict) -> bool:
@@ -1708,15 +1805,16 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
     fatal_ok: dict[str, bool] = {}
 
     tool_started = _utc_now()
-    tool_result = deterministic_transform_tools.apply(repo, verdict.get("params") or {})
+    tool_id = verdict.get("tool_id") or "rename-codemod"
+    tool_result = deterministic_transform_tools.apply_tool(tool_id, repo, verdict.get("params") or {})
     tool_finished = _utc_now()
-    stages.append(_tool_stage(repo, f"{run_id}-rename-codemod", objective, verdict, tool_result,
+    stages.append(_tool_stage(repo, f"{run_id}-{tool_id}", objective, verdict, tool_result,
                               tool_started, tool_finished))
     results["deterministic-transform-tool"] = _tool_attention_payload(tool_result)
     results[AUFHEBEN_ROLE] = _tool_contract(objective, tool_result)
-    summary["rename-codemod"] = not bool(tool_result.get("escalate"))
-    required_ok["rename-codemod"] = not bool(tool_result.get("escalate"))
-    fatal_ok["rename-codemod"] = not bool(tool_result.get("escalate"))
+    summary[tool_id] = not bool(tool_result.get("escalate"))
+    required_ok[tool_id] = not bool(tool_result.get("escalate"))
+    fatal_ok[tool_id] = not bool(tool_result.get("escalate"))
     protected_snapshot = _protected_line_snapshot(repo, tool_result.get("excluded") or [])
 
     _stream_append(repo, {"source": "deterministic-transform-tool", "type": "transform_routed",
@@ -1727,7 +1825,7 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
                           "ts": _iso8601_utc()})
     if tool_result.get("escalate"):
         findings = [{
-            "source": "rename-codemod",
+            "source": tool_id,
             "check": "tool_escalate",
             "severity": "critical",
             "passed": False,
@@ -1749,8 +1847,9 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
     cheap_findings, gate_ctx, _blocked_by = _cheap_gate_findings(repo, results, run_id, preflight_report,
                                                                  runner=runner)
     findings: list[dict] = list(cheap_findings)
+    oracle = _test_oracle_covering_files(repo, list(tool_result.get("files_changed") or []))
 
-    if "linon" in entries:
+    if "linon" in entries and not oracle.get("covered"):
         linon_inputs = {"deterministic-transform-tool": _tool_attention_payload(tool_result)}
         entry = entries["linon"]
         stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entry, objective, linon_inputs,
@@ -1768,6 +1867,14 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
         if isinstance(results.get("linon"), dict):
             results["linon"]["findings"] = tagged
         findings.extend(tagged)
+    elif oracle.get("covered"):
+        required_ok["independent-oracle"] = True
+        summary["independent-oracle"] = True
+        results["independent-oracle"] = oracle
+        _stream_append(repo, {"source": "deterministic-transform-tool", "type": "linon_substituted",
+                              "run_id": run_id, "tool_id": tool_id, "oracle": oracle,
+                              "rule": "pre-existing tool-unmodified relevant repo tests cover touched files",
+                              "ts": _iso8601_utc()})
 
     findings.extend(_protected_line_findings(repo, protected_snapshot))
     initial_finished_at = _utc_now()
@@ -1812,7 +1919,8 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
         cheap_findings, gate_ctx, _blocked_by = _cheap_gate_findings(repo, results, repair_run_id,
                                                                      repair_preflight, runner=runner)
         findings = list(cheap_findings) + _protected_line_findings(repo, protected_snapshot)
-        if "linon" in entries:
+        oracle = _test_oracle_covering_files(repo, list(tool_result.get("files_changed") or []))
+        if "linon" in entries and not oracle.get("covered"):
             linon_inputs = {"implementer": results.get("implementer", {}),
                             "deterministic_transform_tool": _tool_attention_payload(tool_result)}
             stage_ok, result, report_dict, stage = _execute_stage(repo, "linon", entries["linon"],
@@ -1829,11 +1937,16 @@ def _run_transform_pipeline(repo: Path, objective: str, run_id: str, verdict: di
             if isinstance(results.get("linon"), dict):
                 results["linon"]["findings"] = tagged
             findings.extend(tagged)
+        elif oracle.get("covered"):
+            required_ok["independent-oracle"] = True
+            summary["independent-oracle"] = True
+            results["independent-oracle"] = oracle
         repair_finished_at = _utc_now()
         iterations.append(_iteration_record("repair", repair_iterations, repair_started_at, repair_finished_at,
                                             repair_stages, len(findings)))
 
-    converged = bool(required_ok.get("linon")) and not findings
+    review_or_oracle_ok = bool(required_ok.get("linon") or required_ok.get("independent-oracle"))
+    converged = review_or_oracle_ok and not findings
     unverified_gate_findings = _unverified_gate_findings(gate_ctx)
     verification_status = "verified" if converged and not unverified_gate_findings else (
         "unverified" if converged else "failed")
@@ -1872,7 +1985,11 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
     verifiers = set(_verifier_roles(entries))
     ordered = _topological_roles(entries, verifiers)
     transform_verdict = _transform_route(repo, objective)
-    if transform_verdict.get("route") == "tool" and transform_verdict.get("tool_id") == "rename-codemod":
+    shadow_transform_verdict = None
+    if transform_verdict.get("route") == "tool" and transform_verdict.get("mode") == "shadow":
+        shadow_transform_verdict = dict(transform_verdict)
+        _shadow_transform_probe(repo, objective, run_id, shadow_transform_verdict)
+    elif transform_verdict.get("route") == "tool" and transform_verdict.get("mode", "block") == "block":
         return _run_transform_pipeline(repo, objective, run_id, transform_verdict, entries, cache=cache,
                                        max_repair_iterations=max_repair_iterations, runner=runner,
                                        goal_context=goal_context)
@@ -2128,6 +2245,10 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
         "unverified" if converged else "failed")
     manifest = _provenance_manifest(run_started_at, _utc_now(), stages, iterations)
     manifest_path = _write_manifest(repo, run_id, manifest)
+    shadow_transform = None
+    if shadow_transform_verdict:
+        shadow_transform = _shadow_transform_probe(repo, objective, run_id, shadow_transform_verdict,
+                                                   llm_diff=_diff_text(repo))
     return {"summary": summary, "required_ok": required_ok, "order": list(summary),
             "fatal_ok": fatal_ok,
             "reports": reports, "results": results, "manifest": manifest,
@@ -2137,6 +2258,7 @@ def run_pipeline(repo, objective: str, run_id: str, *, cache: bool = True,
             "repair_iterations": repair_iterations,
             "max_repair_iterations": max_repair_iterations,
             "linon_findings_count": len(findings),
+            "shadow_transform": shadow_transform,
             "sessions": sessions}   # role -> codex session id (for the org to record per leaf×role, audit)
 
 

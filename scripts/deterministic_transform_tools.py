@@ -7,7 +7,10 @@ tool leaf.
 """
 from __future__ import annotations
 
+import ast
 import io
+import shutil
+import subprocess
 import re
 import sys
 import tokenize
@@ -135,12 +138,280 @@ class RenameCodemod:
         }
 
 
+@dataclass(frozen=True)
+class MoveParams:
+    source: str
+    destination: str
+    objective: str = ""
+
+
+class MoveRelocateTool:
+    id = "move-relocate"
+
+    def can_handle(self, repo: str | Path, params: dict | None) -> bool:
+        parsed = _coerce_move_params(params)
+        if parsed is None:
+            return False
+        root = Path(repo)
+        src = root / parsed.source
+        dst = root / parsed.destination
+        return src.is_file() and not dst.exists() and src.suffix == ".py" and dst.suffix == ".py"
+
+    def apply(self, repo: str | Path, params: dict | None) -> dict:
+        parsed = _coerce_move_params(params)
+        if parsed is None:
+            return _tool_escalate(self.id, "move parameters are missing or ambiguous")
+        root = Path(repo).resolve()
+        if not self.can_handle(root, asdict(parsed)):
+            return _tool_escalate(self.id, "move source/destination is not a supported Python file move")
+
+        old_module = _module_name(parsed.source)
+        new_module = _module_name(parsed.destination)
+        src = root / parsed.source
+        dst = root / parsed.destination
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dst)
+
+        files_changed = {parsed.source, parsed.destination}
+        residual: list[dict] = []
+        for path in _iter_text_files(root):
+            if path.suffix != ".py":
+                continue
+            rel = path.relative_to(root).as_posix()
+            before = path.read_text(encoding="utf-8", errors="replace")
+            after = _rewrite_python_module_refs(before, old_module, new_module)
+            if after != before:
+                path.write_text(after, encoding="utf-8")
+                files_changed.add(rel)
+                if _is_oracle_path(rel):
+                    residual.append({"file": rel, "reason": "tool edited a test/oracle file; mechanical rewrite is not an independent oracle"})
+                if _changed_string_or_comment(before, after, {old_module: new_module}):
+                    residual.append({"file": rel, "reason": "string/comment marker changed; AST binding cannot prove semantic intent"})
+
+        stale = _stale_text_hits(root, old_module, files=files_changed)
+        return _tool_result(
+            self.id,
+            files_changed=sorted(files_changed),
+            scope=sorted(files_changed),
+            excluded=[],
+            checks=["moved Python file exists at destination", "import/reference closure contains no stale old module"],
+            stale=stale,
+            residual=residual,
+            escalate_reason="stale move references remain after relocate" if stale else None,
+        )
+
+
+@dataclass(frozen=True)
+class ImportHygieneParams:
+    files: tuple[str, ...] = ()
+    add_missing: tuple[dict, ...] = ()
+    objective: str = ""
+
+
+class ImportHygieneTool:
+    id = "import-hygiene"
+
+    def can_handle(self, repo: str | Path, params: dict | None) -> bool:
+        parsed = _coerce_import_params(params)
+        if parsed is None:
+            return False
+        files = _target_python_files(Path(repo), parsed.files)
+        return bool(files)
+
+    def apply(self, repo: str | Path, params: dict | None) -> dict:
+        parsed = _coerce_import_params(params)
+        if parsed is None:
+            return _tool_escalate(self.id, "import hygiene parameters are missing or ambiguous")
+        root = Path(repo).resolve()
+        files_changed: list[str] = []
+        residual: list[dict] = []
+        for path in _target_python_files(root, parsed.files):
+            rel = path.relative_to(root).as_posix()
+            before = path.read_text(encoding="utf-8", errors="replace")
+            after, file_residual = _rewrite_imports(before, parsed.add_missing)
+            if after != before:
+                path.write_text(after, encoding="utf-8")
+                files_changed.append(rel)
+                residual.extend({"file": rel, **item} for item in file_residual)
+                if _is_oracle_path(rel):
+                    residual.append({"file": rel, "reason": "tool edited a test/oracle file; mechanical rewrite is not an independent oracle"})
+        stale = []
+        for rel in files_changed:
+            ok, detail = _python_parses(root / rel)
+            if not ok:
+                stale.append({"file": rel, "token": "syntax", "detail": detail})
+        return _tool_result(
+            self.id,
+            files_changed=sorted(files_changed),
+            scope=sorted(files_changed),
+            excluded=[],
+            checks=["imports sorted", "unused import aliases removed", "requested missing imports added", "Python AST parses"],
+            stale=stale,
+            residual=residual,
+            escalate_reason="import hygiene produced a file that does not parse" if stale else None,
+        )
+
+
+@dataclass(frozen=True)
+class FormatLintParams:
+    files: tuple[str, ...] = ()
+    objective: str = ""
+
+
+class FormatLintFixTool:
+    id = "format-lint-fix"
+
+    def can_handle(self, repo: str | Path, params: dict | None) -> bool:
+        parsed = _coerce_format_params(params)
+        if parsed is None:
+            return False
+        return bool(_target_format_files(Path(repo), parsed.files))
+
+    def apply(self, repo: str | Path, params: dict | None) -> dict:
+        parsed = _coerce_format_params(params)
+        if parsed is None:
+            return _tool_escalate(self.id, "format/lint parameters are missing or ambiguous")
+        root = Path(repo).resolve()
+        before = _snapshot_files(root)
+        commands = _format_commands(root, parsed.files)
+        command_reports: list[dict] = []
+        for cmd in commands:
+            proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+            command_reports.append({
+                "cmd": cmd,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:],
+                "stderr": proc.stderr[-2000:],
+            })
+        if not commands:
+            _fallback_format(root, parsed.files)
+            command_reports.append({"cmd": ["fallback-format"], "returncode": 0, "stdout": "", "stderr": ""})
+        after = _snapshot_files(root)
+        files_changed = sorted(rel for rel, text in after.items() if before.get(rel) != text)
+        failed = [r for r in command_reports if r["returncode"] != 0]
+        residual = [
+            {"file": rel, "reason": "tool edited a test/oracle file; mechanical rewrite is not an independent oracle"}
+            for rel in files_changed if _is_oracle_path(rel)
+        ]
+        return {
+            "tool_id": self.id,
+            "files_changed": files_changed,
+            "scope": sorted(set(files_changed) | set(_target_format_relpaths(root, parsed.files))),
+            "excluded": [],
+            "self_verify": {
+                "passed": not failed,
+                "checks": ["repo formatter/linter fixer exited zero" if commands else "fallback whitespace formatter ran"],
+                "command_reports": command_reports,
+                "idempotence_is_not_linon_substitute": True,
+            },
+            "escalate": [] if not failed else [{"reason": "formatter/linter fixer failed", "commands": failed}],
+            "residual_unverifiable": _dedupe_residual(residual),
+        }
+
+
+@dataclass(frozen=True)
+class SignatureChangeParams:
+    function: str
+    new_signature: str
+    files: tuple[str, ...] = ()
+    objective: str = ""
+
+
+class SignatureChangeTool:
+    id = "signature-change"
+
+    def can_handle(self, repo: str | Path, params: dict | None) -> bool:
+        parsed = _coerce_signature_params(params)
+        if parsed is None:
+            return False
+        return any(_find_function_signature(path, parsed.function) for path in _target_python_files(Path(repo), parsed.files))
+
+    def apply(self, repo: str | Path, params: dict | None) -> dict:
+        parsed = _coerce_signature_params(params)
+        if parsed is None:
+            return _tool_escalate(self.id, "signature-change parameters are missing or ambiguous")
+        root = Path(repo).resolve()
+        old_args: list[str] | None = None
+        new_args = _signature_arg_names(parsed.new_signature)
+        if not new_args:
+            return _tool_escalate(self.id, "new_signature does not parse")
+        files_changed: list[str] = []
+        residual: list[dict] = []
+        for path in _target_python_files(root, parsed.files):
+            found = _find_function_signature(path, parsed.function)
+            if found and old_args is None:
+                old_args = found["args"]
+        if old_args is None:
+            return _tool_escalate(self.id, f"function {parsed.function!r} was not found")
+        keyword_map = {old: new for old, new in zip(old_args, new_args) if old != new}
+        for path in _target_python_files(root, parsed.files):
+            rel = path.relative_to(root).as_posix()
+            before = path.read_text(encoding="utf-8", errors="replace")
+            after = _rewrite_signature_text(before, parsed.function, parsed.new_signature, keyword_map)
+            if after != before:
+                path.write_text(after, encoding="utf-8")
+                files_changed.append(rel)
+                if _is_oracle_path(rel):
+                    residual.append({"file": rel, "reason": "tool edited a test/oracle file; mechanical rewrite is not an independent oracle"})
+        stale = []
+        for rel in files_changed:
+            ok, detail = _python_parses(root / rel)
+            if not ok:
+                stale.append({"file": rel, "token": "syntax", "detail": detail})
+        return _tool_result(
+            self.id,
+            files_changed=sorted(files_changed),
+            scope=sorted(files_changed),
+            excluded=[],
+            checks=["function definition signature replaced", "keyword call sites updated", "Python AST parses"],
+            stale=stale,
+            residual=residual,
+            escalate_reason="signature change produced a file that does not parse" if stale else None,
+        )
+
+
+TOOLS = {
+    RenameCodemod.id: RenameCodemod(),
+    MoveRelocateTool.id: MoveRelocateTool(),
+    ImportHygieneTool.id: ImportHygieneTool(),
+    FormatLintFixTool.id: FormatLintFixTool(),
+    SignatureChangeTool.id: SignatureChangeTool(),
+}
+
+
+def tool_ids() -> list[str]:
+    return sorted(TOOLS)
+
+
+def can_handle_tool(tool_id: str, repo: str | Path, params: dict | None) -> bool:
+    tool = TOOLS.get(tool_id)
+    return bool(tool and tool.can_handle(repo, params))
+
+
+def apply_tool(tool_id: str, repo: str | Path, params: dict | None) -> dict:
+    tool = TOOLS.get(tool_id)
+    if tool is None:
+        return _tool_escalate(tool_id or "deterministic-transform-tool", "unknown deterministic transform tool")
+    return tool.apply(repo, params)
+
+
 def can_handle(repo: str | Path, params: dict | None) -> bool:
-    return RenameCodemod().can_handle(repo, params)
+    tool_id = _tool_id_from_params(params) or RenameCodemod.id
+    return can_handle_tool(tool_id, repo, params)
 
 
 def apply(repo: str | Path, params: dict | None) -> dict:  # noqa: A001 - direct-call tool convention
-    return RenameCodemod().apply(repo, params)
+    tool_id = _tool_id_from_params(params) or RenameCodemod.id
+    return apply_tool(tool_id, repo, params)
+
+
+def _tool_id_from_params(params: dict | None) -> str | None:
+    if not isinstance(params, dict):
+        return None
+    value = params.get("tool_id") or params.get("kind")
+    if isinstance(value, str) and value in TOOLS:
+        return value
+    return None
 
 
 def _coerce_params(params: dict | None) -> RenameParams | None:
@@ -159,6 +430,60 @@ def _coerce_params(params: dict | None) -> RenameParams | None:
     return RenameParams(old=old, new=new, replacements=clean, objective=str(params.get("objective") or ""))
 
 
+def _coerce_move_params(params: dict | None) -> MoveParams | None:
+    if not isinstance(params, dict):
+        return None
+    source = str(params.get("source") or params.get("old_path") or "").strip().strip("`'\"")
+    destination = str(params.get("destination") or params.get("new_path") or "").strip().strip("`'\"")
+    if not source or not destination or source == destination or _unsafe_rel(source) or _unsafe_rel(destination):
+        return None
+    return MoveParams(source=source, destination=destination, objective=str(params.get("objective") or ""))
+
+
+def _coerce_import_params(params: dict | None) -> ImportHygieneParams | None:
+    if not isinstance(params, dict):
+        return None
+    files = tuple(_clean_rel_list(params.get("files") or params.get("scope") or []))
+    add_missing = params.get("add_missing") or []
+    if isinstance(add_missing, dict):
+        add_missing = [add_missing]
+    if not isinstance(add_missing, list):
+        return None
+    clean_missing = tuple(dict(item) for item in add_missing if isinstance(item, dict) and item.get("module"))
+    return ImportHygieneParams(files=files, add_missing=clean_missing, objective=str(params.get("objective") or ""))
+
+
+def _coerce_format_params(params: dict | None) -> FormatLintParams | None:
+    if not isinstance(params, dict):
+        return None
+    files = tuple(_clean_rel_list(params.get("files") or params.get("scope") or []))
+    return FormatLintParams(files=files, objective=str(params.get("objective") or ""))
+
+
+def _coerce_signature_params(params: dict | None) -> SignatureChangeParams | None:
+    if not isinstance(params, dict):
+        return None
+    function = str(params.get("function") or params.get("symbol") or "").strip()
+    new_signature = str(params.get("new_signature") or "").strip()
+    files = tuple(_clean_rel_list(params.get("files") or params.get("scope") or []))
+    if not function or not new_signature:
+        return None
+    return SignatureChangeParams(function=function, new_signature=new_signature, files=files,
+                                 objective=str(params.get("objective") or ""))
+
+
+def _unsafe_rel(rel: str) -> bool:
+    p = Path(rel)
+    return p.is_absolute() or ".." in p.parts
+
+
+def _clean_rel_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value
+            if isinstance(item, str) and item.strip() and not _unsafe_rel(str(item).strip())]
+
+
 def _default_replacements(old: str, new: str) -> dict[str, str]:
     old_snake = old.replace("-", "_")
     new_snake = new.replace("-", "_")
@@ -168,6 +493,303 @@ def _default_replacements(old: str, new: str) -> dict[str, str]:
         old_snake.upper(): new_snake.upper(),
         old_snake.capitalize(): new_snake.capitalize(),
         old_snake.replace("_", "-"): new_snake.replace("_", "-"),
+    }
+
+
+def _module_name(rel: str) -> str:
+    p = Path(rel)
+    parts = list(p.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _rewrite_python_module_refs(text: str, old_module: str, new_module: str) -> str:
+    replacements = {
+        old_module: new_module,
+        old_module.replace(".", "/") + ".py": new_module.replace(".", "/") + ".py",
+    }
+    return _replace_dotted_tokens(text, replacements)
+
+
+def _replace_dotted_tokens(text: str, replacements: dict[str, str]) -> str:
+    out = text
+    for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        if "." in old and "/" not in old:
+            out = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])", new, out)
+        else:
+            out = out.replace(old, new)
+    return out
+
+
+def _stale_text_hits(root: Path, token: str, *, files: set[str] | list[str] | None = None) -> list[dict]:
+    selected = set(files or [])
+    stale: list[dict] = []
+    for path in _iter_text_files(root):
+        rel = path.relative_to(root).as_posix()
+        if selected and rel not in selected:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if token in line:
+                stale.append({"file": rel, "line": line_no, "token": token})
+    return stale
+
+
+def _target_python_files(root: Path, files: tuple[str, ...] | list[str]) -> list[Path]:
+    selected = [root / rel for rel in files] if files else list(root.rglob("*.py"))
+    out = []
+    for path in selected:
+        try:
+            rel_parts = set(path.resolve().relative_to(root.resolve()).parts)
+        except ValueError:
+            continue
+        if path.is_file() and path.suffix == ".py" and not (rel_parts & SKIP_DIRS):
+            out.append(path)
+    return sorted(dict.fromkeys(out))
+
+
+def _target_format_files(root: Path, files: tuple[str, ...] | list[str]) -> list[Path]:
+    selected = [root / rel for rel in files] if files else list(_iter_text_files(root))
+    out = []
+    for path in selected:
+        try:
+            rel_parts = set(path.resolve().relative_to(root.resolve()).parts)
+        except ValueError:
+            continue
+        if path.is_file() and not (rel_parts & SKIP_DIRS):
+            out.append(path)
+    return sorted(dict.fromkeys(out))
+
+
+def _target_format_relpaths(root: Path, files: tuple[str, ...] | list[str]) -> list[str]:
+    return [p.relative_to(root).as_posix() for p in _target_format_files(root, files)]
+
+
+def _python_parses(path: Path) -> tuple[bool, str]:
+    try:
+        ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        return True, ""
+    except SyntaxError as exc:
+        return False, f"{exc.msg} at line {exc.lineno}"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _rewrite_imports(text: str, add_missing: tuple[dict, ...]) -> tuple[str, list[dict]]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text, [{"reason": "file does not parse; import hygiene skipped"}]
+    used = _used_names(tree)
+    lines = text.splitlines()
+    import_nodes = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    if not import_nodes:
+        insert_at = 0
+        end_at = -1
+    else:
+        insert_at = min(node.lineno for node in import_nodes) - 1
+        end_at = max(getattr(node, "end_lineno", node.lineno) for node in import_nodes) - 1
+    kept: list[str] = []
+    residual: list[dict] = []
+    for node in import_nodes:
+        if isinstance(node, ast.Import):
+            aliases = [a for a in node.names if (a.asname or a.name.split(".", 1)[0]) in used]
+            for alias in node.names:
+                if alias not in aliases:
+                    residual.append({"reason": f"removed unused import {alias.name}"})
+            kept.extend(_format_import_alias(alias) for alias in aliases)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "__future__":
+                kept.append(_source_segment(text, node) or lines[node.lineno - 1])
+                continue
+            aliases = [a for a in node.names if a.name == "*" or (a.asname or a.name) in used]
+            for alias in node.names:
+                if alias not in aliases:
+                    residual.append({"reason": f"removed unused import {alias.name}"})
+            if aliases:
+                names = ", ".join(_alias_name(a) for a in sorted(aliases, key=lambda a: a.name))
+                dots = "." * int(node.level or 0)
+                kept.append(f"from {dots}{node.module or ''} import {names}")
+    for item in add_missing:
+        module = str(item.get("module") or "")
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            line = f"from {module} import {name}"
+            binding = str(item.get("as") or name)
+        else:
+            line = f"import {module}"
+            binding = str(item.get("as") or module.split(".", 1)[0])
+        if binding not in used and not item.get("force"):
+            residual.append({"reason": f"requested missing import {binding} is not referenced"})
+        if line not in kept:
+            kept.append(line)
+    kept = sorted(dict.fromkeys(kept), key=lambda s: (0 if s.startswith("from __future__") else 1, s))
+    before = lines[:insert_at]
+    after = lines[end_at + 1:] if end_at >= insert_at else lines[insert_at:]
+    block = kept + ([""] if kept and after and after[0].strip() else [])
+    return "\n".join(before + block + after) + ("\n" if text.endswith("\n") else ""), residual
+
+
+def _used_names(tree: ast.AST) -> set[str]:
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            used.add(node.attr)
+    return used
+
+
+def _format_import_alias(alias: ast.alias) -> str:
+    return "import " + _alias_name(alias)
+
+
+def _alias_name(alias: ast.alias) -> str:
+    return f"{alias.name} as {alias.asname}" if alias.asname else alias.name
+
+
+def _source_segment(text: str, node: ast.AST) -> str | None:
+    try:
+        return ast.get_source_segment(text, node)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _snapshot_files(root: Path) -> dict[str, str]:
+    out = {}
+    for path in _iter_text_files(root):
+        try:
+            out[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    return out
+
+
+def _format_commands(root: Path, files: tuple[str, ...]) -> list[list[str]]:
+    rels = _target_format_relpaths(root, files)
+    py_files = [rel for rel in rels if rel.endswith(".py")]
+    js_files = [rel for rel in rels if Path(rel).suffix in {".js", ".jsx", ".ts", ".tsx", ".json", ".css", ".md"}]
+    go_files = [rel for rel in rels if rel.endswith(".go")]
+    commands: list[list[str]] = []
+    if py_files and shutil.which("ruff"):
+        commands.append(["ruff", "check", "--fix", *py_files])
+        commands.append(["ruff", "format", *py_files])
+    elif py_files:
+        black_spec = importlib_spec("black")
+        if black_spec is not None:
+            commands.append([sys.executable, "-m", "black", *py_files])
+    if go_files and shutil.which("gofmt"):
+        commands.append(["gofmt", "-w", *go_files])
+    if js_files and shutil.which("prettier"):
+        commands.append(["prettier", "--write", *js_files])
+    return commands
+
+
+def importlib_spec(name: str):
+    try:
+        import importlib.util
+        return importlib.util.find_spec(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fallback_format(root: Path, files: tuple[str, ...]) -> None:
+    for path in _target_format_files(root, files):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = [line.rstrip() for line in text.splitlines()]
+        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def _find_function_signature(path: Path, function: str) -> dict | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(text)
+    except (OSError, SyntaxError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+            args = [a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+            return {"line": node.lineno, "args": args}
+    return None
+
+
+def _signature_arg_names(signature: str) -> list[str]:
+    try:
+        tree = ast.parse(signature if signature.lstrip().startswith("def ") else f"def {signature}: pass")
+    except SyntaxError:
+        try:
+            tree = ast.parse(f"def _x({signature}): pass")
+        except SyntaxError:
+            return []
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)), None)
+    if fn is None:
+        return []
+    return [a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs]
+
+
+def _rewrite_signature_text(text: str, function: str, new_signature: str, keyword_map: dict[str, str]) -> str:
+    lines = text.splitlines(keepends=True)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text
+    for node in sorted((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and n.name == function), key=lambda n: n.lineno, reverse=True):
+        line = lines[node.lineno - 1]
+        indent = line[:len(line) - len(line.lstrip())]
+        prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+        sig = new_signature.strip()
+        if sig.startswith("def "):
+            sig = sig[4:].strip()
+        if sig.startswith(function):
+            replacement = f"{indent}{prefix}{sig}"
+        else:
+            replacement = f"{indent}{prefix}{function}({sig})"
+        if not replacement.rstrip().endswith(":"):
+            replacement = replacement.rstrip() + ":"
+        lines[node.lineno - 1] = replacement + ("\n" if line.endswith("\n") else "")
+    rewritten = "".join(lines)
+    for old, new in keyword_map.items():
+        rewritten = re.sub(rf"(?P<fn>\b{re.escape(function)}\s*\([^)]*?)\b{re.escape(old)}\s*=",
+                           rf"\g<fn>{new}=", rewritten)
+    return rewritten
+
+
+def _tool_result(tool_id: str, *, files_changed: list[str], scope: list[str], excluded: list[dict],
+                 checks: list[str], stale: list[dict], residual: list[dict],
+                 escalate_reason: str | None) -> dict:
+    return {
+        "tool_id": tool_id,
+        "files_changed": files_changed,
+        "scope": scope,
+        "excluded": sorted(excluded, key=lambda x: (x.get("file", ""), x.get("line", 0), x.get("token", ""))),
+        "self_verify": {
+            "passed": not stale,
+            "checks": checks,
+            "stale_references": stale,
+        },
+        "escalate": [] if not stale else [{"reason": escalate_reason or "tool self verification failed",
+                                           "stale_references": stale}],
+        "residual_unverifiable": _dedupe_residual(residual),
+    }
+
+
+def _tool_escalate(tool_id: str, reason: str) -> dict:
+    return {
+        "tool_id": tool_id,
+        "files_changed": [],
+        "scope": [],
+        "excluded": [],
+        "self_verify": {"passed": False, "checks": [], "stale_references": []},
+        "escalate": [{"reason": reason}],
+        "residual_unverifiable": [],
     }
 
 
@@ -329,4 +951,3 @@ def _escalate(reason: str) -> dict:
         "escalate": [{"reason": reason}],
         "residual_unverifiable": [],
     }
-

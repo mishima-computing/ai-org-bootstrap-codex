@@ -691,6 +691,40 @@ def test_tree_forbidden_patterns_aggregate_through_composite_evidence():
     print("ok  tree-scoped forbidden patterns aggregate once through composite evidence")
 
 
+def test_mixed_leaf_extracts_transform_subop_as_atomic_tool_leaf():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        (repo / "pkg").mkdir()
+        (repo / "pkg" / "scaffold.py").write_text("def scaffold_runner():\n    return 1\n", encoding="utf-8")
+        events: list[dict] = []
+        leaves: list[str] = []
+
+        def run_leaf(node):
+            leaves.append(node.id)
+            return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+        def verify(node, integrated_head, child_commits):
+            return {"verified": True}
+
+        def integrate(node, base, child_commits):
+            return (f"integrated-head-{node.id}", None)
+
+        def commit_integration(node, base, integrated_head, integ_wt, evidence):
+            return f"integ-sha-{node.id}"
+
+        node = S.TaskNode("mixed", kind=S.LEAF, base_sha="BASE0",
+                          objective="add feature flag support and rename scaffold to demo_org")
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, verify=verify, integrate=integrate,
+                                       commit_integration=commit_integration, max_parallel=1,
+                                       emit=events.append)
+        task_executor.execute(node)
+
+        assert leaves == ["mixed.llm", "mixed.tool1"], leaves
+        assert any(e.get("type") == "mixed_transform_extracted" and e.get("children") == leaves
+                   for e in events), events
+    print("ok  mixed leaf extracts deterministic transform into an atomic tool-leaf")
+
+
 if __name__ == "__main__":
     test_true_recursion_commit_per_node()
     test_real_git_integration()
@@ -706,4 +740,5 @@ if __name__ == "__main__":
     test_parallel_child_abort_cleans_inflight_worktree_and_pgid()
     test_cockpit_events_cover_start_done_split_and_empty_fallback()
     test_tree_forbidden_patterns_aggregate_through_composite_evidence()
+    test_mixed_leaf_extracts_transform_subop_as_atomic_tool_leaf()
     print("\nall task_executor tests passed.")

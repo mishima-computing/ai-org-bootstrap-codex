@@ -67,8 +67,26 @@ _RENAME_TO_RE = re.compile(
     r"\brename\b\s+(?P<old>[A-Za-z_][A-Za-z0-9_./-]*)\s+(?:to|->)\s+(?P<new>[A-Za-z_][A-Za-z0-9_./-]*)",
     re.IGNORECASE,
 )
+_MOVE_TO_RE = re.compile(
+    r"\b(?:move|relocate)\b\s+(?P<source>[A-Za-z_][A-Za-z0-9_./-]*\.py)\s+(?:to|->)\s+(?P<dest>[A-Za-z_][A-Za-z0-9_./-]*\.py)",
+    re.IGNORECASE,
+)
+_IMPORT_HYGIENE_RE = re.compile(
+    r"\b(?:sort|clean|organize|fix)\b[^.;&\n]{0,60}\bimports?\b|\bimports?\b[^.;&\n]{0,60}\b(?:sort|clean|organize|fix)\b",
+    re.IGNORECASE,
+)
+_FORMAT_LINT_RE = re.compile(
+    r"\b(?:format|lint[- ]?fix|run\s+(?:black|ruff|gofmt|prettier)|ruff\s+--fix|blacken)\b",
+    re.IGNORECASE,
+)
+_SIGNATURE_CHANGE_RE = re.compile(
+    r"\bchange\s+(?:the\s+)?signature\s+of\s+(?P<fn>[A-Za-z_][A-Za-z0-9_]*)\s+to\s+(?P<sig>[A-Za-z_][A-Za-z0-9_]*\([^)]*\)|\([^)]*\))",
+    re.IGNORECASE,
+)
+_FILE_HINT_RE = re.compile(r"\b(?P<file>[A-Za-z_][A-Za-z0-9_./-]*\.py)\b")
 _SCAFFOLD_DEMO_RE = re.compile(r"\bscaffold\b", re.IGNORECASE)
 _DEMO_ORG_RE = re.compile(r"\bdemo[-_ ]org\b|\bDEMO_ORG\b")
+_CONJUNCTION_RE = re.compile(r"\s+(?:and|, plus|;)\s+", re.IGNORECASE)
 
 
 class OperabilityScan:
@@ -476,8 +494,9 @@ class ChangeIntentScan:
 class TransformKindScan:
     """Deterministic transform-kind classifier.
 
-    Slice-1 routes only fully mechanical rename leaves. Anything ambiguous returns
-    ``novel`` so the existing LLM dialectic path is byte-identical to today.
+    Routes only fully mechanical leaves whose specific tool accepts the resolved
+    parameters. Anything ambiguous returns ``novel`` so the LLM dialectic path
+    remains the fallback.
     """
 
     def __init__(self, repo, objective: str, candidates=None, index=None):
@@ -487,20 +506,46 @@ class TransformKindScan:
         self.index = index or pre_localizer.RepoIndex.cached(self.repo)
 
     def build(self) -> dict:
-        params = self._rename_params()
-        if params is None:
-            return self._novel("not an unambiguous rename objective")
-        accepted = deterministic_transform_tools.can_handle(self.repo, params)
+        if self._mixed_residual(self.objective):
+            return self._novel("objective mixes novel work with a deterministic transform")
+        candidates = self._candidate_transforms(self.objective)
+        if len(candidates) != 1:
+            return self._novel("not an unambiguous deterministic transform objective")
+        kind, tool_id, params = candidates[0]
+        accepted = deterministic_transform_tools.can_handle_tool(tool_id, self.repo, params)
         if not accepted:
-            return self._novel("rename-codemod cannot handle the resolved parameters", params=params)
+            return self._novel(f"{tool_id} cannot handle the resolved parameters", params=params)
         return {
-            "transform_kind": "rename",
+            "transform_kind": kind,
             "route": "tool",
-            "tool_id": "rename-codemod",
+            "tool_id": tool_id,
             "params": params,
+            "mode": "block" if kind == "rename" else "shadow",
             "advisory_only": False,
             "determinism": "consistency_not_correctness",
         }
+
+    def deterministic_subops(self) -> list[dict]:
+        out = []
+        seen: set[str] = set()
+        for chunk in _CONJUNCTION_RE.split(self.objective):
+            candidates = self._candidate_transforms(chunk)
+            if len(candidates) != 1:
+                continue
+            kind, tool_id, params = candidates[0]
+            key = json.dumps([kind, tool_id, params], sort_keys=True)
+            if key in seen:
+                continue
+            if deterministic_transform_tools.can_handle_tool(tool_id, self.repo, params):
+                seen.add(key)
+                out.append({
+                    "objective": chunk.strip(),
+                    "transform_kind": kind,
+                    "tool_id": tool_id,
+                    "params": params,
+                    "mode": "block" if kind == "rename" else "shadow",
+                })
+        return out
 
     def _novel(self, reason: str, *, params: dict | None = None) -> dict:
         result = {
@@ -512,6 +557,17 @@ class TransformKindScan:
             "advisory_only": False,
         }
         return result
+
+    def _mixed_residual(self, objective: str) -> bool:
+        subops = []
+        residual = objective
+        for chunk in _CONJUNCTION_RE.split(objective):
+            candidates = self._candidate_transforms(chunk)
+            if len(candidates) == 1:
+                subops.append(chunk)
+                residual = residual.replace(chunk, "").strip(" ,;")
+        residual = re.sub(r"^(and|plus)\s+", "", residual, flags=re.IGNORECASE).strip()
+        return bool(subops and residual and (_reference_tokens_for_transform(residual) - {"and", "plus"}))
 
     def _rename_params(self) -> dict | None:
         matches = list(_RENAME_TO_RE.finditer(self.objective))
@@ -548,3 +604,70 @@ class TransformKindScan:
                     "objective": self.objective,
                 }
         return None
+
+    def _candidate_transforms(self, objective: str) -> list[tuple[str, str, dict]]:
+        candidates: list[tuple[str, str, dict]] = []
+        rename = self._rename_params_for(objective)
+        if rename is not None:
+            candidates.append(("rename", "rename-codemod", rename))
+        move = self._move_params(objective)
+        if move is not None:
+            candidates.append(("move-relocate", "move-relocate", move))
+        imports = self._import_params(objective)
+        if imports is not None:
+            candidates.append(("import-hygiene", "import-hygiene", imports))
+        fmt = self._format_params(objective)
+        if fmt is not None:
+            candidates.append(("format-lint-fix", "format-lint-fix", fmt))
+        sig = self._signature_params(objective)
+        if sig is not None:
+            candidates.append(("signature-change", "signature-change", sig))
+        return candidates
+
+    def _rename_params_for(self, objective: str) -> dict | None:
+        original = self.objective
+        try:
+            self.objective = objective
+            return self._rename_params()
+        finally:
+            self.objective = original
+
+    def _move_params(self, objective: str) -> dict | None:
+        matches = list(_MOVE_TO_RE.finditer(objective))
+        if len(matches) != 1:
+            return None
+        return {
+            "tool_id": "move-relocate",
+            "source": matches[0].group("source").strip("`'\""),
+            "destination": matches[0].group("dest").strip("`'\".,"),
+            "objective": objective,
+        }
+
+    def _import_params(self, objective: str) -> dict | None:
+        if not _IMPORT_HYGIENE_RE.search(objective):
+            return None
+        files = [m.group("file") for m in _FILE_HINT_RE.finditer(objective)]
+        return {"tool_id": "import-hygiene", "files": files, "add_missing": [], "objective": objective}
+
+    def _format_params(self, objective: str) -> dict | None:
+        if not _FORMAT_LINT_RE.search(objective):
+            return None
+        files = [m.group("file") for m in _FILE_HINT_RE.finditer(objective)]
+        return {"tool_id": "format-lint-fix", "files": files, "objective": objective}
+
+    def _signature_params(self, objective: str) -> dict | None:
+        matches = list(_SIGNATURE_CHANGE_RE.finditer(objective))
+        if len(matches) != 1:
+            return None
+        fn = matches[0].group("fn")
+        sig = matches[0].group("sig")
+        if sig.startswith("("):
+            sig = f"{fn}{sig}"
+        files = [m.group("file") for m in _FILE_HINT_RE.finditer(objective)]
+        return {"tool_id": "signature-change", "function": fn, "new_signature": sig,
+                "files": files, "objective": objective}
+
+
+def _reference_tokens_for_transform(text: str) -> set[str]:
+    return {m.group(0).lower() for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_./-]*", text or "")
+            if len(m.group(0)) > 2}

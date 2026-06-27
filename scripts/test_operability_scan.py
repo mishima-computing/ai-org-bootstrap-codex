@@ -139,6 +139,50 @@ class OperabilityScanTest(unittest.TestCase):
             unsupported = ops.TransformKindScan(repo, "rename missing_symbol to other_symbol").build()
             self.assertEqual(unsupported["route"], "llm")
 
+    def test_transform_kind_routes_new_kinds_in_shadow_only_when_tools_accept(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            write(repo, "pkg/old_mod.py", "VALUE = 1\n")
+            write(repo, "consumer.py", "from pkg.old_mod import VALUE\n")
+            write(repo, "messy.py", "import sys\nx = 1   \n")
+            write(repo, "sig.py", "def fetch(url, timeout):\n    return url\n")
+
+            move = ops.TransformKindScan(repo, "move pkg/old_mod.py to pkg/new_mod.py").build()
+            self.assertEqual(move["route"], "tool")
+            self.assertEqual(move["tool_id"], "move-relocate")
+            self.assertEqual(move["mode"], "shadow")
+
+            imports = ops.TransformKindScan(repo, "clean imports in messy.py").build()
+            self.assertEqual(imports["route"], "tool")
+            self.assertEqual(imports["tool_id"], "import-hygiene")
+            self.assertEqual(imports["mode"], "shadow")
+
+            fmt = ops.TransformKindScan(repo, "format messy.py with the repo formatter").build()
+            self.assertEqual(fmt["route"], "tool")
+            self.assertEqual(fmt["tool_id"], "format-lint-fix")
+            self.assertEqual(fmt["mode"], "shadow")
+
+            sig = ops.TransformKindScan(repo, "change signature of fetch to fetch(endpoint, timeout=10) in sig.py").build()
+            self.assertEqual(sig["route"], "tool")
+            self.assertEqual(sig["tool_id"], "signature-change")
+            self.assertEqual(sig["mode"], "shadow")
+
+            ambiguous = ops.TransformKindScan(repo, "move pkg/old_mod.py to pkg/new_mod.py and format messy.py").build()
+            self.assertEqual(ambiguous["route"], "llm")
+        print("ok  transform-kind classifier routes move/import/format/signature shadow and rejects ambiguity")
+
+    def test_transform_kind_extracts_mixed_leaf_suboperation_without_routing_whole_leaf(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            write(repo, "pkg/scaffold.py", "def scaffold_runner():\n    return 1\n")
+            scan = ops.TransformKindScan(repo, "add feature flag support and rename scaffold to demo_org")
+            whole = scan.build()
+            subops = scan.deterministic_subops()
+            self.assertEqual(whole["route"], "llm")
+            self.assertEqual(len(subops), 1)
+            self.assertEqual(subops[0]["tool_id"], "rename-codemod")
+        print("ok  mixed objective is LLM as a whole but exposes deterministic sub-op for extraction")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

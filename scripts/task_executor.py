@@ -336,6 +336,36 @@ def _null_split_reason(parent: TaskNode, children: list[TaskNode]) -> str | None
     return None
 
 
+def _mixed_transform_children(repo: Path | None, node: TaskNode) -> list[TaskNode]:
+    if repo is None or not node.objective:
+        return []
+    try:
+        scan = operability_scan.TransformKindScan(repo, node.objective)
+        subops = scan.deterministic_subops()
+    except Exception:  # noqa: BLE001 - decomposition must fall back to the normal carrier
+        return []
+    if not subops:
+        return []
+    residual = node.objective
+    for subop in subops:
+        residual = residual.replace(subop["objective"], "").strip(" ,;")
+    residual = re.sub(r"^(and|plus)\s+", "", residual, flags=re.IGNORECASE).strip()
+    children: list[TaskNode] = []
+    previous_id = None
+    if residual and _reference_tokens(residual) - {"and", "plus"}:
+        residual_node = TaskNode(f"{node.id}.llm", kind=COMPOSITE, base_sha=node.base_sha,
+                                 objective=residual, depth=node.depth + 1)
+        children.append(residual_node)
+        previous_id = residual_node.id
+    for idx, subop in enumerate(subops, start=1):
+        child = TaskNode(f"{node.id}.tool{idx}", kind=LEAF, base_sha=node.base_sha,
+                         objective=subop["objective"], depth=node.depth + 1,
+                         depends_on=[previous_id] if previous_id else [])
+        children.append(child)
+        previous_id = child.id
+    return children if len(children) > 1 else []
+
+
 def decompose_with_metadata(node: TaskNode, carrier, max_depth: int) -> DecomposeResult:
     """Ask a read-only carrier to produce this node's child TaskNodes and schema-gate the handoff.
 
@@ -436,8 +466,14 @@ class TaskExecutor:
         if node.subtasks:
             return self.execute_composite(node)
         if self._is_transform_routed_leaf(node):
-            self._emit({"type": "transform_leaf_atomic", "id": node.id, "tool_id": "rename-codemod"})
+            self._emit({"type": "transform_leaf_atomic", "id": node.id})
             return self.execute_leaf(node)
+        mixed = _mixed_transform_children(self.repo, node)
+        if mixed:
+            node.subtasks = mixed
+            self._emit({"type": "mixed_transform_extracted", "id": node.id,
+                        "children": [child.id for child in mixed]})
+            return self.execute_composite(node)
         if should_be_leaf(node, self.max_depth):
             return self.execute_leaf(node)
         node.subtasks = self._decompose_node(node)
@@ -570,6 +606,11 @@ class TaskExecutor:
             self.recursion_edges.append((node.id, child.id))
 
     def _decompose_node(self, node: TaskNode) -> list[TaskNode]:
+        mixed = _mixed_transform_children(self.repo, node)
+        if mixed:
+            self._emit({"type": "mixed_transform_extracted", "id": node.id,
+                        "children": [child.id for child in mixed]})
+            return mixed
         result = self._decomposer(node)
         if isinstance(result, DecomposeResult):
             if node.depth == 0 and result.max_depth is not None:
@@ -593,7 +634,7 @@ class TaskExecutor:
             verdict = operability_scan.TransformKindScan(self.repo, node.objective).build()
         except Exception:  # noqa: BLE001 - classifier must not sink the executor
             return False
-        return verdict.get("route") == "tool" and verdict.get("tool_id") == "rename-codemod"
+        return verdict.get("route") == "tool" and verdict.get("mode", "block") == "block"
 
     def _default_decompose(self, node: TaskNode) -> DecomposeResult:
         carrier = self._decompose_carrier

@@ -203,6 +203,120 @@ def test_tool_leaf_always_runs_linon_even_when_self_verify_passes_wrong_premise(
     print("ok  tool self_verify cannot green a wrong premise; Linon catches the tool leaf")
 
 
+def test_each_new_tool_self_verify_does_not_substitute_for_linon_on_wrong_premise():
+    cases = [
+        ("move-relocate", "move pkg/old_mod.py to pkg/new_mod.py",
+         {"tool_id": "move-relocate", "source": "pkg/old_mod.py", "destination": "pkg/new_mod.py"},
+         {"pkg/old_mod.py": "VALUE = 1\n", "app.py": "from pkg.old_mod import VALUE\n"}),
+        ("import-hygiene", "clean imports in app.py",
+         {"tool_id": "import-hygiene", "files": ["app.py"], "add_missing": []},
+         {"app.py": "import sys\nVALUE = 1\n"}),
+        ("format-lint-fix", "format app.py",
+         {"tool_id": "format-lint-fix", "files": ["app.py"]},
+         {"app.py": "VALUE = 1   \n"}),
+        ("signature-change", "change signature of fetch to fetch(endpoint, timeout=10) in app.py",
+         {"tool_id": "signature-change", "function": "fetch", "new_signature": "fetch(endpoint, timeout=10)",
+          "files": ["app.py"]},
+         {"app.py": "def fetch(url, timeout):\n    return url\n\nfetch(url='x', timeout=3)\n"}),
+    ]
+    for tool_id, objective, params, files in cases:
+        tmp = Path(tempfile.mkdtemp(prefix=f"cp-{tool_id}-linon-"))
+        for rel, text in files.items():
+            path = tmp / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        linon_seen = {"called": False}
+
+        def fake_execute(repo, role, entry, obj, inputs, stage_run_id, cache, **kwargs):
+            assert role == "linon", role
+            linon_seen["called"] = True
+            return True, {"role_id": "linon", "findings": [{
+                "file": sorted(files)[0],
+                "line": 1,
+                "severity": "unknown-test",
+                "passed": False,
+                "detail": f"wrong premise for {tool_id}",
+            }]}, {"ok": True, "attempts": [], "changed_files": []}, {
+                "role": role,
+                "run_id": stage_run_id,
+                "ok": True,
+            }
+
+        saved = (cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings)
+        try:
+            cp._execute_stage = fake_execute
+            cp._contract_preflight = lambda *args, **kwargs: None
+            cp._cheap_gate_findings = lambda *args, **kwargs: ([], {}, None)
+            with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+                result = cp._run_transform_pipeline(
+                    tmp, objective, f"r-{tool_id}", {"transform_kind": tool_id, "route": "tool",
+                                                     "tool_id": tool_id, "params": params, "mode": "block"},
+                    cp._active_entries(cp._entries(REPO)), cache=False, max_repair_iterations=0)
+        finally:
+            cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings = saved
+
+        assert linon_seen["called"], f"{tool_id} must run Linon without an independent oracle"
+        assert result["tool_result"]["self_verify"]["passed"], result["tool_result"]
+        assert result["linon_findings_count"] == 1, result
+    print("ok  move/import/format/signature self_verify never substitutes for Linon on a wrong premise")
+
+
+def test_format_lint_linon_exception_requires_preexisting_relevant_unmodified_test():
+    untested = Path(tempfile.mkdtemp(prefix="cp-format-untested-"))
+    (untested / "app.py").write_text("VALUE = 1   \n", encoding="utf-8")
+    tested = Path(tempfile.mkdtemp(prefix="cp-format-tested-"))
+    (tested / "app.py").write_text("VALUE = 1   \n", encoding="utf-8")
+    (tested / "test_app.py").write_text("import app\n\ndef test_value():\n    assert app.VALUE == 1\n", encoding="utf-8")
+    calls: list[str] = []
+
+    def fake_execute(repo, role, entry, objective, inputs, stage_run_id, cache, **kwargs):
+        calls.append(str(repo))
+        return True, {"role_id": "linon", "findings": []}, {"ok": True, "attempts": [], "changed_files": []}, {
+            "role": role, "run_id": stage_run_id, "ok": True}
+
+    saved = (cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings)
+    try:
+        cp._execute_stage = fake_execute
+        cp._contract_preflight = lambda *args, **kwargs: None
+        cp._cheap_gate_findings = lambda *args, **kwargs: ([], {}, None)
+        entries = cp._active_entries(cp._entries(REPO))
+        with patched_env(AI_ORG_ROOT=REPO, STREAM_LOG=None, STEFAN_ENABLED=None, CI_WRITERS_ENABLED=None):
+            r1 = cp._run_transform_pipeline(
+                untested, "format app.py", "r-format-untested",
+                {"transform_kind": "format-lint-fix", "route": "tool", "tool_id": "format-lint-fix",
+                 "params": {"tool_id": "format-lint-fix", "files": ["app.py"]}, "mode": "block"},
+                entries, cache=False, max_repair_iterations=0)
+            r2 = cp._run_transform_pipeline(
+                tested, "format app.py", "r-format-tested",
+                {"transform_kind": "format-lint-fix", "route": "tool", "tool_id": "format-lint-fix",
+                 "params": {"tool_id": "format-lint-fix", "files": ["app.py"]}, "mode": "block"},
+                entries, cache=False, max_repair_iterations=0)
+    finally:
+        cp._execute_stage, cp._contract_preflight, cp._cheap_gate_findings = saved
+
+    assert str(untested) in calls, "untested file must get Linon"
+    assert str(tested) not in calls, "tested file may use the independent oracle substitute"
+    assert r1["required_ok"].get("linon") is True, r1
+    assert r2["required_ok"].get("independent-oracle") is True, r2
+    assert r2["converged"], r2
+    print("ok  format/lint-fix gets Linon for untested files and may skip only with relevant unmodified tests")
+
+
+def test_shadow_double_run_flags_tool_llm_divergence():
+    tmp = Path(tempfile.mkdtemp(prefix="cp-shadow-diverge-"))
+    (tmp / "app.py").write_text("VALUE = 1   \n", encoding="utf-8")
+    with patched_env(STREAM_LOG=str(tmp / ".agent-runs" / "stream.jsonl")):
+        event = cp._shadow_transform_probe(
+            tmp, "format app.py", "r-shadow-diverge",
+            {"transform_kind": "format-lint-fix", "tool_id": "format-lint-fix",
+             "params": {"tool_id": "format-lint-fix", "files": ["app.py"]}},
+            llm_diff="definitely different")
+    assert event["promotion_state"] == "shadow", event
+    assert event["diffs_match"] is False, event
+    assert event["divergence"] == "tool and LLM diffs differ", event
+    print("ok  shadow double-run records tool/LLM divergence without blocking")
+
+
 def test_infra_gate_result_is_unverified_not_clean_green():
     calls = []
     tmp = Path(tempfile.mkdtemp(prefix="cp-infra-unverified-"))
