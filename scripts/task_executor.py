@@ -161,8 +161,8 @@ class DecomposeResult:
 def _topo_order(children: list[TaskNode]) -> list[TaskNode]:
     """Order sibling children so a child comes after every (sibling) dependency it ``depends_on``.
     Kahn's algorithm; ids outside the sibling set are ignored (a cross-level dep is not a sibling edge).
-    Stable in plan order for independent children. A cycle leaves the unresolved tail appended in plan
-    order rather than dropping it."""
+    Stable in plan order for independent children. Dependency cycles fail closed instead of being emitted
+    as runnable work."""
     by_id = {child.id: child for child in children}
     indeg = {child.id: sum(1 for d in child.depends_on if d in by_id) for child in children}
     ready = [child for child in children if indeg[child.id] == 0]
@@ -181,24 +181,27 @@ def _topo_order(children: list[TaskNode]) -> list[TaskNode]:
                 indeg[child.id] -= 1
                 if indeg[child.id] == 0:
                     ready.append(child)
-    if len(ordered) != len(children):                      # a cycle -> keep the tail (plan order), never drop
-        ordered.extend(child for child in children if child.id not in seen)
+    if len(ordered) != len(children):
+        unresolved = [child.id for child in children if child.id not in seen]
+        raise TaskExecutorIntegrationError(
+            f"dependency cycle among sibling tasks: {', '.join(unresolved)}")
     return ordered
 
 
 def _dependency_waves(children: list[TaskNode]) -> list[list[TaskNode]]:
     """Group sibling children into successive waves where each wave's nodes have all their sibling
     ``depends_on`` satisfied by an earlier wave. Independent children share a wave and run concurrently
-    (the PR1 within-batch frontier-leaf parallelism shape). A cycle is emitted as a final single wave so
-    the execute never deadlocks."""
+    (the PR1 within-batch frontier-leaf parallelism shape). A cycle fails closed before dispatch."""
     by_id = {child.id for child in children}
     done: set[str] = set()
     remaining = list(children)
     waves: list[list[TaskNode]] = []
     while remaining:
         wave = [c for c in remaining if all(d in done or d not in by_id for d in c.depends_on)]
-        if not wave:                                        # unresolved cycle -> run the rest as one wave
-            wave = remaining
+        if not wave:
+            unresolved = [child.id for child in remaining]
+            raise TaskExecutorIntegrationError(
+                f"dependency cycle among sibling tasks: {', '.join(unresolved)}")
         waves.append(wave)
         done.update(c.id for c in wave)
         remaining = [c for c in remaining if c.id not in done]
@@ -233,6 +236,24 @@ def _safe_ref_component(value: str) -> str:
     while ".." in text:
         text = text.replace("..", ".")
     return text[:80]
+
+
+def _full_commit_sha(value: str | None) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) in (40, 64)
+        and all(ch in "0123456789abcdef" for ch in value.lower())
+    )
+
+
+def _duplicate_child_ids(children: list[TaskNode]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for child in children:
+        if child.id in seen and child.id not in duplicates:
+            duplicates.append(child.id)
+        seen.add(child.id)
+    return duplicates
 
 
 # --------------------------------------------------------------------------------------------------
@@ -458,6 +479,8 @@ class TaskExecutor:
     def execute_leaf(self, node: TaskNode) -> VerifiedCommit:
         """A leaf: run the dialectic (injected ``run_leaf``, default = controller_pipeline) and return
         its verified commit."""
+        if node.base_sha is not None:
+            node.base_sha = self._validate_immutable_base(node.base_sha, f"base for leaf {node.id}")
         result = self._run_leaf(node)
         verified = _as_verified_commit(result, node)
         self._emit({"type": "leaf_done", "id": node.id, "commit": verified.commit_sha})
@@ -468,6 +491,7 @@ class TaskExecutor:
         commits in topological order on an integration branch off ``base_sha``, verify the integrated
         result, and create THIS node's integration commit — the whole point of the recursion."""
         base = node.base_sha if node.base_sha is not None else self._current_head()
+        base = self._validate_immutable_base(base, f"base for task {node.id}")
         if not node.subtasks:
             node.subtasks = self._decompose_node(node)
             if not node.subtasks:
@@ -513,13 +537,21 @@ class TaskExecutor:
         records each output commit on that task's branch, and later integrates in topo order. Child jobs never
         write into a shared results map and never need a cross-task lock.
         """
+        duplicates = _duplicate_child_ids(node.subtasks)
+        if duplicates:
+            raise TaskExecutorIntegrationError(
+                f"duplicate sibling task ids are not allowed: {', '.join(duplicates)}")
         results: dict[str, VerifiedCommit] = {}
         for wave in _dependency_waves(node.subtasks):
             plans = [self._plan_branch_task(node, base, child, results) for child in wave]
             if self.max_parallel <= 1 or len(plans) == 1:
                 for plan in plans:
                     child = self._child_by_id(wave, plan.task_id)
-                    branch_result = self._run_branch_task(node, child, plan)
+                    try:
+                        branch_result = self._run_branch_task(node, child, plan)
+                    except BaseException:
+                        self._delete_task_branch(plan.branch_name)
+                        raise
                     results[child.id] = branch_result.verified
             else:
                 self._emit({"type": "branch_wave_start", "id": node.id,
@@ -637,13 +669,22 @@ class TaskExecutor:
         the intermediate integration worktree is created and removed here — only its head sha is kept."""
         dep_commits = [results[d] for d in child.depends_on if d in results]
         if not dep_commits:                                 # independent / parallel: no inheritance
-            return child.base_sha if child.base_sha is not None else base
+            return self._validate_immutable_base(
+                child.base_sha if child.base_sha is not None else base,
+                f"base for task {child.id}",
+            )
         if len(dep_commits) == 1:                           # serial: resume from the dep's output commit
-            return dep_commits[0].commit_sha
+            return self._validate_immutable_base(
+                dep_commits[0].commit_sha,
+                f"dependency base for task {child.id}",
+            )
         integ_wt = None
         try:
             integrated_head, integ_wt = self._integrate(node, base, dep_commits)  # resume from integrated deps
-            return integrated_head
+            return self._validate_immutable_base(
+                integrated_head,
+                f"integrated dependency base for task {child.id}",
+            )
         finally:
             self._cleanup_worktree(integ_wt)
 
@@ -655,6 +696,7 @@ class TaskExecutor:
     def _create_task_branch(self, branch_name: str, base: str) -> None:
         if self.repo is None:
             return
+        base = self._validate_immutable_base(base, f"base for task branch {branch_name}")
         created = self._git("branch", branch_name, base)
         if created.returncode != 0:
             raise TaskExecutorIntegrationError(
@@ -666,9 +708,27 @@ class TaskExecutor:
         ref = f"refs/heads/{result.plan.branch_name}"
         updated = self._git("update-ref", ref, result.verified.commit_sha, result.plan.branch_base)
         if updated.returncode != 0:
+            self._delete_task_branch(result.plan.branch_name)
             raise TaskExecutorIntegrationError(
                 f"non-fast-forward task branch update for {result.plan.task_id} "
                 f"({result.plan.branch_name}): {updated.stderr.strip()}")
+
+    def _delete_task_branch(self, branch_name: str) -> None:
+        if self.repo is None or not branch_name:
+            return
+        self._git("update-ref", "-d", f"refs/heads/{branch_name}")
+
+    def _validate_immutable_base(self, base: str, context: str) -> str:
+        if self.repo is None:
+            return base
+        if not _full_commit_sha(base):
+            raise TaskExecutorIntegrationError(
+                f"{context} must be an immutable full commit SHA, got {base!r}")
+        exists = self._git("cat-file", "-e", f"{base}^{{commit}}")
+        if exists.returncode != 0:
+            raise TaskExecutorIntegrationError(
+                f"{context} does not name an existing commit {base}: {exists.stderr.strip()}")
+        return base
 
     def _record_edge(self, node: TaskNode, child: TaskNode) -> None:
         self.recursion_edges.append((node.id, child.id))
@@ -698,10 +758,10 @@ class TaskExecutor:
             self._active_worktrees.add(Path(wt))
 
     def _cleanup_worktree(self, wt) -> None:
-        """Idempotently remove an executor-owned git worktree and prune stale metadata.
+        """Idempotently remove one executor-owned git worktree.
 
         Cleanup is fail-soft by design: callers use it from exception/finally paths, so an already-removed
-        worktree, a stale git metadata entry, or a partially-created tempdir must never mask the real error.
+        worktree or partially-created tempdir must never mask the real error.
         """
         if not wt:
             return
@@ -709,7 +769,6 @@ class TaskExecutor:
         try:
             if self.repo is not None:
                 self._git("worktree", "remove", "--force", str(path))
-                self._git("worktree", "prune")
         except Exception:  # noqa: BLE001 - cleanup must be idempotent/fail-soft
             pass
         shutil.rmtree(path, ignore_errors=True)
@@ -758,10 +817,9 @@ class TaskExecutor:
     def _abort_branch_wave(self, executor: concurrent.futures.ThreadPoolExecutor,
                            futures: dict[concurrent.futures.Future, tuple[TaskNode, PlannedBranchTask]],
                            child_executors: dict[concurrent.futures.Future, "TaskExecutor"]) -> None:
-        for future in futures:
+        for future, (_child, plan) in futures.items():
             future.cancel()
-        for child_executor in child_executors.values():
-            child_executor._cleanup_active_resources()
+            self._delete_task_branch(plan.branch_name)
         self._cleanup_active_resources()
         executor.shutdown(wait=False, cancel_futures=True)
 
@@ -801,7 +859,7 @@ class TaskExecutor:
         leaf's base_sha, then capture the leaf's net change as ONE cherry-pickable commit off that base.
         Mirrors controller_goal.default_run_leaf's worktree isolation."""
         import controller_pipeline
-        base = node.base_sha or self._current_head()
+        base = self._validate_immutable_base(node.base_sha or self._current_head(), f"base for leaf {node.id}")
         wt = Path(tempfile.mkdtemp(prefix=f"executer-leaf-{node.id}-"))
         add = self._git("worktree", "add", "--detach", str(wt), base)
         if add.returncode != 0:

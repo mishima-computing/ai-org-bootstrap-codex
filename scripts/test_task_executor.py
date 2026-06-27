@@ -15,6 +15,7 @@ Run:  python3 scripts/test_executer.py
 from __future__ import annotations
 
 import os
+import concurrent.futures
 import inspect
 import shutil
 import subprocess
@@ -326,6 +327,48 @@ def test_dependency_forces_branch_base_and_integration_order():
     print("ok  dependency forces task branch base selection and controller integration order")
 
 
+def test_duplicate_sibling_task_ids_fail_closed():
+    leaves_executed: list[str] = []
+
+    def run_leaf(node):
+        leaves_executed.append(node.id)
+        return S.VerifiedCommit(node.id, f"leaf-sha-{node.id}", {"kind": "leaf"})
+
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("dup", kind=S.LEAF, objective="do first"),
+        S.TaskNode("dup", kind=S.LEAF, objective="do second"),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=run_leaf, verify=lambda *_args: {"verified": True},
+                      integrate=lambda node, base, commits: (f"integrated-{node.id}", None),
+                      commit_integration=lambda node, base, head, wt, evidence: f"integ-{node.id}",
+                      max_parallel=1)
+    try:
+        task_executor.execute(root)
+        raise AssertionError("duplicate sibling ids must fail closed")
+    except S.TaskExecutorIntegrationError as exc:
+        assert "duplicate sibling task ids" in str(exc), exc
+    assert leaves_executed == [], leaves_executed
+    print("ok  duplicate sibling task ids fail closed before result-map overwrite")
+
+
+def test_dependency_cycle_fails_closed():
+    root = S.TaskNode("root", kind=S.COMPOSITE, base_sha="BASE0", objective="compose", subtasks=[
+        S.TaskNode("A", kind=S.LEAF, objective="do A", depends_on=["B"]),
+        S.TaskNode("B", kind=S.LEAF, objective="do B", depends_on=["A"]),
+    ])
+    task_executor = S.TaskExecutor(run_leaf=lambda node: S.VerifiedCommit(node.id, f"leaf-{node.id}", {}),
+                      verify=lambda *_args: {"verified": True},
+                      integrate=lambda node, base, commits: (f"integrated-{node.id}", None),
+                      commit_integration=lambda node, base, head, wt, evidence: f"integ-{node.id}",
+                      max_parallel=2)
+    try:
+        task_executor.execute(root)
+        raise AssertionError("dependency cycle must raise")
+    except S.TaskExecutorIntegrationError as exc:
+        assert "dependency cycle" in str(exc), exc
+    print("ok  dependency cycles fail closed before dispatch/integration")
+
+
 # --------------------------------------------------------------------------------------------------
 # 4) multi-dep threading: a child depending on SEVERAL siblings resumes from their INTEGRATED head
 # --------------------------------------------------------------------------------------------------
@@ -573,6 +616,57 @@ def test_semantic_conflict_is_caught_by_integration_verifier():
     print("ok  semantic merge conflict is caught by integration verification")
 
 
+def test_mutable_child_base_ref_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        leaves_executed: list[str] = []
+
+        def run_leaf(node):
+            leaves_executed.append(node.id)
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, f"{node.id}.txt", f"{node.id}\n"),
+                {"kind": "leaf"},
+            )
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, base_sha="main", objective="mutable base"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("mutable base ref must be rejected")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "immutable full commit SHA" in str(exc), exc
+        assert leaves_executed == [], leaves_executed
+        assert _task_branch_refs(repo) == [], _task_branch_refs(repo)
+        _assert_only_main_worktree(repo)
+    print("ok  mutable child base ref is rejected before branch execution")
+
+
+def test_failed_task_branch_ref_is_deleted():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        def run_leaf(node):
+            raise RuntimeError(f"task {node.id} failed")
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("fail", kind=S.LEAF, objective="fail"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("failing branch task must raise")
+        except RuntimeError as exc:
+            assert "task fail failed" in str(exc), exc
+        assert _task_branch_refs(repo) == [], _task_branch_refs(repo)
+        _assert_only_main_worktree(repo)
+    print("ok  failed task branch refs are deleted")
+
+
 def test_executor_model_has_no_shared_lock_across_blocking_wait():
     source = inspect.getsource(S.TaskExecutor)
     assert "threading.Lock" not in source, source
@@ -645,7 +739,47 @@ def test_worktree_cleanup_is_idempotent():
     print("ok  worktree cleanup is idempotent")
 
 
-def test_parallel_child_abort_cleans_inflight_worktree_and_pgid():
+def test_worktree_cleanup_leaves_live_sibling_worktree_intact():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        wt_a = Path(tempfile.mkdtemp(prefix="t-clean-a-"))
+        wt_b = Path(tempfile.mkdtemp(prefix="t-clean-b-"))
+        _git(repo, "worktree", "add", "--detach", str(wt_a), base)
+        _git(repo, "worktree", "add", "--detach", str(wt_b), base)
+        task_executor = S.TaskExecutor(repo, max_parallel=1)
+        task_executor._cleanup_worktree(wt_a)
+        paths = [str(Path(p).resolve()) for p in _worktree_paths(repo)]
+        assert str(wt_b.resolve()) in paths, paths
+        assert wt_b.exists(), wt_b
+        task_executor._cleanup_worktree(wt_b)
+        _assert_only_main_worktree(repo)
+    print("ok  cleanup of one worktree leaves a live sibling worktree intact")
+
+
+def test_abort_branch_wave_does_not_cleanup_live_child_executors():
+    class ChildExecutor:
+        cleaned = False
+
+        def _cleanup_active_resources(self):
+            self.cleaned = True
+
+    parent = S.TaskExecutor(max_parallel=1)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = concurrent.futures.Future()
+    child_executor = ChildExecutor()
+    plan = S.PlannedBranchTask("live", "BASE0", "ai-org/tasks/root/live-123")
+    parent._abort_branch_wave(
+        executor,
+        {future: (S.TaskNode("live", kind=S.LEAF, objective="live"), plan)},
+        {future: child_executor},
+    )
+    assert future.cancelled(), "pending branch future should be cancelled"
+    assert not child_executor.cleaned, "abort cleanup must not remove live sibling resources"
+    print("ok  abort path does not cleanup live child executors' resources")
+
+
+def test_parallel_child_abort_cleans_parent_registered_pgid():
     with tempfile.TemporaryDirectory() as tmp:
         repo = _temp_git_repo(tmp)
         base = _git(repo, "rev-parse", "HEAD").strip()
@@ -784,6 +918,8 @@ if __name__ == "__main__":
     test_parallel_independent_tasks_integrate_as_isolated_branches()
     test_serial_child_inherits_dependency_output_commit()
     test_dependency_forces_branch_base_and_integration_order()
+    test_duplicate_sibling_task_ids_fail_closed()
+    test_dependency_cycle_fails_closed()
     test_serial_child_with_multiple_deps_resumes_from_integrated_head()
     test_nested_parallel_composites_complete_under_timeout()
     test_default_max_depth_is_floor_when_env_unset()
@@ -791,11 +927,15 @@ if __name__ == "__main__":
     test_failing_composite_verify_blocks_integration_commit()
     test_cherry_pick_conflict_is_detected_and_aborts_integration()
     test_semantic_conflict_is_caught_by_integration_verifier()
+    test_mutable_child_base_ref_is_rejected()
+    test_failed_task_branch_ref_is_deleted()
     test_executor_model_has_no_shared_lock_across_blocking_wait()
     test_default_leaf_exception_leaves_no_worktree()
     test_composite_verify_failure_leaves_no_integration_worktree()
     test_worktree_cleanup_is_idempotent()
-    test_parallel_child_abort_cleans_inflight_worktree_and_pgid()
+    test_worktree_cleanup_leaves_live_sibling_worktree_intact()
+    test_abort_branch_wave_does_not_cleanup_live_child_executors()
+    test_parallel_child_abort_cleans_parent_registered_pgid()
     test_cockpit_events_cover_start_done_split_and_empty_fallback()
     test_tree_forbidden_patterns_aggregate_through_composite_evidence()
     print("\nall task_executor tests passed.")
