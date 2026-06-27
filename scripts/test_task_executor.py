@@ -159,6 +159,11 @@ def _make_child_commit(repo, base: str, rel: str, content: str) -> str:
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def _make_empty_child_commit(repo, base: str) -> str:
+    tree = _git(repo, "rev-parse", f"{base}^{{tree}}").strip()
+    return _git(repo, "commit-tree", tree, "-p", base, "-m", "empty child").strip()
+
+
 def _is_sha(s: str) -> bool:
     return isinstance(s, str) and len(s) in (40, 64) and all(c in "0123456789abcdef" for c in s)
 
@@ -645,6 +650,70 @@ def test_mutable_child_base_ref_is_rejected():
     print("ok  mutable child base ref is rejected before branch execution")
 
 
+def test_rerun_child_base_uses_current_parent_base_not_stale_child_base():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        stale_base = _git(repo, "rev-parse", "HEAD").strip()
+        Path(repo, "fresh.txt").write_text("fresh\n", encoding="utf-8")
+        _git(repo, "add", "fresh.txt")
+        _git(repo, "commit", "-q", "-m", "fresh parent")
+        fresh_base = _git(repo, "rev-parse", "HEAD").strip()
+        recorded_base: dict[str, str] = {}
+
+        def run_leaf(node):
+            recorded_base[node.id] = node.base_sha
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, f"{node.id}.txt", f"{node.id}\n"),
+                {"kind": "leaf"},
+            )
+
+        child = S.TaskNode("A", kind=S.LEAF, base_sha=stale_base, objective="rerun stale base")
+        root = S.TaskNode("root", kind=S.COMPOSITE, objective="compose", subtasks=[child])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1)
+        task_executor.execute(root)
+
+        assert recorded_base["A"] == fresh_base, recorded_base
+        assert child.base_sha == stale_base, "planning must not overwrite the shared TaskNode base"
+        _assert_only_main_worktree(repo)
+    print("ok  rerun child base is recomputed from current parent base, not stale child.base_sha")
+
+
+def test_inconsistent_inherited_child_base_fails_closed():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        _git(repo, "checkout", "-q", "-b", "side", base)
+        Path(repo, "side.txt").write_text("side\n", encoding="utf-8")
+        _git(repo, "add", "side.txt")
+        _git(repo, "commit", "-q", "-m", "side")
+        side_sha = _git(repo, "rev-parse", "HEAD").strip()
+        _git(repo, "checkout", "-q", "main")
+        Path(repo, "main.txt").write_text("main\n", encoding="utf-8")
+        _git(repo, "add", "main.txt")
+        _git(repo, "commit", "-q", "-m", "main")
+        main_sha = _git(repo, "rev-parse", "HEAD").strip()
+        leaves_executed: list[str] = []
+
+        def run_leaf(node):
+            leaves_executed.append(node.id)
+            return S.VerifiedCommit(node.id, main_sha, {"kind": "leaf"})
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=main_sha, objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, base_sha=side_sha, objective="unrelated inherited base"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("unrelated inherited child base must fail closed")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "is not an ancestor of current parent base" in str(exc), exc
+        assert leaves_executed == [], leaves_executed
+        assert _task_branch_refs(repo) == [], _task_branch_refs(repo)
+        _assert_only_main_worktree(repo)
+    print("ok  inconsistent inherited child base fails closed before dispatch")
+
+
 def test_failed_task_branch_ref_is_deleted():
     with tempfile.TemporaryDirectory() as tmp:
         repo = _temp_git_repo(tmp)
@@ -665,6 +734,74 @@ def test_failed_task_branch_ref_is_deleted():
         assert _task_branch_refs(repo) == [], _task_branch_refs(repo)
         _assert_only_main_worktree(repo)
     print("ok  failed task branch refs are deleted")
+
+
+def test_redundant_non_empty_child_fails_closed():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        def run_leaf(node):
+            return S.VerifiedCommit(
+                node.id,
+                _make_child_commit(repo, node.base_sha, "same.txt", "same\n"),
+                {"kind": "leaf"},
+            )
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("A", kind=S.LEAF, objective="write same"),
+            S.TaskNode("B", kind=S.LEAF, objective="write same redundantly"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1)
+        try:
+            task_executor.execute(root)
+            raise AssertionError("redundant non-empty child must fail closed")
+        except S.TaskExecutorIntegrationError as exc:
+            assert "suspicious redundant integration" in str(exc) and "B" in str(exc), exc
+        _assert_only_main_worktree(repo)
+    print("ok  non-empty child that changes no integrated tree fails closed")
+
+
+def test_genuinely_empty_child_is_recorded_and_allowed():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        events: list[dict] = []
+        empty_commit: dict[str, S.VerifiedCommit] = {}
+
+        def run_leaf(node):
+            vc = S.VerifiedCommit(node.id, _make_empty_child_commit(repo, node.base_sha), {"kind": "leaf"})
+            empty_commit[node.id] = vc
+            return vc
+
+        root = S.TaskNode("root", kind=S.COMPOSITE, base_sha=base, objective="compose", subtasks=[
+            S.TaskNode("empty", kind=S.LEAF, objective="no effective change"),
+        ])
+        task_executor = S.TaskExecutor(repo, run_leaf=run_leaf, max_parallel=1, emit=events.append)
+        result = task_executor.execute(root)
+
+        assert _is_sha(result.commit_sha), result
+        assert empty_commit["empty"].evidence["empty_child_recorded"] is True, empty_commit
+        assert any(e.get("type") == "integration_empty_child" and e.get("id") == "empty"
+                   for e in events), events
+        _assert_only_main_worktree(repo)
+    print("ok  genuinely empty child is allowed but recorded")
+
+
+def test_planned_unpublished_task_ref_is_deleted_on_abort():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _temp_git_repo(tmp)
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        task_executor = S.TaskExecutor(repo, max_parallel=1)
+        plan = S.PlannedBranchTask("planned", base, "ai-org/tasks/root/planned-test")
+        task_executor._create_task_branch(plan.branch_name, plan.branch_base)
+        assert plan.branch_name in _task_branch_refs(repo), _task_branch_refs(repo)
+
+        task_executor._cleanup_unpublished_task_branches()
+
+        assert plan.branch_name not in _task_branch_refs(repo), _task_branch_refs(repo)
+        _assert_only_main_worktree(repo)
+    print("ok  planned-but-unpublished task refs are deleted on abort cleanup")
 
 
 def test_executor_model_has_no_shared_lock_across_blocking_wait():
@@ -928,7 +1065,12 @@ if __name__ == "__main__":
     test_cherry_pick_conflict_is_detected_and_aborts_integration()
     test_semantic_conflict_is_caught_by_integration_verifier()
     test_mutable_child_base_ref_is_rejected()
+    test_rerun_child_base_uses_current_parent_base_not_stale_child_base()
+    test_inconsistent_inherited_child_base_fails_closed()
     test_failed_task_branch_ref_is_deleted()
+    test_redundant_non_empty_child_fails_closed()
+    test_genuinely_empty_child_is_recorded_and_allowed()
+    test_planned_unpublished_task_ref_is_deleted_on_abort()
     test_executor_model_has_no_shared_lock_across_blocking_wait()
     test_default_leaf_exception_leaves_no_worktree()
     test_composite_verify_failure_leaves_no_integration_worktree()

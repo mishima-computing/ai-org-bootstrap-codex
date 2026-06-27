@@ -455,6 +455,8 @@ class TaskExecutor:
         self.recursion_edges: list[tuple[str, str]] = []
         self._active_worktrees: set[Path] = set()
         self._active_pgids: set[int] = set()
+        self._planned_task_branches: set[str] = set()
+        self._published_task_branches: set[str] = set()
 
     # -- dispatch ---------------------------------------------------------------------------------
     def execute(self, node: TaskNode) -> VerifiedCommit:
@@ -542,48 +544,53 @@ class TaskExecutor:
             raise TaskExecutorIntegrationError(
                 f"duplicate sibling task ids are not allowed: {', '.join(duplicates)}")
         results: dict[str, VerifiedCommit] = {}
-        for wave in _dependency_waves(node.subtasks):
-            plans = [self._plan_branch_task(node, base, child, results) for child in wave]
-            if self.max_parallel <= 1 or len(plans) == 1:
-                for plan in plans:
-                    child = self._child_by_id(wave, plan.task_id)
-                    try:
-                        branch_result = self._run_branch_task(node, child, plan)
-                    except BaseException:
-                        self._delete_task_branch(plan.branch_name)
-                        raise
-                    results[child.id] = branch_result.verified
-            else:
-                self._emit({"type": "branch_wave_start", "id": node.id,
-                            "tasks": [plan.task_id for plan in plans]})
-                child_executors: dict[concurrent.futures.Future, TaskExecutor] = {}
-                futures: dict[concurrent.futures.Future, tuple[TaskNode, PlannedBranchTask]] = {}
-                executor = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(self.max_parallel, len(plans)),
-                    thread_name_prefix=f"task-branch-{node.id}",
-                )
-                try:
+        try:
+            for wave in _dependency_waves(node.subtasks):
+                plans = [self._plan_branch_task(node, base, child, results) for child in wave]
+                if self.max_parallel <= 1 or len(plans) == 1:
                     for plan in plans:
                         child = self._child_by_id(wave, plan.task_id)
-                        child_executor = self._new_child_executor()
-                        self._record_edge(node, child)
-                        future = executor.submit(child_executor._execute_planned_branch_task, child, plan)
-                        futures[future] = (child, plan)
-                        child_executors[future] = child_executor
-                    for future in concurrent.futures.as_completed(futures):
-                        child, _plan = futures[future]
                         try:
-                            branch_result = future.result()
+                            branch_result = self._run_branch_task(node, child, plan)
                         except BaseException:
-                            self._abort_branch_wave(executor, futures, child_executors)
+                            self._delete_task_branch(plan.branch_name)
                             raise
-                        self._accept_branch_result(branch_result)
                         results[child.id] = branch_result.verified
-                except BaseException:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise
                 else:
-                    executor.shutdown(wait=True)
+                    self._emit({"type": "branch_wave_start", "id": node.id,
+                                "tasks": [plan.task_id for plan in plans]})
+                    child_executors: dict[concurrent.futures.Future, TaskExecutor] = {}
+                    futures: dict[concurrent.futures.Future, tuple[TaskNode, PlannedBranchTask]] = {}
+                    executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(self.max_parallel, len(plans)),
+                        thread_name_prefix=f"task-branch-{node.id}",
+                    )
+                    try:
+                        for plan in plans:
+                            child = self._child_by_id(wave, plan.task_id)
+                            child_executor = self._new_child_executor()
+                            self._record_edge(node, child)
+                            future = executor.submit(child_executor._execute_planned_branch_task, child, plan)
+                            futures[future] = (child, plan)
+                            child_executors[future] = child_executor
+                        for future in concurrent.futures.as_completed(futures):
+                            child, _plan = futures[future]
+                            try:
+                                branch_result = future.result()
+                            except BaseException:
+                                self._abort_branch_wave(executor, futures, child_executors)
+                                raise
+                            self._record_task_branch(branch_result)
+                            self._accept_branch_result(branch_result)
+                            results[child.id] = branch_result.verified
+                    except BaseException:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        executor.shutdown(wait=True)
+        except BaseException:
+            self._cleanup_unpublished_task_branches()
+            raise
         return results
 
     def _child_by_id(self, children: list[TaskNode], task_id: str) -> TaskNode:
@@ -596,7 +603,6 @@ class TaskExecutor:
                           results: dict[str, VerifiedCommit]) -> PlannedBranchTask:
         branch_base = self._child_base(node, base, child, results)
         branch_name = self._task_branch_name(node, child)
-        child.base_sha = branch_base
         self._create_task_branch(branch_name, branch_base)
         self._emit({"type": "branch_task_planned", "parent": node.id, "id": child.id,
                     "branch": branch_name, "base": branch_base,
@@ -612,21 +618,32 @@ class TaskExecutor:
                          plan: PlannedBranchTask) -> BranchTaskResult:
         self._record_edge(parent, child)
         branch_result = self._execute_planned_branch_task(child, plan)
+        self._record_task_branch(branch_result)
         self._accept_branch_result(branch_result)
         return branch_result
 
     def _execute_planned_branch_task(self, child: TaskNode,
                                      plan: PlannedBranchTask) -> BranchTaskResult:
-        child.base_sha = plan.branch_base
-        verified = self.execute(child)
+        planned_child = self._task_node_for_plan(child, plan.branch_base)
+        verified = self.execute(planned_child)
         branch_result = BranchTaskResult(
             plan=plan,
             verified=verified,
             calls=tuple(self.calls),
             recursion_edges=tuple(self.recursion_edges),
         )
-        self._record_task_branch(branch_result)
         return branch_result
+
+    def _task_node_for_plan(self, child: TaskNode, branch_base: str) -> TaskNode:
+        return TaskNode(
+            id=child.id,
+            kind=child.kind,
+            subtasks=list(child.subtasks or []),
+            depends_on=list(child.depends_on or []),
+            base_sha=branch_base,
+            objective=child.objective,
+            depth=child.depth,
+        )
 
     def _accept_branch_result(self, result: BranchTaskResult) -> None:
         existing_calls = set(self.calls)
@@ -661,18 +678,17 @@ class TaskExecutor:
 
     def _child_base(self, node: TaskNode, base: str, child: TaskNode,
                     results: dict[str, VerifiedCommit]) -> str:
-        """Reexecute the base a child cuts its work from, threading ``depends_on`` (see ``_execute_children``).
+        """Resolve the current-run base a child cuts its work from, threading ``depends_on``.
 
-        With no satisfied sibling dep the child is independent: keep its own declared ``base_sha`` if it
-        has one, else the parent ``base``. With exactly one sibling dep it RESUMES from that dep's output
-        commit. With several it resumes from those deps' commits integrated together (``_integrate``), so
-        the intermediate integration worktree is created and removed here — only its head sha is kept."""
+        A child never silently resumes from a stale ``child.base_sha`` left on the shared task graph by a
+        prior run. Independent children cut from this run's resolved parent base. Dependent children cut
+        from this run's dependency outputs. A pre-existing child base is only accepted as historical
+        metadata when it is an immutable ancestor of the current parent base; unrelated or mutable values
+        fail closed before dispatch."""
+        self._validate_inherited_child_base(base, child)
         dep_commits = [results[d] for d in child.depends_on if d in results]
         if not dep_commits:                                 # independent / parallel: no inheritance
-            return self._validate_immutable_base(
-                child.base_sha if child.base_sha is not None else base,
-                f"base for task {child.id}",
-            )
+            return self._validate_immutable_base(base, f"base for task {child.id}")
         if len(dep_commits) == 1:                           # serial: resume from the dep's output commit
             return self._validate_immutable_base(
                 dep_commits[0].commit_sha,
@@ -688,6 +704,19 @@ class TaskExecutor:
         finally:
             self._cleanup_worktree(integ_wt)
 
+    def _validate_inherited_child_base(self, parent_base: str, child: TaskNode) -> None:
+        inherited = child.base_sha
+        if inherited is None or inherited == parent_base:
+            return
+        inherited = self._validate_immutable_base(inherited, f"inherited base for task {child.id}")
+        if self.repo is None:
+            return
+        ancestor = self._git("merge-base", "--is-ancestor", inherited, parent_base)
+        if ancestor.returncode != 0:
+            raise TaskExecutorIntegrationError(
+                f"inherited base for task {child.id} ({inherited}) is not an ancestor of "
+                f"current parent base {parent_base}")
+
     def _task_branch_name(self, parent: TaskNode, child: TaskNode) -> str:
         safe_parent = _safe_ref_component(parent.id)
         safe_child = _safe_ref_component(child.id)
@@ -701,6 +730,7 @@ class TaskExecutor:
         if created.returncode != 0:
             raise TaskExecutorIntegrationError(
                 f"could not create task branch {branch_name} at {base}: {created.stderr.strip()}")
+        self._planned_task_branches.add(branch_name)
 
     def _record_task_branch(self, result: BranchTaskResult) -> None:
         if self.repo is None:
@@ -712,11 +742,23 @@ class TaskExecutor:
             raise TaskExecutorIntegrationError(
                 f"non-fast-forward task branch update for {result.plan.task_id} "
                 f"({result.plan.branch_name}): {updated.stderr.strip()}")
+        self._planned_task_branches.discard(result.plan.branch_name)
+        self._published_task_branches.add(result.plan.branch_name)
 
     def _delete_task_branch(self, branch_name: str) -> None:
         if self.repo is None or not branch_name:
             return
         self._git("update-ref", "-d", f"refs/heads/{branch_name}")
+        self._planned_task_branches.discard(branch_name)
+        self._published_task_branches.discard(branch_name)
+
+    def _delete_unpublished_task_branch(self, branch_name: str) -> None:
+        if branch_name not in self._published_task_branches:
+            self._delete_task_branch(branch_name)
+
+    def _cleanup_unpublished_task_branches(self) -> None:
+        for branch_name in list(self._planned_task_branches):
+            self._delete_unpublished_task_branch(branch_name)
 
     def _validate_immutable_base(self, base: str, context: str) -> str:
         if self.repo is None:
@@ -819,7 +861,8 @@ class TaskExecutor:
                            child_executors: dict[concurrent.futures.Future, "TaskExecutor"]) -> None:
         for future, (_child, plan) in futures.items():
             future.cancel()
-            self._delete_task_branch(plan.branch_name)
+            self._delete_unpublished_task_branch(plan.branch_name)
+        self._cleanup_unpublished_task_branches()
         self._cleanup_active_resources()
         executor.shutdown(wait=False, cancel_futures=True)
 
@@ -910,6 +953,8 @@ class TaskExecutor:
         try:
             git_ops.ensure_identity(self.repo)
             for cc in child_commits:
+                own_tree_change = self._commit_has_tree_change(cc.commit_sha)
+                before_tree = self._head_tree(wt)
                 cp = self._git("cherry-pick", "--allow-empty", "--keep-redundant-commits",
                                cc.commit_sha, cwd=wt)
                 if cp.returncode != 0:
@@ -917,6 +962,13 @@ class TaskExecutor:
                     raise TaskExecutorIntegrationError(
                         f"cherry-pick failed on integration branch {branch_name} for {node.id} "
                         f"applying {cc.task_id} ({cc.commit_sha[:8]}): {cp.stderr.strip()}")
+                after_tree = self._head_tree(wt)
+                applied_tree_change = before_tree != after_tree
+                self._record_integration_tree_change(cc, own_tree_change, applied_tree_change)
+                if own_tree_change and not applied_tree_change:
+                    raise TaskExecutorIntegrationError(
+                        f"suspicious redundant integration for {node.id}: child {cc.task_id} "
+                        f"({cc.commit_sha[:8]}) has a non-empty task diff but changed no integrated tree")
             head = self._git("rev-parse", "HEAD", cwd=wt).stdout.strip()
             self._emit({"type": "integration_branch_done", "id": node.id,
                         "branch": branch_name, "head": head,
@@ -926,6 +978,35 @@ class TaskExecutor:
         finally:
             if not handed_off:
                 self._cleanup_worktree(wt)
+
+    def _head_tree(self, wt: Path) -> str:
+        tree = self._git("rev-parse", "HEAD^{tree}", cwd=wt).stdout.strip()
+        if not tree:
+            raise TaskExecutorIntegrationError(f"could not resolve HEAD tree in {wt}")
+        return tree
+
+    def _commit_has_tree_change(self, commit_sha: str) -> bool:
+        tree = self._git("rev-parse", f"{commit_sha}^{{tree}}").stdout.strip()
+        if not tree:
+            raise TaskExecutorIntegrationError(f"could not resolve tree for child commit {commit_sha}")
+        parent = self._git("rev-parse", f"{commit_sha}^1^{{tree}}")
+        if parent.returncode != 0:
+            return True
+        return tree != parent.stdout.strip()
+
+    def _record_integration_tree_change(self, commit: VerifiedCommit, own_tree_change: bool,
+                                        applied_tree_change: bool) -> None:
+        if not isinstance(commit.evidence, dict):
+            commit.evidence = {}
+        evidence = commit.evidence
+        evidence["integration_tree_change"] = {
+            "own_commit_changed_tree": own_tree_change,
+            "applied_changed_tree": applied_tree_change,
+        }
+        if not own_tree_change and not applied_tree_change:
+            evidence["empty_child_recorded"] = True
+            self._emit({"type": "integration_empty_child", "id": commit.task_id,
+                        "commit": commit.commit_sha})
 
     def _default_commit_integration(self, node: TaskNode, base: str, integrated_head: str,
                                     integ_wt, evidence: dict) -> str:
