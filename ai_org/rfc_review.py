@@ -17,9 +17,15 @@ Resolution loop (decided design):
   - the AUFHEBEN (reused from ../archive/.../aufheben-designer) consolidates the five into one
     revised view, ONCE per round,
   - the five reviewers then re-critique that consolidation,
-  - repeat until ALL FIVE have NO unresolved objection. NO cap for now — run to convergence.
+  - repeat until ALL FIVE have NO unresolved objection (CONVERGED), up to CAP rounds.
 
-Converged outcome: DIRECTION-OK -> proceed to a real patch series (not built yet).
+Outcomes:
+  - DIRECTION-OK : converged within CAP (no unresolved objection) -> proceed to a real patch series.
+  - NAK (reject) : did NOT converge within CAP -> rejected; the result returns which dimensions
+                   resolved and which objections remain unresolved.
+CAP is tentatively 5 — kept low on purpose to OBSERVE the loop's behavior and each LLM's behavior
+before tuning or removing it. There is no separate "revise" outcome: revision IS the loop (the
+aufheben revises, the five re-critique); only convergence (OK) and non-convergence (NAK) are terminal.
 
 STUB: the loop/orchestration below is real; the reviewer and aufheben calls go through the
 carrier seam in ``llm.py`` (not wired yet), so running this raises until a carrier is connected.
@@ -47,6 +53,9 @@ DIMENSIONS: list[Dimension] = [
     Dimension("maintenance", "Who maintains it? is the burden justified?"),
 ]
 
+# Tentative round cap. Low on purpose: observe loop + per-LLM behavior before tuning/removing.
+CAP = 5
+
 
 @dataclass
 class Objection:
@@ -57,10 +66,12 @@ class Objection:
 
 @dataclass
 class ReviewResult:
-    status: str               # "direction-ok" (converged with no objection)  -- or later "nak"
-    rounds: int
-    final_view: str           # the converged consolidated RFC view (from the aufheben)
-    history: list = field(default_factory=list)   # per-round objections, for the record
+    status: str                 # "direction-ok" (converged) | "nak" (not converged within CAP)
+    rounds: int                 # rounds actually run
+    final_view: str             # the latest consolidated RFC view (from the aufheben)
+    resolved: list = field(default_factory=list)     # dimension keys with NO objection at the end
+    unresolved: list = field(default_factory=list)   # Objection list still open at the end (NAK)
+    history: list = field(default_factory=list)       # per-round objections, for the record
 
 
 def _review_one(dim: Dimension, rfc: RFC, current_view: str | None) -> Objection:
@@ -100,22 +111,27 @@ def _aufheben_consolidate(rfc: RFC, objections: list[Objection], current_view: s
 
 
 def run_rfc_review(rfc: RFC) -> ReviewResult:
-    """Loop: 5 reviewers -> aufheben consolidates -> 5 re-critique -> until no unresolved objection.
+    """Loop up to CAP rounds: 5 reviewers -> (if objections) aufheben consolidates -> 5 re-critique.
 
-    No cap for now (run to convergence). Orchestration is real; the role calls are stubs.
+    Converged within CAP (no unresolved objection) -> "direction-ok".
+    Not converged within CAP -> "nak", returning which dimensions resolved and which objections
+    remain unresolved. Orchestration is real; the role calls are stubs.
     """
     current_view: str | None = None
     history: list = []
-    rounds = 0
-    while True:
-        rounds += 1
+    for rounds in range(1, CAP + 1):
         objections = [_review_one(dim, rfc, current_view) for dim in DIMENSIONS]
         history.append(objections)
         unresolved = [o for o in objections if o.has_objection]
-        if not unresolved:                                   # no unresolved objection -> converged
-            return ReviewResult("direction-ok", rounds, current_view or "", history)
-        current_view = _aufheben_consolidate(rfc, objections, current_view)  # once per round
-        # next iteration: the five re-critique `current_view`
+        if not unresolved:                                   # converged -> direction OK
+            resolved = [o.dimension for o in objections]
+            return ReviewResult("direction-ok", rounds, current_view or "",
+                                resolved=resolved, unresolved=[], history=history)
+        if rounds == CAP:                                    # cap reached, still open -> NAK
+            resolved = [o.dimension for o in objections if not o.has_objection]
+            return ReviewResult("nak", rounds, current_view or "",
+                                resolved=resolved, unresolved=unresolved, history=history)
+        current_view = _aufheben_consolidate(rfc, objections, current_view)  # revise, then re-critique
 
 
 # Entry (manual for now):
