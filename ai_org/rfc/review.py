@@ -14,15 +14,16 @@ Five independent reviewers (one LLM-backed role each), one concern apiece:
 
 Resolution loop (decided design):
   - each reviewer emits its objections (指摘) on the current RFC view,
-  - the AUFHEBEN consolidates the five into one
-    revised view, ONCE per round,
+  - the AUFHEBEN consolidates the five into one structured revised RFC view,
+    ONCE per round, or escalates a fundamental contradiction,
   - the five reviewers then re-critique that consolidation,
   - repeat until ALL FIVE have NO unresolved objection (CONVERGED), up to CAP rounds.
 
 Outcomes:
   - DIRECTION-OK : converged within CAP (no unresolved objection) -> proceed to a real patch series.
-  - NAK (reject) : did NOT converge within CAP -> rejected; the result returns which dimensions
-                   resolved and which objections remain unresolved.
+  - NAK (reject) : did NOT converge within CAP, or Aufheben found a fundamental contradiction
+                   -> rejected; the result returns which dimensions resolved and which objections
+                   remain unresolved.
 CAP is tentatively 5 — kept low on purpose to OBSERVE the loop's behavior and each LLM's behavior
 before tuning or removing it. There is no separate "revise" outcome: revision IS the loop (the
 aufheben revises, the five re-critique); only convergence (OK) and non-convergence (NAK) are terminal.
@@ -72,6 +73,38 @@ OBJECTION_SCHEMA: dict[str, Any] = {
     },
 }
 
+RFC_VIEW_FIELDS = ("title", "problem", "proposed_change", "interface_sketch", "notes")
+
+AUFHEBEN_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "revised_rfc", "situation_read"],
+    "properties": {
+        "verdict": {"enum": ["proceed", "escalate"]},
+        "revised_rfc": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(RFC_VIEW_FIELDS),
+            "properties": {
+                "title": {"type": "string"},
+                "problem": {"type": "string"},
+                "proposed_change": {"type": "string"},
+                "interface_sketch": {"type": "string"},
+                "notes": {"type": "string"},
+            },
+        },
+        "situation_read": {"type": "string", "maxLength": 1000},
+        "escalation_reason": {"type": "string"},
+    },
+    "allOf": [
+        {
+            "if": {"properties": {"verdict": {"const": "escalate"}}, "required": ["verdict"]},
+            "then": {"required": ["escalation_reason"]},
+        }
+    ],
+}
+
 
 @dataclass
 class Objection:
@@ -81,16 +114,30 @@ class Objection:
 
 
 @dataclass
+class AufhebenDecision:
+    verdict: str
+    revised_rfc: dict[str, str]
+    situation_read: str
+    escalation_reason: str = ""
+
+
+@dataclass
 class ReviewResult:
     status: str                 # "direction-ok" (converged) | "nak" (not converged within CAP)
     rounds: int                 # rounds actually run
-    final_view: str             # the latest consolidated RFC view (from the aufheben)
+    final_view: dict[str, str] | str  # the latest structured RFC view (or "" if none)
     resolved: list = field(default_factory=list)     # dimension keys with NO objection at the end
     unresolved: list = field(default_factory=list)   # Objection list still open at the end (NAK)
     history: list = field(default_factory=list)       # per-round objections, for the record
+    escalation_reason: str = ""
 
 
-def _review_one(dim: Dimension, rfc: RFC, repo: str | Path, current_view: str | None) -> Objection:
+def _review_one(
+    dim: Dimension,
+    rfc: RFC,
+    repo: str | Path,
+    current_view: dict[str, str] | None,
+) -> Objection:
     """One reviewer critiques the RFC (or the latest aufheben consolidation) on ONE dimension.
 
     Fail closed: an unrunnable or malformed review is treated as an unresolved objection.
@@ -99,10 +146,8 @@ def _review_one(dim: Dimension, rfc: RFC, repo: str | Path, current_view: str | 
         f"You review an RFC on ONE concern only: {dim.key} - {dim.blurb}\n"
         "Inspect the target repository read-only only as needed for this dimension.\n"
         "Do not review any other dimension.\n\n"
-        f"RFC title: {rfc.title}\nproblem: {rfc.problem}\nproposed_change: {rfc.proposed_change}\n"
-        f"interface_sketch: {rfc.interface_sketch}\n"
-        f"notes: {rfc.notes}\n"
-        + (f"\nLatest consolidated view to re-critique:\n{current_view}\n" if current_view else "")
+        + _format_rfc("Original RFC", _rfc_to_view(rfc))
+        + (_format_rfc("\nCurrent structured revised RFC to re-critique", current_view) if current_view else "")
         + "\nReturn only JSON matching the provided schema: "
         '{"has_objection": boolean, "detail": "brief dimension-specific explanation"}'
     )
@@ -146,35 +191,115 @@ def _parse_objection(dimension: str, raw: str) -> Objection:
     return Objection(dimension, has_objection, detail)
 
 
+def _rfc_to_view(rfc: RFC) -> dict[str, str]:
+    return {
+        "title": rfc.title,
+        "problem": rfc.problem,
+        "proposed_change": rfc.proposed_change,
+        "interface_sketch": rfc.interface_sketch,
+        "notes": rfc.notes,
+    }
+
+
+def _format_rfc(label: str, view: dict[str, str]) -> str:
+    return (
+        f"{label}:\n"
+        f"title: {view['title']}\n"
+        f"problem: {view['problem']}\n"
+        f"proposed_change: {view['proposed_change']}\n"
+        f"interface_sketch: {view['interface_sketch']}\n"
+        f"notes: {view['notes']}\n"
+    )
+
+
 def _aufheben_consolidate(
     rfc: RFC,
     objections: list[Objection],
     repo: str | Path,
-    current_view: str | None,
-) -> str:
-    """The Aufheben step merges the five reviewers' objections into ONE revised view.
+    current_view: dict[str, str] | None,
+) -> AufhebenDecision:
+    """The Aufheben step merges objections into one revised RFC, or escalates.
 
     Runs once for each non-converged round.
     """
     joined = "\n".join(f"- [{o.dimension}] {o.detail}" for o in objections if o.has_objection)
     prompt = (
-        "You are the Aufheben consolidator. Consolidate the reviewers' objections into ONE revised, coherent "
-        "view of the RFC's direction that addresses them without losing intent.\n"
-        f"RFC: {rfc.title}\n"
-        f"problem: {rfc.problem}\n"
-        f"proposed_change: {rfc.proposed_change}\n"
-        f"interface_sketch: {rfc.interface_sketch}\n"
-        f"notes: {rfc.notes}\n"
-        + (f"Current view:\n{current_view}\n" if current_view else "")
+        "You are the Aufheben. Synthesize the reviewers' objections into ONE revised, coherent RFC direction "
+        "that resolves them without losing intent. If the objections form a FUNDAMENTAL, unresolvable "
+        "contradiction, escalate instead.\n\n"
+        + _format_rfc("RFC", _rfc_to_view(rfc))
+        + (_format_rfc("\nCurrent view", current_view) if current_view else "")
         + f"Objections this round:\n{joined}\n"
+        "\nReturn only JSON matching the provided schema. Use verdict=proceed with revised_rfc when the "
+        "objections can be synthesized. Use verdict=escalate with escalation_reason when they cannot. "
+        "Keep situation_read at or under 1000 characters."
     )
     temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-rfc-aufheben-"))
-    out_file = temp_dir / "aufheben-view.txt"
+    schema_file = temp_dir / "rfc-aufheben.schema.json"
+    out_file = temp_dir / "aufheben-view.json"
     try:
-        result = carrier.run_codex(repo, prompt, "read-only", out_file=out_file)
-        return str(result.get("last_message") or "")
+        schema_file.write_text(json.dumps(AUFHEBEN_SCHEMA, indent=2), encoding="utf-8")
+        result = carrier.run_codex(
+            repo,
+            prompt,
+            "read-only",
+            out_file=out_file,
+            output_schema=schema_file,
+        )
+        if not result.get("ok"):
+            detail = str(result.get("last_message") or "Codex Aufheben did not complete successfully.")
+            return _aufheben_fail_closed(f"Aufheben failed: {detail}")
+        return _parse_aufheben_decision(str(result.get("last_message") or ""))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _parse_aufheben_decision(raw: str) -> AufhebenDecision:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return _aufheben_fail_closed(f"Aufheben returned invalid JSON: {raw}")
+
+    if not isinstance(parsed, dict):
+        return _aufheben_fail_closed(f"Aufheben returned non-object JSON: {raw}")
+
+    verdict = parsed.get("verdict")
+    revised_rfc = parsed.get("revised_rfc")
+    situation_read = parsed.get("situation_read")
+    escalation_reason = parsed.get("escalation_reason", "")
+
+    if verdict not in {"proceed", "escalate"}:
+        return _aufheben_fail_closed(f"Aufheben returned unsupported verdict: {raw}")
+    if not isinstance(situation_read, str) or len(situation_read) > 1000:
+        return _aufheben_fail_closed(f"Aufheben returned invalid situation_read: {raw}")
+    if not _is_rfc_view(revised_rfc):
+        return _aufheben_fail_closed(f"Aufheben returned invalid revised_rfc: {raw}")
+    if verdict == "escalate" and not isinstance(escalation_reason, str):
+        return _aufheben_fail_closed(f"Aufheben returned invalid escalation_reason: {raw}")
+
+    return AufhebenDecision(
+        verdict=verdict,
+        revised_rfc=revised_rfc,
+        situation_read=situation_read,
+        escalation_reason=escalation_reason,
+    )
+
+
+def _is_rfc_view(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(RFC_VIEW_FIELDS)
+        and all(isinstance(value[field], str) for field in RFC_VIEW_FIELDS)
+    )
+
+
+def _aufheben_fail_closed(reason: str) -> AufhebenDecision:
+    return AufhebenDecision(
+        verdict="escalate",
+        revised_rfc={field: "" for field in RFC_VIEW_FIELDS},
+        situation_read=reason[:1000],
+        escalation_reason=reason,
+    )
 
 
 def run_rfc_review(rfc: RFC, repo: str | Path) -> ReviewResult:
@@ -184,17 +309,35 @@ def run_rfc_review(rfc: RFC, repo: str | Path) -> ReviewResult:
     Not converged within CAP -> "nak", returning which dimensions resolved and which objections
     remain unresolved.
     """
-    current_view: str | None = None
+    current_view: dict[str, str] | None = None
     history: list = []
     for rounds in range(1, CAP + 1):
         objections = [_review_one(dim, rfc, repo, current_view) for dim in DIMENSIONS]
-        history.append(objections)
+        round_history: dict[str, Any] = {"round": rounds, "objections": objections}
+        history.append(round_history)
         unresolved = [o for o in objections if o.has_objection]
         if not unresolved:                                   # converged -> direction OK
             resolved = [o.dimension for o in objections]
             return ReviewResult("direction-ok", rounds, current_view or "",
                                 resolved=resolved, unresolved=[], history=history)
-        current_view = _aufheben_consolidate(rfc, objections, repo, current_view)  # revise, then re-critique
+        decision = _aufheben_consolidate(rfc, objections, repo, current_view)  # revise, then re-critique
+        round_history["aufheben"] = {
+            "verdict": decision.verdict,
+            "situation_read": decision.situation_read,
+            "escalation_reason": decision.escalation_reason,
+        }
+        if decision.verdict == "escalate":
+            resolved = [o.dimension for o in objections if not o.has_objection]
+            return ReviewResult(
+                "nak",
+                rounds,
+                current_view or "",
+                resolved=resolved,
+                unresolved=unresolved,
+                history=history,
+                escalation_reason=decision.escalation_reason,
+            )
+        current_view = decision.revised_rfc
         if rounds == CAP:                                    # cap reached, still open -> NAK
             resolved = [o.dimension for o in objections if not o.has_objection]
             return ReviewResult("nak", rounds, current_view or "",
