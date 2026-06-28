@@ -40,8 +40,6 @@ import tempfile
 from typing import Any
 from dataclasses import dataclass, field
 
-from .receive import RFC
-
 
 # --- the five review dimensions -------------------------------------------------------------
 @dataclass
@@ -133,7 +131,7 @@ class ReviewResult:
 
 def _review_one(
     dim: Dimension,
-    rfc: RFC,
+    rfc_view: dict[str, str],
     repo: str | Path,
     current_view: dict[str, str] | None,
 ) -> Objection:
@@ -145,7 +143,7 @@ def _review_one(
         f"You review an RFC on ONE concern only: {dim.key} - {dim.blurb}\n"
         "Inspect the target repository read-only only as needed for this dimension.\n"
         "Do not review any other dimension.\n\n"
-        + _format_rfc("Original RFC", _rfc_to_view(rfc))
+        + _format_rfc("Original RFC", _rfc_to_view(rfc_view))
         + (_format_rfc("\nCurrent structured revised RFC to re-critique", current_view) if current_view else "")
         + "\nReturn only JSON matching the provided schema: "
         '{"has_objection": boolean, "detail": "brief dimension-specific explanation"}'
@@ -194,14 +192,8 @@ def _parse_objection(dimension: str, raw: str) -> Objection:
     return Objection(dimension, has_objection, detail)
 
 
-def _rfc_to_view(rfc: RFC) -> dict[str, str]:
-    return {
-        "title": rfc.title,
-        "problem": rfc.problem,
-        "proposed_change": rfc.proposed_change,
-        "interface_sketch": rfc.interface_sketch,
-        "notes": rfc.notes,
-    }
+def _rfc_to_view(rfc_view: dict[str, str]) -> dict[str, str]:
+    return {field: rfc_view[field] for field in RFC_VIEW_FIELDS}
 
 
 def _format_rfc(label: str, view: dict[str, str]) -> str:
@@ -216,7 +208,7 @@ def _format_rfc(label: str, view: dict[str, str]) -> str:
 
 
 def _aufheben_consolidate(
-    rfc: RFC,
+    rfc_view: dict[str, str],
     objections: list[Objection],
     repo: str | Path,
     current_view: dict[str, str] | None,
@@ -237,7 +229,7 @@ def _aufheben_consolidate(
         "文質 (form-substance) holds an audit-vs-theater tension. Use such a pair to resolve a "
         "criteria-vs-proxy / audit-vs-theater tension — only when it changes a reviewable criterion, not as "
         "ornament. (Pointers: Muller ti-yong; SEP 'Aufhebung'.)\n\n"
-        + _format_rfc("RFC", _rfc_to_view(rfc))
+        + _format_rfc("RFC", _rfc_to_view(rfc_view))
         + (_format_rfc("\nCurrent view", current_view) if current_view else "")
         + f"Objections this round:\n{joined}\n"
         "\nReturn only JSON matching the provided schema. Use verdict=proceed with revised_rfc when the "
@@ -316,25 +308,87 @@ def _aufheben_fail_closed(reason: str) -> AufhebenDecision:
     )
 
 
-def run_rfc_review(rfc: RFC, repo: str | Path) -> ReviewResult:
+def _read_rfc_from_git(repo: str | Path, rfc_path: str) -> tuple[dict[str, str] | None, str]:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"HEAD:{rfc_path}"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"could not read HEAD:{rfc_path}"
+        return None, detail
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"HEAD:{rfc_path} is invalid JSON: {exc}"
+    if not _is_rfc_view(parsed):
+        return None, f"HEAD:{rfc_path} must contain exactly these string fields: {', '.join(RFC_VIEW_FIELDS)}"
+    return _rfc_to_view(parsed), ""
+
+
+def _write_direction_ok(repo: str | Path, rfc_path: str, final_view: dict[str, str], rounds: int) -> None:
+    target = Path(repo, rfc_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(final_view, indent=2) + "\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", rfc_path], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", f"rfc: direction-ok ({rounds} rounds)"], check=True)
+
+
+def _write_nak(repo: str | Path, rounds: int, unresolved_dimensions: list[str]) -> None:
+    dimensions = ", ".join(unresolved_dimensions) if unresolved_dimensions else "none"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "commit",
+            "--allow-empty",
+            "-m",
+            f"rfc: nak ({rounds} rounds)\n\nunresolved: {dimensions}",
+        ],
+        check=True,
+    )
+
+
+def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult:
     """Loop up to CAP rounds: 5 reviewers -> (if objections) aufheben consolidates -> 5 re-critique.
 
     Converged within CAP (no unresolved objection) -> "direction-ok".
     Not converged within CAP -> "nak", returning which dimensions resolved and which objections
     remain unresolved.
     """
+    rfc_view, read_error = _read_rfc_from_git(repo, rfc_path)
+    if rfc_view is None:
+        result = ReviewResult(
+            "nak",
+            0,
+            "",
+            resolved=[],
+            unresolved=[Objection("rfc-read", True, read_error)],
+            history=[],
+            escalation_reason=read_error,
+        )
+        try:
+            _write_nak(repo, 0, ["rfc-read"])
+        except subprocess.CalledProcessError as exc:
+            result.escalation_reason = f"{read_error}; failed to commit NAK: {exc}"
+        return result
+
     current_view: dict[str, str] | None = None
     history: list = []
     for rounds in range(1, CAP + 1):
-        objections = [_review_one(dim, rfc, repo, current_view) for dim in DIMENSIONS]
+        objections = [_review_one(dim, rfc_view, repo, current_view) for dim in DIMENSIONS]
         round_history: dict[str, Any] = {"round": rounds, "objections": objections}
         history.append(round_history)
         unresolved = [o for o in objections if o.has_objection]
         if not unresolved:                                   # converged -> direction OK
             resolved = [o.dimension for o in objections]
-            return ReviewResult("direction-ok", rounds, current_view or "",
+            final_view = current_view or rfc_view
+            _write_direction_ok(repo, rfc_path, final_view, rounds)
+            return ReviewResult("direction-ok", rounds, final_view,
                                 resolved=resolved, unresolved=[], history=history)
-        decision = _aufheben_consolidate(rfc, objections, repo, current_view)  # revise, then re-critique
+        decision = _aufheben_consolidate(rfc_view, objections, repo, current_view)  # revise, then re-critique
         round_history["aufheben"] = {
             "verdict": decision.verdict,
             "situation_read": decision.situation_read,
@@ -342,6 +396,7 @@ def run_rfc_review(rfc: RFC, repo: str | Path) -> ReviewResult:
         }
         if decision.verdict == "escalate":
             resolved = [o.dimension for o in objections if not o.has_objection]
+            _write_nak(repo, rounds, [o.dimension for o in unresolved])
             return ReviewResult(
                 "nak",
                 rounds,
@@ -354,11 +409,11 @@ def run_rfc_review(rfc: RFC, repo: str | Path) -> ReviewResult:
         current_view = decision.revised_rfc
         if rounds == CAP:                                    # cap reached, still open -> NAK
             resolved = [o.dimension for o in objections if not o.has_objection]
+            _write_nak(repo, rounds, [o.dimension for o in unresolved])
             return ReviewResult("nak", rounds, current_view or "",
                                 resolved=resolved, unresolved=unresolved, history=history)
 
 
 # Entry (manual for now):
-#   from ai_org.rfc import RFC
 #   from ai_org.rfc_review import run_rfc_review
-#   result = run_rfc_review(RFC(title=..., problem=..., proposed_change=..., interface_sketch=...), repo=".")
+#   result = run_rfc_review(repo=".")
