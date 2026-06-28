@@ -12,7 +12,7 @@ STUB: the loop shape is real; implement/check go through the carrier (not wired)
 """
 from __future__ import annotations
 
-from . import acceptance, implement
+from . import functional_check, implement
 from ..rfc.receive import RFC
 from ..rfc.task import Task
 
@@ -25,7 +25,7 @@ def make(rfc: RFC, task: Task) -> str:
     branch = result["branch"]
     session_id = result.get("session_id")
     for _ in range(CAP):
-        verdict = acceptance.check(rfc, branch)          # independent goal-reachability
+        verdict = functional_check.check(rfc, branch)          # independent goal-reachability
         if verdict == "ok":
             return branch
         result = implement.run(
