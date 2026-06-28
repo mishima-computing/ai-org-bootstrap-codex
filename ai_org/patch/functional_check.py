@@ -1,31 +1,21 @@
-"""Patch-stage functional_check — the Contributor's own functional verification (動作確認) of its work.
-
-Part of the patch stage (alongside implement's mechanical self-check). Here the Contributor runs its branch
-the way a user would, to confirm the user can actually REACH THE GOAL — beyond "tests pass" ("all tests
-passed but the user still couldn't play"). This is self-verification (a courtesy/quality step), NOT
-approval; the independent judgment is downstream (the merge stage). On fail -> the Contributor fixes.
-
-Substance = the Mona walkthrough: a two-agent static check - a stubborn USER persona that keeps trying
-until truly blocked, and a code-grounded APP that traces the real source (file:line) and confesses gaps
-and false successes, without launching the app. Output: a reachability verdict + where intent meets
-broken reality.
-"""
+"""Patch acceptance: git-read -> codex judgment -> git-write verdict."""
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+import os
 import shutil
 import stat
 import subprocess
 import tempfile
 from typing import Any
 
-from ..rfc.receive import RFC
 
-
+# PROVEN against codex v0.142.0 --output-schema:
+# - no allOf / anyOf / oneOf / if-then
+# - every object must set additionalProperties=false
+# - required must list every key in properties; use empty strings/null unions for absent values
 VERDICT_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
     "required": ["reachable", "blockers", "notes"],
@@ -48,156 +38,194 @@ VERDICT_SCHEMA: dict[str, Any] = {
 }
 
 
-def check(rfc: RFC, branch: str) -> dict:
-    """Run Mona: can a user reach the RFC goal end-to-end with this branch?"""
-    repo = Path.cwd().resolve()
+def check(repo, branch: str) -> dict:
+    """Judge whether a real user can reach the RFC goal with the contribution branch."""
+    repo_path = Path(repo).resolve()
     temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-functional-check-"))
     worktree = temp_dir / "worktree"
-    schema_file = temp_dir / "functional-verdict.schema.json"
-    out_file = temp_dir / "functional-verdict.json"
+    schema_file = temp_dir / "verdict.schema.json"
+    out_file = temp_dir / "verdict.json"
+    branch_ref = _branch_ref(branch)
+    original_sha = ""
 
     try:
-        _git(repo, "worktree", "add", "--detach", str(worktree), branch)
+        original_sha = _git(repo_path, "rev-parse", branch).strip()
+        # Git read is done by python. Codex receives only this detached checkout.
+        _git(repo_path, "worktree", "add", "--detach", str(worktree), branch)
         _make_read_only(worktree)
+
         schema_file.write_text(json.dumps(VERDICT_SCHEMA, indent=2), encoding="utf-8")
+        completed = _run_codex(worktree, _prompt(), out_file, schema_file)
+        verdict = _read_verdict(completed, out_file)
 
-        prompt = _prompt(rfc)
-        cmd = ["codex", "exec", "--sandbox", "read-only", "-C", str(worktree), "-o", str(out_file)]
-        if schema_file is not None:
-            cmd += ["--output-schema", str(schema_file)]
-        cmd.append(prompt)
-        completed = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
+        # Git write is done by python. The detached commit is then installed onto the branch.
+        _make_writable(worktree)
+        _commit_verdict(worktree, verdict)
+        verdict_sha = _git(worktree, "rev-parse", "HEAD").strip()
+        _git(repo_path, "update-ref", branch_ref, verdict_sha, original_sha)
+
+        return verdict
+    except Exception as exc:
+        verdict = _verdict(
+            reachable=False,
+            blockers=[{"where": "functional_check", "why": f"acceptance failed: {exc}"}],
+            notes="",
         )
-        result_text = Path(out_file).read_text(encoding="utf-8")
-        if completed.returncode != 0:
-            return _verdict(
-                reachable=False,
-                blockers=[
-                    {
-                        "where": "functional_check",
-                        "why": "Codex Mona walkthrough did not complete successfully.",
-                    }
-                ],
-                notes=result_text,
-            )
-
-        return _parse_verdict(result_text)
+        if original_sha and worktree.exists():
+            try:
+                _make_writable(worktree)
+                _commit_verdict(worktree, verdict)
+                verdict_sha = _git(worktree, "rev-parse", "HEAD").strip()
+                _git(repo_path, "update-ref", branch_ref, verdict_sha, original_sha)
+            except Exception:
+                pass
+        return verdict
     finally:
         if worktree.exists():
             _make_writable(worktree)
-            subprocess.run(
-                ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            _git_run(repo_path, "worktree", "remove", "--force", str(worktree))
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _prompt(rfc: RFC) -> str:
-    return (
-        "Conduct the Mona functional verification walkthrough for this branch.\n"
-        "This is the Contributor's own 動作確認: decide whether a real USER can reach "
-        "the RFC goal end-to-end with the code in this checkout.\n\n"
-        "Hard rules:\n"
-        "- Do not launch the app, services, tests, scripts, package managers, or build tools.\n"
-        "- Do a static source walkthrough only, grounded in the files in this checkout.\n"
-        "- Use exactly two personas: USER and APP.\n"
-        "- USER is stubborn and tries to accomplish the RFC goal. USER keeps trying past "
-        "dead-ends until truly blocked.\n"
-        "- APP answers only from real source citations in file:line form. APP must not assume "
-        "missing behavior exists.\n"
-        "- APP must confess gaps, missing handlers, wrong wiring, missing persistence, "
-        "authorization/API mismatches, and false successes such as a success toast over a "
-        "backend failure.\n"
-        "- Decide whether USER can reach the goal end-to-end. Passing tests alone is not enough.\n"
-        "- If not reachable, list every blocker with WHERE as file:line and WHY as the exact "
-        "reason the user is blocked.\n\n"
-        "RFC:\n"
-        f"title:\n{rfc.title}\n\n"
-        f"problem / user goal:\n{rfc.problem}\n\n"
-        f"proposed change:\n{rfc.proposed_change}\n\n"
-        f"interface sketch:\n{rfc.interface_sketch or '(none)'}\n\n"
-        f"notes:\n{rfc.notes or '(none)'}\n\n"
-        "Return only JSON matching the provided schema:\n"
-        '{"reachable": boolean, "blockers": [{"where": "file:line", "why": "reason"}], '
-        '"notes": "brief walkthrough summary"}'
+def _run_codex(
+    worktree: Path,
+    prompt: str,
+    out_file: Path,
+    schema_file: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "-C",
+            str(worktree),
+            "-o",
+            str(out_file),
+            "--output-schema",
+            str(schema_file),
+            prompt,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
     )
 
 
-def _parse_verdict(raw: str) -> dict:
+def _prompt() -> str:
+    return (
+        "You are the patch acceptance judge for this contribution branch.\n"
+        "Decide whether a real USER can reach the RFC goal with the code in this checkout.\n\n"
+        "Hard rules:\n"
+        "- Read files only; do not edit, commit, launch the app, run tests, install packages, or run build tools.\n"
+        "- Infer the RFC goal from committed project/RFC/task files in this checkout.\n"
+        "- Use the Mona two-agent walkthrough idea: USER keeps trying to reach the goal; APP answers only "
+        "from source-grounded facts.\n"
+        "- Passing tests alone is not enough. Reject false success where the code claims success but a real "
+        "user cannot complete the goal.\n"
+        "- If blocked, list concrete blockers with where as file:line when possible and why as the user-visible "
+        "reason.\n\n"
+        "Return only JSON matching the provided schema."
+    )
+
+
+def _read_verdict(completed: subprocess.CompletedProcess[str], out_file: Path) -> dict:
+    # PROVEN: codex can exit non-zero or write no -o file. Check both before read_text; fail closed.
+    if completed.returncode != 0:
+        return _verdict(
+            reachable=False,
+            blockers=[{"where": "functional_check", "why": "codex acceptance judge exited non-zero"}],
+            notes=(completed.stderr or completed.stdout or "").strip(),
+        )
+    if not out_file.exists():
+        return _verdict(
+            reachable=False,
+            blockers=[{"where": "functional_check", "why": "codex acceptance judge wrote no output file"}],
+            notes=(completed.stderr or completed.stdout or "").strip(),
+        )
+
+    raw = out_file.read_text(encoding="utf-8")
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         return _verdict(
             reachable=False,
-            blockers=[
-                {
-                    "where": "functional_check",
-                    "why": "Codex Mona walkthrough returned invalid JSON.",
-                }
-            ],
+            blockers=[{"where": "functional_check", "why": "codex acceptance judge returned invalid JSON"}],
             notes=raw,
         )
+    return _normalize_verdict(parsed, raw)
 
+
+def _normalize_verdict(parsed: Any, raw: str) -> dict:
     if not isinstance(parsed, dict):
         return _invalid_shape(raw)
-
-    reachable = parsed.get("reachable")
-    blockers = parsed.get("blockers")
-    notes = parsed.get("notes")
-    if not isinstance(reachable, bool) or not isinstance(blockers, list) or not isinstance(notes, str):
+    if set(parsed) != {"reachable", "blockers", "notes"}:
+        return _invalid_shape(raw)
+    if not isinstance(parsed["reachable"], bool):
+        return _invalid_shape(raw)
+    if not isinstance(parsed["blockers"], list) or not isinstance(parsed["notes"], str):
         return _invalid_shape(raw)
 
-    normalized_blockers = []
-    for item in blockers:
-        if not isinstance(item, dict):
+    blockers = []
+    for item in parsed["blockers"]:
+        if not isinstance(item, dict) or set(item) != {"where", "why"}:
             return _invalid_shape(raw)
-        where = item.get("where")
-        why = item.get("why")
-        if not isinstance(where, str) or not isinstance(why, str):
+        if not isinstance(item["where"], str) or not isinstance(item["why"], str):
             return _invalid_shape(raw)
-        normalized_blockers.append({"where": where, "why": why})
+        blockers.append({"where": item["where"], "why": item["why"]})
 
-    return _verdict(reachable=reachable, blockers=normalized_blockers, notes=notes)
+    return _verdict(reachable=parsed["reachable"], blockers=blockers, notes=parsed["notes"])
 
 
 def _invalid_shape(raw: str) -> dict:
     return _verdict(
         reachable=False,
-        blockers=[
-            {
-                "where": "functional_check",
-                "why": "Codex Mona walkthrough returned JSON that did not match the verdict schema.",
-            }
-        ],
+        blockers=[{"where": "functional_check", "why": "codex verdict did not match the schema"}],
         notes=raw,
     )
 
 
 def _verdict(*, reachable: bool, blockers: list[dict], notes: str) -> dict:
-    return {
-        "ok": reachable,
-        "reachable": reachable,
-        "blockers": blockers,
-        "notes": notes,
-    }
+    return {"ok": reachable, "reachable": reachable, "blockers": blockers, "notes": notes}
+
+
+def _commit_verdict(worktree: Path, verdict: dict) -> None:
+    if verdict["reachable"]:
+        _git(worktree, "commit", "--allow-empty", "-m", "acceptance: reachable")
+        return
+
+    body = _blockers_body(verdict["blockers"])
+    _git(worktree, "commit", "--allow-empty", "-m", "acceptance: blocked", "-m", body)
+
+
+def _blockers_body(blockers: list[dict]) -> str:
+    if not blockers:
+        return "functional_check: acceptance blocked without a specific blocker"
+    return "\n".join(f"{item['where']}: {item['why']}" for item in blockers)
+
+
+def _branch_ref(branch: str) -> str:
+    if branch.startswith("refs/"):
+        return branch
+    return f"refs/heads/{branch}"
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
+    result = _git_run(repo, *args)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git command failed")
+    return result.stdout
+
+
+def _git_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["git", "-C", str(repo), *args],
-        check=True,
+        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    return result.stdout
 
 
 def _make_read_only(path: Path) -> None:
@@ -231,5 +259,4 @@ def _chmod_read_only(path: Path) -> None:
 def _chmod_writable(path: Path) -> None:
     if path.is_symlink():
         return
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IWUSR)
+    path.chmod(path.stat().st_mode | stat.S_IWUSR)

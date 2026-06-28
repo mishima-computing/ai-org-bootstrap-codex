@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import stat
 import subprocess
 
 from ai_org.patch import functional_check
-from ai_org.rfc.receive import RFC
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -26,93 +24,89 @@ def _repo(tmp_path: Path) -> Path:
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test User")
-    (repo / "app.py").write_text("BASE = True\n")
-    _git(repo, "add", "app.py")
+    (repo / "rfc.json").write_text(
+        json.dumps(
+            {
+                "title": "Playable feature",
+                "problem": "A real user needs to reach the feature.",
+                "proposed_change": "Expose the feature through app.py.",
+                "interface_sketch": "python app.py",
+                "notes": "Acceptance checks reachability.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "app.py").write_text("BASE = True\n", encoding="utf-8")
+    _git(repo, "add", "rfc.json", "app.py")
     _git(repo, "commit", "-m", "base")
-    _git(repo, "checkout", "-b", "feature/mona")
-    (repo / "app.py").write_text("GOAL = 'reachable'\n")
+    _git(repo, "checkout", "-b", "feature/playable")
+    (repo / "app.py").write_text("GOAL = 'reachable'\n", encoding="utf-8")
     _git(repo, "add", "app.py")
     _git(repo, "commit", "-m", "feature")
-    feature_sha = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", "-")
+    _git(repo, "checkout", "master")
     return repo
 
 
-def test_check_returns_reachable_verdict_from_read_only_branch_worktree(tmp_path, monkeypatch):
+def test_check_returns_reachable_and_commits_acceptance_to_branch(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
-    feature_sha = _git(repo, "rev-parse", "refs/heads/feature/mona")
-    calls = []
+    before = _git(repo, "rev-parse", "refs/heads/feature/playable")
+    real_run = subprocess.run
+    codex_calls = []
 
-    def fake_run_codex(worktree, prompt, sandbox, *, out_file, output_schema=None, **kwargs):
-        worktree = Path(worktree)
-        output_schema = Path(output_schema)
-        app_file = worktree / "app.py"
-        calls.append(
-            {
-                "worktree": worktree,
-                "prompt": prompt,
-                "sandbox": sandbox,
-                "out_file": Path(out_file),
-                "output_schema": output_schema,
-            }
-        )
-        assert _git(worktree, "rev-parse", "HEAD") == feature_sha
-        assert app_file.read_text() == "GOAL = 'reachable'\n"
-        assert app_file.stat().st_mode & stat.S_IWUSR == 0
-        schema = json.loads(output_schema.read_text())
-        assert schema["required"] == ["reachable", "blockers", "notes"]
-        return {
-            "ok": True,
-            "session_id": "sess-mona",
-            "last_message": json.dumps(
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return real_run(cmd, **kwargs)
+        assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
+        worktree = Path(cmd[cmd.index("-C") + 1])
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        schema_file = Path(cmd[cmd.index("--output-schema") + 1])
+        codex_calls.append({"cmd": cmd, "worktree": worktree, "schema_file": schema_file})
+        assert _git(worktree, "rev-parse", "HEAD") == before
+        assert (worktree / "app.py").read_text(encoding="utf-8") == "GOAL = 'reachable'\n"
+        assert json.loads(schema_file.read_text(encoding="utf-8")) == functional_check.VERDICT_SCHEMA
+        out_file.write_text(
+            json.dumps(
                 {
                     "reachable": True,
                     "blockers": [],
                     "notes": "USER reaches the goal through app.py:1.",
                 }
             ),
-            "events": 1,
-        }
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(functional_check.carrier, "run_codex", fake_run_codex)
-    rfc = RFC(
-        title="Reach the feature",
-        problem="The user needs to complete the Mona goal.",
-        proposed_change="Wire the feature end-to-end.",
-        interface_sketch="Call app.py",
-        notes="Watch for false success.",
-    )
+    monkeypatch.setattr(functional_check.subprocess, "run", fake_run)
 
-    verdict = functional_check.check(rfc, "refs/heads/feature/mona")
+    verdict = functional_check.check(repo, "refs/heads/feature/playable")
 
+    after = _git(repo, "rev-parse", "refs/heads/feature/playable")
     assert verdict == {
         "ok": True,
         "reachable": True,
         "blockers": [],
         "notes": "USER reaches the goal through app.py:1.",
     }
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["sandbox"] == "read-only"
-    assert not call["worktree"].exists()
-    assert call["output_schema"].name == "functional-verdict.schema.json"
-    assert "problem / user goal:\nThe user needs to complete the Mona goal." in call["prompt"]
-    assert "proposed change:\nWire the feature end-to-end." in call["prompt"]
-    assert "Use exactly two personas: USER and APP." in call["prompt"]
-    assert "USER is stubborn" in call["prompt"]
-    assert "APP answers only from real source citations in file:line form" in call["prompt"]
-    assert "Do not launch the app" in call["prompt"]
+    assert after != before
+    assert _git(repo, "log", "-1", "--format=%s", "refs/heads/feature/playable") == "acceptance: reachable"
+    assert _git(repo, "rev-parse", "HEAD") != after
+    assert len(codex_calls) == 1
+    assert not codex_calls[0]["worktree"].exists()
+    assert "Return only JSON matching the provided schema." in codex_calls[0]["cmd"][-1]
 
 
-def test_check_surfaces_not_reachable_blockers(tmp_path, monkeypatch):
+def test_check_returns_blocked_and_commits_blockers_to_branch(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
+    before = _git(repo, "rev-parse", "refs/heads/feature/playable")
+    real_run = subprocess.run
 
-    def fake_run_codex(worktree, prompt, sandbox, *, out_file, output_schema=None, **kwargs):
-        return {
-            "ok": True,
-            "session_id": "sess-mona",
-            "last_message": json.dumps(
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return real_run(cmd, **kwargs)
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        out_file.write_text(
+            json.dumps(
                 {
                     "reachable": False,
                     "blockers": [
@@ -124,17 +118,15 @@ def test_check_surfaces_not_reachable_blockers(tmp_path, monkeypatch):
                     "notes": "USER is blocked because APP finds no handler.",
                 }
             ),
-            "events": 1,
-        }
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(functional_check.carrier, "run_codex", fake_run_codex)
+    monkeypatch.setattr(functional_check.subprocess, "run", fake_run)
 
-    verdict = functional_check.check(
-        RFC(title="T", problem="Reach G", proposed_change="Add a path"),
-        "refs/heads/feature/mona",
-    )
+    verdict = functional_check.check(repo, "feature/playable")
 
+    after = _git(repo, "rev-parse", "refs/heads/feature/playable")
     assert verdict == {
         "ok": False,
         "reachable": False,
@@ -146,3 +138,12 @@ def test_check_surfaces_not_reachable_blockers(tmp_path, monkeypatch):
         ],
         "notes": "USER is blocked because APP finds no handler.",
     }
+    assert after != before
+    assert _git(repo, "log", "-1", "--format=%s", "refs/heads/feature/playable") == "acceptance: blocked"
+    assert "app.py:1: The branch sets a constant" in _git(
+        repo,
+        "log",
+        "-1",
+        "--format=%b",
+        "refs/heads/feature/playable",
+    )
