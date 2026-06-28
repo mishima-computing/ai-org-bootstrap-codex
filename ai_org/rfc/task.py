@@ -20,4 +20,5 @@ class Task:
     contract: str = ""                               # interface/contract to satisfy (RFC approach)
     base_sha: str = ""                               # immutable commit to branch from
     scope: list = field(default_factory=list)        # files/symbols it is allowed to touch
+    checks: list[str] = field(default_factory=list)   # deterministic shell checks to run in worktree
     depends_on: list = field(default_factory=list)   # empty in the flat case; set only for serial deps

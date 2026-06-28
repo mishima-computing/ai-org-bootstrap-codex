@@ -15,6 +15,8 @@ from uuid import uuid4
 from .. import carrier
 from ..rfc.task import Task
 
+SELF_CHECK_CAP = 3
+
 
 def run(
     task: Task,
@@ -46,10 +48,49 @@ def run(
             out_file=out_file,
             resume_session=resume_session,
         )
+        session_id = result.get("session_id") or resume_session
+        if not task.checks:
+            return {
+                "branch": branch_ref,
+                "session_id": session_id,
+                "ok": True,
+            }
+
+        failures = _run_checks(worktree, task.checks)
+        if not failures:
+            return {
+                "branch": branch_ref,
+                "session_id": session_id,
+                "ok": True,
+            }
+
+        for _ in range(SELF_CHECK_CAP):
+            if not session_id:
+                break
+            result = carrier.run_codex(
+                worktree,
+                _prompt(
+                    task,
+                    feedback=_self_check_feedback(failures),
+                    resume_session=session_id,
+                ),
+                "workspace-write",
+                out_file=out_file,
+                resume_session=session_id,
+            )
+            session_id = result.get("session_id") or session_id
+            failures = _run_checks(worktree, task.checks)
+            if not failures:
+                return {
+                    "branch": branch_ref,
+                    "session_id": session_id,
+                    "ok": True,
+                }
+
         return {
             "branch": branch_ref,
-            "session_id": result.get("session_id"),
-            "ok": bool(result.get("ok")),
+            "session_id": session_id,
+            "ok": False,
         }
     finally:
         if worktree.exists():
@@ -83,6 +124,47 @@ def _prompt(task: Task, *, feedback: str | None, resume_session: str | None) -> 
         f"{scope}\n\n"
         "Do not touch files or symbols outside that scope.\n"
         "Make focused, one-logical-change commits with good messages."
+    )
+
+
+def _run_checks(worktree: Path, checks: list[str]) -> list[dict]:
+    failures = []
+    for command in checks:
+        result = subprocess.run(
+            command,
+            cwd=worktree,
+            shell=True,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode != 0:
+            failures.append(
+                {
+                    "command": command,
+                    "returncode": result.returncode,
+                    "output": result.stdout,
+                }
+            )
+    return failures
+
+
+def _self_check_feedback(failures: list[dict]) -> str:
+    blocks = []
+    for failure in failures:
+        output = failure["output"].rstrip() or "(no output)"
+        blocks.append(
+            "command:\n"
+            f"{failure['command']}\n"
+            f"exit code: {failure['returncode']}\n"
+            "combined output:\n"
+            f"{output}"
+        )
+    return (
+        "Deterministic self-check failed in the contribution worktree. "
+        "Fix only the failures below, then stop.\n\n"
+        + "\n\n---\n\n".join(blocks)
     )
 
 
