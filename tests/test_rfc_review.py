@@ -67,9 +67,9 @@ def _commit_count(repo: Path) -> int:
 
 def _schema_kind(output_schema: str | Path) -> str:
     schema = json.loads(Path(output_schema).read_text(encoding="utf-8"))
-    if schema["required"] == ["has_objection", "detail"]:
+    if schema == review.OBJECTION_SCHEMA:
         return "reviewer"
-    if schema["required"] == ["verdict", "revised_rfc", "situation_read"]:
+    if schema == review.AUFHEBEN_SCHEMA:
         return "aufheben"
     raise AssertionError(f"unexpected schema: {schema}")
 
