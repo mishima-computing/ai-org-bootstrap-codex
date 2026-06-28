@@ -22,7 +22,18 @@ def test_make_resumes_contributor_session_after_functional_check_failure(monkeyp
             "ok": True,
         }
 
-    verdicts = iter(["fail: missing edge case", "ok"])
+    failed_verdict = {
+        "ok": False,
+        "reachable": False,
+        "blockers": [{"where": "app.py:12", "why": "missing edge case"}],
+        "notes": "Mona found a missing edge case.",
+    }
+    verdicts = iter(
+        [
+            failed_verdict,
+            {"ok": True, "reachable": True, "blockers": [], "notes": "reachable"},
+        ]
+    )
 
     monkeypatch.setattr(contribution.implement, "run", fake_run)
     monkeypatch.setattr(contribution.functional_check, "check", lambda rfc, branch: next(verdicts))
@@ -34,7 +45,7 @@ def test_make_resumes_contributor_session_after_functional_check_failure(monkeyp
     assert calls == [
         {"feedback": None, "resume_session": None, "branch_ref": None},
         {
-            "feedback": "fail: missing edge case",
+            "feedback": failed_verdict,
             "resume_session": "sess-1",
             "branch_ref": "refs/heads/contrib/task-1",
         },

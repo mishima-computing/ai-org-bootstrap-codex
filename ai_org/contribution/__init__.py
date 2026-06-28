@@ -26,7 +26,7 @@ def make(rfc: RFC, task: Task) -> str:
     session_id = result.get("session_id")
     for _ in range(CAP):
         verdict = functional_check.check(rfc, branch)          # independent goal-reachability
-        if verdict == "ok":
+        if verdict["ok"]:
             return branch
         result = implement.run(
             task,
