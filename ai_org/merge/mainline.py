@@ -1,4 +1,4 @@
-"""Mainline_maintainer (layer 2, the Linus role) — review subsystem refs and integrate."""
+"""Merge-stage mainline maintainer (layer 2, the Linus role) — review subsystem refs and integrate."""
 from __future__ import annotations
 
 import json

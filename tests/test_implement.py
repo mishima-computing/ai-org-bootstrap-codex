@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from ai_org.contribution import implement
+from ai_org.patch import implement
 from ai_org.rfc.task import Task
 
 

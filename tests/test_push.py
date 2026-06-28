@@ -33,7 +33,7 @@ def test_advance_pushes_visible_refs_to_bare_origin(tmp_path, monkeypatch):
         _git(repo, "update-ref", driver.MAINLINE_REF, refs[-1])
         return driver.MAINLINE_REF
 
-    monkeypatch.setattr(driver.contribution, "make", make)
+    monkeypatch.setattr(driver.patch, "make", make)
     monkeypatch.setattr(driver.subsystem, "review_and_integrate", integrate_subsystem)
     monkeypatch.setattr(driver.mainline, "review_and_integrate", integrate_mainline)
 

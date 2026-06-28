@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ai_org import contribution
+from ai_org import patch
 from ai_org.rfc.receive import RFC
 from ai_org.rfc.task import Task
 
@@ -35,13 +35,13 @@ def test_make_resumes_contributor_session_after_functional_check_failure(monkeyp
         ]
     )
 
-    monkeypatch.setattr(contribution.implement, "run", fake_run)
-    monkeypatch.setattr(contribution.functional_check, "check", lambda rfc, branch: next(verdicts))
+    monkeypatch.setattr(patch.implement, "run", fake_run)
+    monkeypatch.setattr(patch.functional_check, "check", lambda rfc, branch: next(verdicts))
 
     rfc = RFC(title="T", problem="P", proposed_change="C")
     task = Task(id="task-1", objective="O")
 
-    assert contribution.make(rfc, task) == "refs/heads/contrib/task-1"
+    assert patch.make(rfc, task) == "refs/heads/contrib/task-1"
     assert calls == [
         {"feedback": None, "resume_session": None, "branch_ref": None},
         {

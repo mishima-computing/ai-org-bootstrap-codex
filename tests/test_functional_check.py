@@ -5,7 +5,7 @@ from pathlib import Path
 import stat
 import subprocess
 
-from ai_org.contribution import functional_check
+from ai_org.patch import functional_check
 from ai_org.rfc.receive import RFC
 
 

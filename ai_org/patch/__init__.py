@@ -1,6 +1,6 @@
-"""Contribution — the unit handed up to a maintainer: an implemented AND accepted branch.
+"""Patch stage — the unit handed up to a maintainer: an implemented AND accepted branch.
 
-A Contribution contains two parts with DISTINCT actors:
+The patch stage contains two parts with DISTINCT actors:
   - Implement  : the Contributor writes the code (the only code author/fixer).
   - Acceptance : an INDEPENDENT goal-reachability check.
 
@@ -36,4 +36,4 @@ def make(rfc: RFC, task: Task) -> str:
         )                                        # fail -> Contributor re-implements (v2)
         branch = result["branch"]
         session_id = result.get("session_id") or session_id
-    raise RuntimeError("contribution not accepted within CAP")  # terminal -> escalate
+    raise RuntimeError("patch not accepted within CAP")  # terminal -> escalate

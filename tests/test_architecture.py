@@ -9,8 +9,8 @@ PACKAGE_ROOT = ROOT / "ai_org"
 
 PHASES = {
     "ai_org.rfc": 0,
-    "ai_org.contribution": 1,
-    "ai_org.maintainers": 2,
+    "ai_org.patch": 1,
+    "ai_org.merge": 2,
 }
 
 

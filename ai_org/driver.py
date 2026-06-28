@@ -15,8 +15,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import contribution
-from .maintainers import mainline, subsystem
+from . import patch
+from .merge import mainline, subsystem
 from .platform import git, state
 from .rfc import decompose, review
 from .rfc.receive import RFC, receive
@@ -366,7 +366,7 @@ def _make_contribution_in_repo(repo: Path, rfc: RFC, task: Task) -> str:
     cwd = Path.cwd()
     try:
         os.chdir(repo)
-        return contribution.make(rfc, task)
+        return patch.make(rfc, task)
     finally:
         os.chdir(cwd)
 

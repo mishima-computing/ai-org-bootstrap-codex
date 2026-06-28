@@ -35,7 +35,7 @@ def test_repeated_advance_drives_fresh_repo_to_done_with_committed_state_files(t
         _git(repo, "update-ref", driver.MAINLINE_REF, refs[-1])
         return driver.MAINLINE_REF
 
-    monkeypatch.setattr(driver.contribution, "make", make)
+    monkeypatch.setattr(driver.patch, "make", make)
     monkeypatch.setattr(driver.subsystem, "review_and_integrate", integrate_subsystem)
     monkeypatch.setattr(driver.mainline, "review_and_integrate", integrate_mainline)
 
@@ -141,7 +141,7 @@ def test_advance_resumes_from_contribution_branch_without_redoing_patch(tmp_path
         _git(repo, "update-ref", ref, branch)
         return ref
 
-    monkeypatch.setattr(driver.contribution, "make", fail_if_redone)
+    monkeypatch.setattr(driver.patch, "make", fail_if_redone)
     monkeypatch.setattr(driver.subsystem, "review_and_integrate", integrate_subsystem)
 
     record = driver.advance(rfc, repo)

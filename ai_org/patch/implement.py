@@ -1,4 +1,4 @@
-"""Contributor implementation role.
+"""Patch-stage Contributor implementation role.
 
 The Contributor is the only writer. It runs Codex in an isolated git worktree,
 on a contribution branch, through ``ai_org.platform.carrier.run_codex``.
@@ -33,7 +33,7 @@ def run(
     branch_ref = f"refs/heads/{branch_name}"
     base = task.base_sha or _git(repo_path, "rev-parse", "HEAD").strip()
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-contrib-"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-patch-"))
     worktree = temp_dir / "worktree"
     try:
         if _branch_exists(repo_path, branch_ref):
@@ -204,7 +204,7 @@ def _self_check_feedback(failures: list[dict]) -> str:
             f"{output}"
         )
     return (
-        "Deterministic self-check failed in the contribution worktree. "
+        "Deterministic self-check failed in the patch worktree. "
         "Fix only the failures below, then stop.\n\n"
         + "\n\n---\n\n".join(blocks)
     )

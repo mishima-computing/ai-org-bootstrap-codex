@@ -77,9 +77,9 @@ flags (`--sandbox`, `-C`, `--model`) come BEFORE the `resume` subcommand; `-o <f
 |---|---|---|---|
 | `rfc/review` (5 + Aufheben) | read-only | repo | `--output-schema` (verdicts) + `-o` |
 | `rfc/decompose` | read-only | repo | `--output-schema` (Tasks) + `-o` |
-| `contribution/implement` (Contributor) | **workspace-write** | the task's **worktree** | `-o` (+ `resume` for v2) |
-| `contribution/acceptance` (2-agent walkthrough) | read-only | repo | `--output-schema` (verdict) + `-o` |
-| `maintainers/subsystem` · `maintainers/mainline` | read-only | repo | `--output-schema` (verdict) + `-o` |
+| `patch/implement` (Contributor) | **workspace-write** | the task's **worktree** | `-o` (+ `resume` for v2) |
+| `patch/acceptance` (2-agent walkthrough) | read-only | repo | `--output-schema` (verdict) + `-o` |
+| `merge/subsystem` · `merge/mainline` | read-only | repo | `--output-schema` (verdict) + `-o` |
 
 Common: `--json` for liveness, `-o` for the result, `--ephemeral` for stateless calls, long context via piped stdin.
 Only the Contributor gets `workspace-write`; every other role is read-only review.

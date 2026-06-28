@@ -1,4 +1,4 @@
-"""Subsystem_tree_maintainer (layer 1) — review a Contribution + integrate into the subsystem tree.
+"""Merge-stage subsystem maintainer (layer 1) — review a contribution + integrate into the subsystem tree.
 STUB-level Codex wiring.
 
 REVIEW ONLY (a reject routes back to the Contributor — the sole code-fixer). Thin wiring of the Codex

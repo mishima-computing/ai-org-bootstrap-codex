@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ai_org.maintainers import mainline
+from ai_org.merge import mainline
 
 
 def test_mainline_accept_merges_subsystem_ref(tmp_path, monkeypatch):
