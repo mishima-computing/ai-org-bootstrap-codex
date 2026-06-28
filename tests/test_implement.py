@@ -58,7 +58,7 @@ def test_run_creates_worktree_off_base_and_calls_carrier(tmp_path, monkeypatch):
         objective="Add a feature",
         contract="feature.txt exists",
         base_sha=base,
-        scope=["feature.txt"],
+        scope=["*.txt"],
     )
 
     result = implement.run(task, repo=repo)
@@ -68,12 +68,13 @@ def test_run_creates_worktree_off_base_and_calls_carrier(tmp_path, monkeypatch):
         "session_id": "sess-1",
         "ok": True,
     }
+    assert len(calls) == 1
     assert calls[0]["sandbox"] == "workspace-write"
     assert calls[0]["resume_session"] is None
     assert not calls[0]["worktree"].exists()
     assert _git(repo, "show", "refs/heads/contrib/task-1:feature.txt") == "implemented"
     assert "objective:\nAdd a feature" in calls[0]["prompt"]
-    assert "- feature.txt" in calls[0]["prompt"]
+    assert "- *.txt" in calls[0]["prompt"]
 
 
 def test_run_resume_uses_existing_branch_and_session_delta(tmp_path, monkeypatch):
@@ -238,3 +239,115 @@ def test_run_empty_checks_skips_self_check_loop(tmp_path, monkeypatch):
         "ok": True,
     }
     assert [call["resume_session"] for call in calls] == [None]
+
+
+def test_run_scope_deviation_resumes_and_returns_not_ok_when_persistent(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    calls = []
+
+    def fake_run_codex(worktree, prompt, sandbox, *, out_file, resume_session=None, **kwargs):
+        worktree = Path(worktree)
+        calls.append({"prompt": prompt, "resume_session": resume_session})
+        if resume_session:
+            previous = (worktree / "outside.txt").read_text()
+            (worktree / "outside.txt").write_text(previous + "still outside\n")
+            _git(worktree, "add", "outside.txt")
+            _git(worktree, "commit", "-m", "persist outside scope")
+            return {"ok": True, "session_id": resume_session, "last_message": "retry", "events": 1}
+
+        (worktree / "allowed.txt").write_text("allowed\n")
+        (worktree / "outside.txt").write_text("outside\n")
+        _git(worktree, "add", "allowed.txt", "outside.txt")
+        _git(worktree, "commit", "-m", "implement with stray file")
+        return {"ok": True, "session_id": "sess-1", "last_message": "done", "events": 1}
+
+    monkeypatch.setattr(implement.carrier, "run_codex", fake_run_codex)
+    task = Task(
+        id="task-scope-deviation",
+        objective="Write the allowed file",
+        contract="allowed.txt exists",
+        base_sha=base,
+        scope=["allowed.txt"],
+    )
+
+    result = implement.run(task, repo=repo)
+
+    assert result == {
+        "branch": "refs/heads/contrib/task-scope-deviation",
+        "session_id": "sess-1",
+        "ok": False,
+    }
+    assert len(calls) == 1 + implement.SELF_CHECK_CAP
+    assert [call["resume_session"] for call in calls] == [None] + ["sess-1"] * implement.SELF_CHECK_CAP
+    assert "scope deviation:" in calls[1]["prompt"]
+    assert "outside.txt" in calls[1]["prompt"]
+    assert "allowed task.scope:\n- allowed.txt" in calls[1]["prompt"]
+    assert "revert the out-of-scope edits" in calls[1]["prompt"]
+
+
+def test_run_pre_localization_includes_relevant_existing_code(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "src").mkdir()
+    (repo / "src" / "payments.py").write_text(
+        "def calculate_invoice_total(items):\n"
+        "    return sum(item.price for item in items)\n"
+    )
+    (repo / "docs").mkdir()
+    (repo / "docs" / "notes.md").write_text("unrelated notes\n")
+    _git(repo, "add", "src/payments.py", "docs/notes.md")
+    _git(repo, "commit", "-m", "add existing code")
+    base = _git(repo, "rev-parse", "HEAD")
+    calls = []
+
+    def fake_run_codex(worktree, prompt, sandbox, *, out_file, resume_session=None, **kwargs):
+        calls.append({"prompt": prompt, "resume_session": resume_session})
+        return {"ok": True, "session_id": "sess-1", "last_message": "done", "events": 1}
+
+    monkeypatch.setattr(implement.carrier, "run_codex", fake_run_codex)
+    task = Task(
+        id="task-grounding",
+        objective="Update invoice total calculation",
+        contract="invoice totals are calculated correctly",
+        base_sha=base,
+        scope=["src/payments.py"],
+    )
+
+    result = implement.run(task, repo=repo)
+
+    assert result["ok"] is True
+    assert "relevant existing code" in calls[0]["prompt"]
+    assert "src/payments.py:1 def calculate_invoice_total(items):" in calls[0]["prompt"]
+    assert "docs/notes.md" not in calls[0]["prompt"]
+
+
+def test_run_empty_scope_skips_scope_deviation_check(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    calls = []
+
+    def fake_run_codex(worktree, prompt, sandbox, *, out_file, resume_session=None, **kwargs):
+        worktree = Path(worktree)
+        calls.append({"prompt": prompt, "resume_session": resume_session})
+        (worktree / "outside.txt").write_text("allowed because scope is empty\n")
+        _git(worktree, "add", "outside.txt")
+        _git(worktree, "commit", "-m", "change with empty scope")
+        return {"ok": True, "session_id": "sess-1", "last_message": "done", "events": 1}
+
+    monkeypatch.setattr(implement.carrier, "run_codex", fake_run_codex)
+    task = Task(
+        id="task-empty-scope-deviation-skip",
+        objective="Make an unconstrained change",
+        contract="change exists",
+        base_sha=base,
+        scope=[],
+    )
+
+    result = implement.run(task, repo=repo)
+
+    assert result == {
+        "branch": "refs/heads/contrib/task-empty-scope-deviation-skip",
+        "session_id": "sess-1",
+        "ok": True,
+    }
+    assert len(calls) == 1
