@@ -21,9 +21,19 @@ CAP = 5
 
 def make(rfc: RFC, task: Task) -> str:
     """Produce an accepted branch for one task: implement, then independent acceptance, bounded loop."""
-    branch = implement.run(task)                 # Contributor writes
+    result = implement.run(task)                 # Contributor writes
+    branch = result["branch"]
+    session_id = result.get("session_id")
     for _ in range(CAP):
-        if acceptance.check(rfc, branch) == "ok":        # independent goal-reachability
+        verdict = acceptance.check(rfc, branch)          # independent goal-reachability
+        if verdict == "ok":
             return branch
-        branch = implement.run(task)             # fail -> Contributor re-implements (v2)
+        result = implement.run(
+            task,
+            feedback=verdict,
+            resume_session=session_id,
+            branch_ref=branch,
+        )                                        # fail -> Contributor re-implements (v2)
+        branch = result["branch"]
+        session_id = result.get("session_id") or session_id
     raise RuntimeError("contribution not accepted within CAP")  # terminal -> escalate
