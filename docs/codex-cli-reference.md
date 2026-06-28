@@ -1,72 +1,85 @@
 # Codex CLI reference (for the carrier seam)
 
-Captured from `codex --help` / `codex exec --help` on 2026-06-28. The AI Org runs every LLM-backed role
-through `codex exec` (see `ai_org/carrier.py`). This is the reference for which flags each role uses.
+Captured from `codex --help` / `codex exec --help` (2026-06-28) + behaviour we actually hit (the archived
+`carrier_harness.py`). The AI Org runs every LLM-backed role through `codex exec` (see `ai_org/carrier.py`).
+Each flag below has **what it does / when we use it / gotcha**.
 
-## `codex` subcommands
+## `codex` subcommands (top level)
 
-`codex [OPTIONS] [PROMPT]` (no subcommand → interactive). Subcommands:
+`codex [OPTIONS] [PROMPT]` with no subcommand opens the *interactive* TUI. We never use that; we use `exec`.
 
-| cmd | what |
+| cmd | what / when |
 |---|---|
-| `exec` (alias `e`) | **run Codex non-interactively** ← what the carrier uses |
-| `review` | run a code review non-interactively |
-| `login` / `logout` | manage auth |
-| `mcp` / `mcp-server` | manage / serve MCP |
-| `plugin` | manage plugins |
-| `app-server` / `remote-control` / `exec-server` | (experimental) servers |
-| `app` | launch desktop app |
-| `resume` / `fork` / `archive` / `unarchive` / `delete` | session management |
-| `apply` (alias `a`) | `git apply` the latest agent diff to the working tree |
-| `sandbox` | run a command inside Codex's sandbox |
-| `cloud` | (experimental) Codex Cloud tasks |
-| `completion` / `update` / `doctor` / `debug` / `features` / `help` | misc |
+| `exec` (`e`) | **run non-interactively** — the only one the carrier uses. |
+| `review` | a non-interactive code review (Codex's built-in reviewer). Our maintainer/acceptance roles are our OWN reviewers, so we don't rely on this. |
+| `resume` / `fork` | re-enter a saved session (keeps the agent's memory). `exec resume` is how a revise (v2) continues instead of re-deriving. |
+| `apply` (`a`) | `git apply` the agent's last diff to the working tree. Relevant only if we ran codex with no write access and want to apply its patch ourselves. |
+| `login`/`logout`/`mcp`/`plugin`/`app-server`/`cloud`/`doctor`/`update`/`completion`/`features` | auth, MCP, servers, maintenance — not in the per-role hot path. |
 
-## `codex exec [OPTIONS] [PROMPT]` — non-interactive (the carrier)
+## `codex exec [OPTIONS] [PROMPT]` — the carrier
 
-`[PROMPT]` — initial instructions. If omitted or `-`, read from stdin. If stdin is piped AND a prompt
-is given, stdin is appended as a `<stdin>` block.
+`[PROMPT]` is the instruction. **Gotcha:** if no prompt is given (or `-`), codex reads stdin and will *block*
+("Reading additional input from stdin…") — the classic hang. Always pass the prompt as an arg or pipe it; the
+carrier feeds `< /dev/null` when not piping. If you pipe stdin AND pass a prompt, stdin is appended as a `<stdin>`
+block (handy for attaching large context under a short instruction).
 
-Sub: `resume` (resume a session by id / `--last`), `review`, `help`.
-
-### Input / output
-- `-o, --output-last-message <FILE>` — write the agent's final message to FILE. **← clean output capture**
-- `--output-schema <FILE>` — JSON Schema describing the model's final response shape. **← structured output**
-- `--json` — print events to stdout as JSONL.
-- `--color always|never|auto` (default auto).
+### Input / output — how we get the result back
+- **`-o, --output-last-message <FILE>`** — writes ONLY the agent's *final* message to FILE.
+  *Use:* the clean way to capture a role's answer. We read the verdict/branch result from this file, not from stdout.
+- **`--output-schema <FILE>`** — a JSON Schema the final message must match → forces *structured* output.
+  *Use:* deterministic parsing — reviewer verdicts, decompose→Tasks, acceptance results. No regex on prose.
+- **`--json`** — streams every event (tool start/complete, reasoning) to stdout as JSONL, live.
+  *Use:* progress + the no-output watchdog keys off the event stream. *Gotcha:* the RESULT still comes from `-o`,
+  not by parsing this stream; `--json` is for liveness/observability.
+- `--color always|never|auto` — terminal color (irrelevant when captured).
 
 ### Model / provider
-- `-m, --model <MODEL>`
-- `--oss` — use an open-source provider; `--local-provider <lmstudio|ollama>`
-- `-p, --profile <name>` — layer `$CODEX_HOME/<name>.config.toml` on the base config
+- **`-m, --model <MODEL>`** — which model the role uses. *Use:* a heavier model for hard reviews, lighter for cheap roles.
+- `--oss` / `--local-provider <lmstudio|ollama>` — run against a local/open model instead of the hosted one.
+- `-p, --profile <name>` — layer `$CODEX_HOME/<name>.config.toml` over the base config. *Use:* per-role config presets (model + sandbox + effort bundled under a name).
 
-### Sandbox / permissions / working dir
-- `-s, --sandbox <read-only | workspace-write | danger-full-access>` **← per-role**
-- `-C, --cd <DIR>` — working root **← the role's worktree**
-- `--add-dir <DIR>` — extra writable dirs alongside the workspace
-- `--skip-git-repo-check` — allow running outside a git repo
-- `--dangerously-bypass-approvals-and-sandbox` — skip all prompts, no sandbox (EXTREMELY DANGEROUS)
-- `--dangerously-bypass-hook-trust` — run hooks without persisted trust (DANGEROUS)
+### Sandbox / permissions / working dir — the safety boundary per role
+- **`-s, --sandbox <mode>`** — what model-run shell commands may do:
+  - `read-only` — read the repo, run non-mutating commands; **cannot edit files**. *Use:* every REVIEW role (rfc review, acceptance, the maintainers) — they judge, they don't write.
+  - `workspace-write` — edit files within the workspace (and run commands). *Use:* the **Contributor (implement)** only — the sole writer.
+  - `danger-full-access` — no sandbox at all. Avoid.
+- **`-C, --cd <DIR>`** — the working root codex operates in. *Use:* point each role at the right tree — the Contributor at its **isolated git worktree**, reviewers at the repo/ref under review.
+- `--add-dir <DIR>` — extra writable dirs beyond the workspace. *Use:* rarely — e.g. a shared cache dir.
+- `--skip-git-repo-check` — allow running outside a git repo. *Use:* only if a role runs somewhere that isn't a repo.
+- `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-bypass-hook-trust` — skip prompts / no sandbox / run untrusted hooks. **Dangerous**; only when the whole process is already externally sandboxed.
 
-### Config
-- `-c, --config <key=value>` — override config (dotted path, value parsed as TOML; e.g. `-c model="o3"`)
-- `--enable <FEATURE>` / `--disable <FEATURE>` — feature flags (= `-c features.<name>=true/false`)
-- `--strict-config` — error on unrecognized config fields
-- `--ignore-user-config` — do not load `$CODEX_HOME/config.toml` (auth still uses `CODEX_HOME`)
-- `--ignore-rules` — do not load user/project execpolicy `.rules`
-- `--ephemeral` — do not persist session files to disk **← stateless role calls**
-- `-i, --image <FILE>...` — attach image(s) to the prompt
-- `-h, --help` · `-V, --version`
+### Config / session
+- **`-c, --config <key=value>`** — override any config value (dotted path; value parsed as TOML). *Use:* e.g. `-c model="…"`, reasoning effort, sandbox perms — without editing config.toml.
+- `--enable <F>` / `--disable <F>` — toggle a feature flag (= `-c features.<F>=true/false`).
+- `--strict-config` — error if config.toml has fields this codex version doesn't know. *Use:* catch config drift.
+- `--ignore-user-config` — don't load `$CODEX_HOME/config.toml` (auth still uses `CODEX_HOME`). *Use:* hermetic, reproducible role runs independent of local config.
+- `--ignore-rules` — don't load user/project execpolicy `.rules`.
+- **`--ephemeral`** — don't persist the session to disk. *Use:* stateless one-off role calls (reviewers/acceptance) that will never be resumed. *Don't* use it for the Contributor if you want revise-via-`resume`.
+- `-i, --image <FILE>…` — attach image(s) to the prompt.
+- `-h, --help` · `-V, --version`.
+
+### `codex exec resume` — continue a session (for revise / v2)
+`codex exec [global flags] resume --json <session_id>` re-enters a prior run with full memory, so a revise sends
+only the *delta* (the review feedback) instead of re-deriving everything. **Gotcha — flag order:** the global
+flags (`--sandbox`, `-C`, `--model`) come BEFORE the `resume` subcommand; `-o <file>` is appended after.
+
+## Gotchas we actually hit (from the archived carrier_harness)
+- **stdin hang** — codex blocks waiting on stdin if no prompt source; feed `< /dev/null`. This is why a single
+  carrier seam owns the subprocess.
+- **no-output watchdog** — codex can stall; the seam watches the `--json` event stream and kills the run if no
+  event arrives for N seconds.
+- **process-group kill** — codex can exit while a grandchild still holds stdout, hanging the wait. Capture the
+  pgid right after spawn (`start_new_session`) and `killpg` the whole group on timeout — don't rely on `proc.poll()`.
 
 ## Role → flags (planned)
 
-| role (module) | sandbox | cd | output |
+| role (module) | sandbox | -C | output |
 |---|---|---|---|
 | `rfc/review` (5 + Aufheben) | read-only | repo | `--output-schema` (verdicts) + `-o` |
 | `rfc/decompose` | read-only | repo | `--output-schema` (Tasks) + `-o` |
-| `contribution/contributor` (implement) | **workspace-write** | the task's **worktree** (`-C`) | `-o` |
+| `contribution/implement` (Contributor) | **workspace-write** | the task's **worktree** | `-o` (+ `resume` for v2) |
 | `contribution/acceptance` (2-agent walkthrough) | read-only | repo | `--output-schema` (verdict) + `-o` |
-| `maintainers/subsystem` / `maintainers/mainline` | read-only | repo | `--output-schema` (verdict) + `-o` |
+| `maintainers/subsystem` · `maintainers/mainline` | read-only | repo | `--output-schema` (verdict) + `-o` |
 
-Common: `--ephemeral` for stateless calls; long prompts via stdin; `--json` or `-o` to capture output.
-Only the Contributor writes code (workspace-write); every other role is read-only review.
+Common: `--json` for liveness, `-o` for the result, `--ephemeral` for stateless calls, long context via piped stdin.
+Only the Contributor gets `workspace-write`; every other role is read-only review.
