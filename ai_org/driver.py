@@ -20,6 +20,7 @@ import tempfile
 from typing import Any
 
 from . import contribution
+from .gitutil import push_ref
 from .maintainers import mainline, subsystem
 from .rfc import decompose, review
 from .rfc.receive import RFC, receive
@@ -54,7 +55,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             phase="rejected" if verdict["status"] == "nak" else "review",
             status="rejected" if verdict["status"] == "nak" else "approved",
         )
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc, "verdict.json": verdict},
@@ -65,6 +66,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             "status": verdict.get("status"),
             "terminal": verdict.get("status") == "nak",
             "rfc_id": rfc_id,
+            "state_push": state_push,
         }
 
     if verdict.get("status") == "nak":
@@ -75,7 +77,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
         tasks = decompose.decompose(rfc, repo)
         plan = _plan_doc(rfc_id, tasks)
         rfc_doc = _rfc_doc(rfc, rfc_id, phase="plan", status="planned")
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc, "plan.json": plan},
@@ -92,20 +94,30 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             "terminal": False,
             "rfc_id": rfc_id,
             "tasks": [task["id"] for task in plan["tasks"]],
+            "state_push": state_push,
         }
 
     tasks = [_task_from_json(raw) for raw in plan.get("tasks", [])]
     if not tasks:
         if not _ref_exists(repo, MAINLINE_REF):
             _update_ref(repo, MAINLINE_REF, "HEAD")
+        mainline_push = push_ref(repo, MAINLINE_REF)
         rfc_doc = _rfc_doc(rfc, rfc_id, phase="done", status="done")
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc},
             {"type": "complete-empty-plan", "phase": "done", "status": "done"},
         )
-        return {"action": "none", "status": "done", "terminal": True, "rfc_id": rfc_id, "mainline": MAINLINE_REF}
+        return {
+            "action": "none",
+            "status": "done",
+            "terminal": True,
+            "rfc_id": rfc_id,
+            "mainline": MAINLINE_REF,
+            "push": mainline_push,
+            "state_push": state_push,
+        }
 
     for task in tasks:
         contrib_ref = _contribution_ref(task)
@@ -116,7 +128,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             if not _ref_exists(repo, contrib_ref):
                 rfc_doc = _rfc_doc(rfc, rfc_id, phase="contribution", status="rejected")
                 plan = _with_patch_state(plan, task.id, phase="contribution", status="reject")
-                _commit_state_change(
+                state_push = _commit_state_change(
                     repo,
                     rfc_id,
                     {"rfc.json": rfc_doc, "plan.json": plan},
@@ -133,6 +145,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                     "terminal": True,
                     "rfc_id": rfc_id,
                     "patch": task.id,
+                    "state_push": state_push,
                 }
             rfc_doc = _rfc_doc(rfc, rfc_id, phase="contribution", status="active")
             plan = _with_patch_state(
@@ -142,7 +155,8 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                 status="created",
                 contribution_ref=contrib_ref,
             )
-            _commit_state_change(
+            contrib_push = push_ref(repo, contrib_ref)
+            state_push = _commit_state_change(
                 repo,
                 rfc_id,
                 {"rfc.json": rfc_doc, "plan.json": plan},
@@ -161,6 +175,8 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                 "rfc_id": rfc_id,
                 "patch": task.id,
                 "ref": contrib_ref,
+                "push": contrib_push,
+                "state_push": state_push,
             }
 
     for task in tasks:
@@ -171,7 +187,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             if result == "reject":
                 rfc_doc = _rfc_doc(rfc, rfc_id, phase="subsystem", status="rejected")
                 plan = _with_patch_state(plan, task.id, phase="subsystem", status="reject")
-                _commit_state_change(
+                state_push = _commit_state_change(
                     repo,
                     rfc_id,
                     {"rfc.json": rfc_doc, "plan.json": plan},
@@ -188,13 +204,14 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                     "terminal": True,
                     "rfc_id": rfc_id,
                     "patch": task.id,
+                    "state_push": state_push,
                 }
             if result != subsystem_ref and _ref_exists(repo, result):
                 _update_ref(repo, subsystem_ref, result)
             if not _ref_exists(repo, subsystem_ref):
                 rfc_doc = _rfc_doc(rfc, rfc_id, phase="subsystem", status="rejected")
                 plan = _with_patch_state(plan, task.id, phase="subsystem", status="reject")
-                _commit_state_change(
+                state_push = _commit_state_change(
                     repo,
                     rfc_id,
                     {"rfc.json": rfc_doc, "plan.json": plan},
@@ -211,6 +228,7 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                     "terminal": True,
                     "rfc_id": rfc_id,
                     "patch": task.id,
+                    "state_push": state_push,
                 }
             rfc_doc = _rfc_doc(rfc, rfc_id, phase="subsystem", status="active")
             plan = _with_patch_state(
@@ -221,7 +239,8 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                 contribution_ref=contrib_ref,
                 subsystem_ref=subsystem_ref,
             )
-            _commit_state_change(
+            subsystem_push = push_ref(repo, subsystem_ref)
+            state_push = _commit_state_change(
                 repo,
                 rfc_id,
                 {"rfc.json": rfc_doc, "plan.json": plan},
@@ -240,13 +259,15 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
                 "rfc_id": rfc_id,
                 "patch": task.id,
                 "ref": subsystem_ref,
+                "push": subsystem_push,
+                "state_push": state_push,
             }
 
     subsystem_refs = [_subsystem_ref(task) for task in tasks]
     if _mainline_contains_all(repo, subsystem_refs):
         rfc_doc = _rfc_doc(rfc, rfc_id, phase="done", status="done")
         plan = _with_all_patch_state(plan, phase="mainline", status="integrated", mainline_ref=MAINLINE_REF)
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc, "plan.json": plan},
@@ -258,33 +279,47 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
             "terminal": True,
             "rfc_id": rfc_id,
             "mainline": MAINLINE_REF,
+            "state_push": state_push,
         }
 
     result = mainline.review_and_integrate(subsystem_refs, repo)
     if result == "reject":
         rfc_doc = _rfc_doc(rfc, rfc_id, phase="mainline", status="rejected")
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc},
             {"type": "mainline", "phase": "mainline", "status": "reject"},
         )
-        return {"action": "mainline", "status": "reject", "terminal": True, "rfc_id": rfc_id}
+        return {
+            "action": "mainline",
+            "status": "reject",
+            "terminal": True,
+            "rfc_id": rfc_id,
+            "state_push": state_push,
+        }
     if result != MAINLINE_REF and _ref_exists(repo, result):
         _update_ref(repo, MAINLINE_REF, result)
     if not _mainline_contains_all(repo, subsystem_refs):
         rfc_doc = _rfc_doc(rfc, rfc_id, phase="mainline", status="rejected")
-        _commit_state_change(
+        state_push = _commit_state_change(
             repo,
             rfc_id,
             {"rfc.json": rfc_doc},
             {"type": "mainline", "phase": "mainline", "status": "reject"},
         )
-        return {"action": "mainline", "status": "reject", "terminal": True, "rfc_id": rfc_id}
+        return {
+            "action": "mainline",
+            "status": "reject",
+            "terminal": True,
+            "rfc_id": rfc_id,
+            "state_push": state_push,
+        }
 
     rfc_doc = _rfc_doc(rfc, rfc_id, phase="done", status="done")
     plan = _with_all_patch_state(plan, phase="mainline", status="integrated", mainline_ref=MAINLINE_REF)
-    _commit_state_change(
+    mainline_push = push_ref(repo, MAINLINE_REF)
+    state_push = _commit_state_change(
         repo,
         rfc_id,
         {"rfc.json": rfc_doc, "plan.json": plan},
@@ -296,6 +331,8 @@ def advance(rfc: RFC, repo: str | Path) -> dict[str, Any]:
         "terminal": True,
         "rfc_id": rfc_id,
         "mainline": MAINLINE_REF,
+        "push": mainline_push,
+        "state_push": state_push,
     }
 
 
@@ -536,7 +573,7 @@ def _commit_state_change(
     rfc_id: str,
     updates: dict[str, dict[str, Any]],
     event: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     for name, doc in updates.items():
         _validate_state_doc(name, doc)
 
@@ -558,7 +595,7 @@ def _commit_state_change(
         paths[event_path] = old_events + json.dumps(event_doc, sort_keys=True, separators=(",", ":")) + "\n"
         commit = _build_state_commit(repo, base, paths, f"ai-org state: {rfc_id} {event_doc['type']}")
         if _update_ref_cas(repo, STATE_REF, commit, base):
-            return
+            return push_ref(repo, STATE_REF)
     raise RuntimeError(f"could not update {STATE_REF}; concurrent writers did not settle")
 
 
