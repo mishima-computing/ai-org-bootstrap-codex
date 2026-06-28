@@ -15,7 +15,13 @@ import tempfile
 RFC_FIELDS = ("title", "problem", "proposed_change", "interface_sketch", "notes")
 
 
-def run(repo, rfc_path: str = "rfc.json", branch: str | None = None) -> dict:
+def run(
+    repo,
+    rfc_path: str = "rfc.json",
+    branch: str | None = None,
+    feedback=None,
+    attempt: int = 1,
+) -> dict:
     """Implement the RFC committed at HEAD and return contribution branch metadata."""
     repo_path = Path(repo).resolve()
     rfc = _read_rfc_from_head(repo_path, rfc_path)
@@ -23,7 +29,9 @@ def run(repo, rfc_path: str = "rfc.json", branch: str | None = None) -> dict:
         return rfc
 
     rfc_data = rfc["rfc"]
-    branch_name = branch or f"ai-org/contrib/{_slug(rfc_data['title'])}"
+    slug = _slug(rfc_data["title"])
+    suffix = "" if attempt == 1 else f"-a{attempt}"
+    branch_name = branch or f"ai-org/contrib/{slug}{suffix}"
     if _branch_exists(repo_path, branch_name):
         return _failure(f"branch already exists: {branch_name}", branch=branch_name)
 
@@ -51,6 +59,11 @@ def run(repo, rfc_path: str = "rfc.json", branch: str | None = None) -> dict:
             )
 
         prompt = _prompt(rfc_data)
+        if feedback is not None:
+            prompt += (
+                "\nA previous attempt was rejected by acceptance with these blockers: "
+                f"{feedback}. Address them.\n"
+            )
         cmd = [
             "codex",
             "exec",
