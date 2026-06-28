@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .. import carrier
+from ..platform import carrier
 
 CAP = 5
 MAINLINE_REF = "refs/heads/ai-org/mainline"

@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 from typing import Any
 
-from .. import carrier
+from ..platform import carrier
 from ..rfc.receive import RFC
 
 

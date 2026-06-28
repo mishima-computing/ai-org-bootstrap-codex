@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .. import carrier
+from ..platform import carrier
 from .receive import RFC
 from .task import Task
 

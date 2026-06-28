@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .. import carrier
+from ..platform import carrier
 
 CAP = 5
 

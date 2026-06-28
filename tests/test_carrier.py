@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 import time
 
-from ai_org import carrier
+from ai_org.platform import carrier
 
 
 def _write_fake_codex(tmp_path: Path, body: str) -> Path:

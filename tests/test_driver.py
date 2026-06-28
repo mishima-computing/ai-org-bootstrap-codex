@@ -5,6 +5,7 @@ import json
 import subprocess
 
 from ai_org import driver
+from ai_org.platform import state
 from ai_org.rfc.receive import RFC
 from ai_org.rfc.task import Task
 
@@ -63,7 +64,7 @@ def test_repeated_advance_drives_fresh_repo_to_done_with_committed_state_files(t
     assert _ref_exists(repo, driver.MAINLINE_REF)
     assert calls == ["contribution:p1", "subsystem:refs/heads/ai-org/contrib/p1", "mainline"]
 
-    report = driver.status(repo)
+    report = state.status(repo)
     assert report["state_branch"] == driver.STATE_BRANCH
     assert report["rfcs"][0]["phase"] == "done"
     assert report["rfcs"][0]["review"]["status"] == "direction-ok"
@@ -86,7 +87,7 @@ def test_concurrent_state_update_triggers_cas_retry(tmp_path, monkeypatch):
     rfc = RFC(title="T", problem="P", proposed_change="C")
     review_calls = 0
     cas_calls = 0
-    original_cas = driver._update_ref_cas
+    original_cas = state.update_ref_cas
 
     def review_once(_rfc, _repo):
         nonlocal review_calls
@@ -97,7 +98,7 @@ def test_concurrent_state_update_triggers_cas_retry(tmp_path, monkeypatch):
         nonlocal cas_calls
         cas_calls += 1
         if cas_calls == 1:
-            race_commit = driver._build_state_commit(
+            race_commit = state.build_state_commit(
                 repo_arg,
                 expected_old_oid,
                 {"race.txt": "concurrent update\n"},
@@ -108,7 +109,7 @@ def test_concurrent_state_update_triggers_cas_retry(tmp_path, monkeypatch):
         return original_cas(repo_arg, ref, new_oid, expected_old_oid)
 
     monkeypatch.setattr(driver.review, "run_rfc_review", review_once)
-    monkeypatch.setattr(driver, "_update_ref_cas", racing_cas)
+    monkeypatch.setattr(state, "update_ref_cas", racing_cas)
 
     record = driver.advance(rfc, repo)
 
@@ -147,7 +148,7 @@ def test_advance_resumes_from_contribution_branch_without_redoing_patch(tmp_path
 
     assert record["action"] == "subsystem"
     assert record["status"] == "integrated"
-    assert driver.status(repo)["rfcs"][0]["patches"][0]["phase"] == "subsystem"
+    assert state.status(repo)["rfcs"][0]["patches"][0]["phase"] == "subsystem"
 
 
 def test_nak_verdict_is_terminal_and_does_not_decompose(tmp_path, monkeypatch):
@@ -177,7 +178,7 @@ def test_nak_verdict_is_terminal_and_does_not_decompose(tmp_path, monkeypatch):
     assert _state_json(repo, rfc_id, "rfc.json")["status"] == "rejected"
     assert _state_json(repo, rfc_id, "verdict.json")["status"] == "nak"
     assert not _state_file_exists(repo, rfc_id, "plan.json")
-    assert driver.status(repo)["rfcs"][0]["status"] == "rejected"
+    assert state.status(repo)["rfcs"][0]["status"] == "rejected"
 
 
 def _review_result(status: str):

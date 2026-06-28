@@ -1,7 +1,7 @@
 """Contributor implementation role.
 
 The Contributor is the only writer. It runs Codex in an isolated git worktree,
-on a contribution branch, through ``ai_org.carrier.run_codex``.
+on a contribution branch, through ``ai_org.platform.carrier.run_codex``.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from uuid import uuid4
 
-from .. import carrier
+from ..platform import carrier
 from ..rfc.task import Task
 
 SELF_CHECK_CAP = 3

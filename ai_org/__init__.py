@@ -15,7 +15,8 @@ Roles (named so each is clear; the only code author/fixer is the Contributor —
   Mainline_maintainer (Linus)   layer 2: review the subsystem tree + (on accept) pull to mainline.
 
 Every fail/reject routes back to the Contributor. Two integration tiers (subsystem + mainline); deeper
-nesting only if a subsystem needs it. LLM-backed roles go through the carrier seam (``carrier.py``).
+nesting only if a subsystem needs it. LLM-backed roles go through the platform carrier seam
+(``platform/carrier.py``).
 
 Everything here is currently a STUB: orchestration shape is real; the carrier is not wired.
 """

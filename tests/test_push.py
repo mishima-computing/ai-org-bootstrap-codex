@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import subprocess
 
 from ai_org import driver
-from ai_org.gitutil import push_ref
+from ai_org.platform.git import push_ref
 from ai_org.rfc.receive import RFC
 from ai_org.rfc.task import Task
 

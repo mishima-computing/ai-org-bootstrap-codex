@@ -29,7 +29,7 @@ before tuning or removing it. There is no separate "revise" outcome: revision IS
 aufheben revises, the five re-critique); only convergence (OK) and non-convergence (NAK) are terminal.
 
 The loop/orchestration below is real; the reviewer and aufheben calls go through the
-``carrier.run_codex`` seam in ``carrier.py``.
+``carrier.run_codex`` seam in ``platform/carrier.py``.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import tempfile
 from typing import Any
 from dataclasses import dataclass, field
 
-from .. import carrier
+from ..platform import carrier
 from .receive import RFC
 
 
