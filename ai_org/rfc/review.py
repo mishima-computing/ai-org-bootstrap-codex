@@ -227,6 +227,13 @@ def _aufheben_consolidate(
         "You are the Aufheben. Synthesize the reviewers' objections into ONE revised, coherent RFC direction "
         "that resolves them without losing intent. If the objections form a FUNDAMENTAL, unresolvable "
         "contradiction, escalate instead.\n\n"
+        "Synthesis technique (止揚 / Aufhebung): do NOT collapse a tension onto one side. When two objections "
+        "pull against each other, hold them as an ANTONYMOUS COMPOUND — a single paired concept that keeps "
+        "both poles — and sublate (preserve both, raise to a higher resolution). The ti-yong tradition names "
+        "exactly such tension-holding pairs: 體用 (essence-function) separates inner tests from outer proxies; "
+        "文質 (form-substance) holds an audit-vs-theater tension. Use such a pair to resolve a "
+        "criteria-vs-proxy / audit-vs-theater tension — only when it changes a reviewable criterion, not as "
+        "ornament. (Pointers: Muller ti-yong; SEP 'Aufhebung'.)\n\n"
         + _format_rfc("RFC", _rfc_to_view(rfc))
         + (_format_rfc("\nCurrent view", current_view) if current_view else "")
         + f"Objections this round:\n{joined}\n"
