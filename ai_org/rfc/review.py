@@ -59,6 +59,12 @@ DIMENSIONS: list[Dimension] = [
 # Tentative round cap. Low on purpose: observe loop + per-LLM behavior before tuning/removing.
 CAP = 5
 
+# codex --output-schema constraints (PROVEN against real codex v0.142.0, 2026-06-29):
+#   - NO allOf / anyOf / oneOf / if-then        (HTTP 400: "'allOf' is not permitted")
+#   - additionalProperties MUST be false
+#   - `required` MUST list EVERY key in `properties` (no optional fields)
+#     (HTTP 400: "'required' ... including every key in properties. Missing 'escalation_reason'")
+#     To make a field effectively optional: keep it in required and let the model return "" (or use type ["...","null"]).
 OBJECTION_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -76,7 +82,7 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["verdict", "revised_rfc", "situation_read"],
+    "required": ["verdict", "revised_rfc", "situation_read", "escalation_reason"],
     "properties": {
         "verdict": {"enum": ["proceed", "escalate"]},
         "revised_rfc": {
@@ -151,6 +157,8 @@ def _review_one(
         if schema_file is not None:
             cmd += ["--output-schema", str(schema_file)]
         cmd.append(prompt)
+        # codex can exit non-zero and write NO -o file (e.g. a rejected schema). A real run crashed here on
+        # read_text of a missing file. Check returncode AND out_file existence BEFORE reading; fail closed otherwise.
         completed = subprocess.run(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -243,6 +251,8 @@ def _aufheben_consolidate(
         if schema_file is not None:
             cmd += ["--output-schema", str(schema_file)]
         cmd.append(prompt)
+        # codex can exit non-zero and write NO -o file (e.g. a rejected schema). A real run crashed here on
+        # read_text of a missing file. Check returncode AND out_file existence BEFORE reading; fail closed otherwise.
         completed = subprocess.run(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -353,6 +363,8 @@ def _write_nak(repo: str | Path, rounds: int, unresolved_dimensions: list[str]) 
     )
 
 
+# PROVEN end-to-end against real codex (2026-06-29): git read (rfc.json@HEAD) -> 5 reviewers + Aufheben (real
+# substantive verdicts) -> git write (commit "rfc: direction-ok|nak" lands in the repo's git log).
 def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult:
     """Loop up to CAP rounds: 5 reviewers -> (if objections) aufheben consolidates -> 5 re-critique.
 
@@ -360,6 +372,8 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
     Not converged within CAP -> "nak", returning which dimensions resolved and which objections
     remain unresolved.
     """
+    # git is done HERE in python, NOT by codex: codex --sandbox workspace-write can edit the working tree but
+    # CANNOT write .git (PROVEN: ".git/index.lock: Operation not permitted"). So python reads/writes git around codex.
     rfc_view, read_error = _read_rfc_from_git(repo, rfc_path)
     if rfc_view is None:
         result = ReviewResult(
