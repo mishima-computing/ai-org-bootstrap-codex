@@ -10,14 +10,17 @@ Every fail/reject routes BACK to the Contributor (the sole code-fixer). A mainta
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import contribution
 from .maintainers import mainline, subsystem
 from .rfc import decompose, review
 from .rfc.receive import RFC
 
 
-def run(rfc: RFC) -> dict:
-    rev = review.run_rfc_review(rfc)
+def run(rfc: RFC, repo: str | Path | None = None) -> dict:
+    repo_path = Path(repo or Path.cwd()).resolve()
+    rev = review.run_rfc_review(rfc, repo_path)
     if rev.status != "direction-ok":
         return {"status": rev.status, "review": rev}              # NAK -> stop
 

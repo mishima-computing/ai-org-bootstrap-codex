@@ -17,22 +17,10 @@ STUB: reads the RFC through the carrier and emits Tasks; raises until wired.
 """
 from __future__ import annotations
 
-from .. import carrier
 from .receive import RFC
 from .task import Task
 
 
 def decompose(rfc: RFC) -> list[Task]:
     """Turn the converged RFC into a flat list of contributor-sized Tasks (independent baseline)."""
-    prompt = (
-        "Materialize this APPROVED RFC's split into concrete, contributor-sized tasks. Follow the "
-        "RFC's stated approach and breakdown; do not re-decide the split. For each task give: a "
-        "short id, the objective, the interface/contract to satisfy, and the file/symbol scope it "
-        "may touch. Keep tasks INDEPENDENT unless the RFC states a real dependency.\n"
-        f"RFC: {rfc.title}\nproblem: {rfc.problem}\nproposed_change: {rfc.proposed_change}\n"
-        f"interface_sketch: {rfc.interface_sketch}\n"
-    )
-    resp = carrier.invoke(carrier.CarrierRequest(role="decompose", prompt=prompt))
-    # TODO(parse): resp.text -> list[Task]; flat (depends_on empty) in the baseline.
-    # TODO(hooks): if a task is oversized -> recurse; if real deps -> set depends_on (validate acyclic).
-    raise NotImplementedError("decompose parse not wired (stub)")  # pragma: no cover
+    raise NotImplementedError("decompose is not implemented yet")  # pragma: no cover

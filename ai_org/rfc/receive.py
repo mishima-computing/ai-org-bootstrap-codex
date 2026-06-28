@@ -6,7 +6,10 @@ done here; for now the RFC is received MANUALLY (hand-written). An RFC mirrors a
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
 
 
 @dataclass
@@ -18,6 +21,39 @@ class RFC:
     notes: str = ""
 
 
-def receive() -> RFC:
-    """Intake an RFC (manual for now -> later, the raw-requirement -> RFC translator). STUB."""
-    raise NotImplementedError("rfc.receive intake not wired (stub)")  # pragma: no cover
+def receive(source: str | Path | Mapping[str, Any]) -> RFC:
+    """Load a hand-written RFC from a dict or a JSON file path."""
+    if isinstance(source, Mapping):
+        data = source
+    elif isinstance(source, (str, Path)):
+        path = Path(source)
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ValueError(f"Could not read RFC JSON file {path}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"RFC JSON file {path} is invalid JSON: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"RFC JSON file {path} must contain a JSON object.")
+        data = loaded
+    else:
+        raise TypeError("receive(source) expects a dict or a path to a JSON file.")
+
+    missing = [field for field in ("title", "problem", "proposed_change") if data.get(field) is None]
+    if missing:
+        raise ValueError(f"RFC is missing required field(s): {', '.join(missing)}")
+
+    return RFC(
+        title=_string_field(data, "title"),
+        problem=_string_field(data, "problem"),
+        proposed_change=_string_field(data, "proposed_change"),
+        interface_sketch=_string_field(data, "interface_sketch", default=""),
+        notes=_string_field(data, "notes", default=""),
+    )
+
+
+def _string_field(data: Mapping[str, Any], field: str, *, default: str | None = None) -> str:
+    value = data.get(field, default)
+    if not isinstance(value, str):
+        raise ValueError(f"RFC field {field!r} must be a string.")
+    return value
