@@ -12,7 +12,7 @@ from .. import carrier
 from ..rfc.task import Task
 
 
-def implement(task: Task) -> str:
+def run(task: Task) -> str:
     """Write/fix one Task in its own branch; return the branch ref. STUB — carrier/git not wired."""
     # 1. git worktree add --detach <wt> <task.base_sha>   -> isolated checkout off the base
     # 2. run the implementation through the carrier, inside <wt>, allowed to touch task.scope only:
