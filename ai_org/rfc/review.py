@@ -94,12 +94,6 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
         "situation_read": {"type": "string", "maxLength": 1000},
         "escalation_reason": {"type": "string"},
     },
-    "allOf": [
-        {
-            "if": {"properties": {"verdict": {"const": "escalate"}}, "required": ["verdict"]},
-            "then": {"required": ["escalation_reason"]},
-        }
-    ],
 }
 
 
@@ -163,10 +157,14 @@ def _review_one(
             capture_output=True,
             text=True,
         )
-        result_text = Path(out_file).read_text(encoding="utf-8")
         if completed.returncode != 0:
-            detail = result_text or "Codex reviewer did not complete successfully."
+            detail = completed.stderr.strip() or (
+                "no output file" if not out_file.exists() else "Codex reviewer did not complete successfully."
+            )
             return Objection(dim.key, True, f"Codex review failed for {dim.key}: {detail}")
+        if not out_file.exists():
+            return Objection(dim.key, True, f"Codex review failed for {dim.key}: no output file")
+        result_text = out_file.read_text(encoding="utf-8")
         return _parse_objection(dim.key, result_text)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -251,10 +249,14 @@ def _aufheben_consolidate(
             capture_output=True,
             text=True,
         )
-        result_text = Path(out_file).read_text(encoding="utf-8")
         if completed.returncode != 0:
-            detail = result_text or "Codex Aufheben did not complete successfully."
+            detail = completed.stderr.strip() or (
+                "no output file" if not out_file.exists() else "Codex Aufheben did not complete successfully."
+            )
             return _aufheben_fail_closed(f"Aufheben failed: {detail}")
+        if not out_file.exists():
+            return _aufheben_fail_closed("Aufheben failed: no output file")
+        result_text = out_file.read_text(encoding="utf-8")
         return _parse_aufheben_decision(result_text)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
