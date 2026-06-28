@@ -28,19 +28,18 @@ CAP is tentatively 5 — kept low on purpose to OBSERVE the loop's behavior and 
 before tuning or removing it. There is no separate "revise" outcome: revision IS the loop (the
 aufheben revises, the five re-critique); only convergence (OK) and non-convergence (NAK) are terminal.
 
-The loop/orchestration below is real; the reviewer and aufheben calls go through the
-``carrier.run_codex`` seam in ``platform/carrier.py``.
+The loop/orchestration below is real; the reviewer and aufheben calls run Codex directly.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 from typing import Any
 from dataclasses import dataclass, field
 
-from ..platform import carrier
 from .receive import RFC
 
 
@@ -156,17 +155,21 @@ def _review_one(
     out_file = temp_dir / f"{dim.key}-objection.json"
     try:
         schema_file.write_text(json.dumps(OBJECTION_SCHEMA, indent=2), encoding="utf-8")
-        result = carrier.run_codex(
-            repo,
-            prompt,
-            "read-only",
-            out_file=out_file,
-            output_schema=schema_file,
+        cmd = ["codex", "exec", "--sandbox", "read-only", "-C", str(repo), "-o", str(out_file)]
+        if schema_file is not None:
+            cmd += ["--output-schema", str(schema_file)]
+        cmd.append(prompt)
+        completed = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
-        if not result.get("ok"):
-            detail = str(result.get("last_message") or "Codex reviewer did not complete successfully.")
+        result_text = Path(out_file).read_text(encoding="utf-8")
+        if completed.returncode != 0:
+            detail = result_text or "Codex reviewer did not complete successfully."
             return Objection(dim.key, True, f"Codex review failed for {dim.key}: {detail}")
-        return _parse_objection(dim.key, str(result.get("last_message") or ""))
+        return _parse_objection(dim.key, result_text)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -246,17 +249,21 @@ def _aufheben_consolidate(
     out_file = temp_dir / "aufheben-view.json"
     try:
         schema_file.write_text(json.dumps(AUFHEBEN_SCHEMA, indent=2), encoding="utf-8")
-        result = carrier.run_codex(
-            repo,
-            prompt,
-            "read-only",
-            out_file=out_file,
-            output_schema=schema_file,
+        cmd = ["codex", "exec", "--sandbox", "read-only", "-C", str(repo), "-o", str(out_file)]
+        if schema_file is not None:
+            cmd += ["--output-schema", str(schema_file)]
+        cmd.append(prompt)
+        completed = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
-        if not result.get("ok"):
-            detail = str(result.get("last_message") or "Codex Aufheben did not complete successfully.")
+        result_text = Path(out_file).read_text(encoding="utf-8")
+        if completed.returncode != 0:
+            detail = result_text or "Codex Aufheben did not complete successfully."
             return _aufheben_fail_closed(f"Aufheben failed: {detail}")
-        return _parse_aufheben_decision(str(result.get("last_message") or ""))
+        return _parse_aufheben_decision(result_text)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

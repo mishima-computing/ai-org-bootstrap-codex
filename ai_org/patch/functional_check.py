@@ -21,7 +21,6 @@ import subprocess
 import tempfile
 from typing import Any
 
-from ..platform import carrier
 from ..rfc.receive import RFC
 
 
@@ -62,14 +61,19 @@ def check(rfc: RFC, branch: str) -> dict:
         _make_read_only(worktree)
         schema_file.write_text(json.dumps(VERDICT_SCHEMA, indent=2), encoding="utf-8")
 
-        result = carrier.run_codex(
-            worktree,
-            _prompt(rfc),
-            "read-only",
-            out_file=out_file,
-            output_schema=schema_file,
+        prompt = _prompt(rfc)
+        cmd = ["codex", "exec", "--sandbox", "read-only", "-C", str(worktree), "-o", str(out_file)]
+        if schema_file is not None:
+            cmd += ["--output-schema", str(schema_file)]
+        cmd.append(prompt)
+        completed = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
-        if not result.get("ok"):
+        result_text = Path(out_file).read_text(encoding="utf-8")
+        if completed.returncode != 0:
             return _verdict(
                 reachable=False,
                 blockers=[
@@ -78,10 +82,10 @@ def check(rfc: RFC, branch: str) -> dict:
                         "why": "Codex Mona walkthrough did not complete successfully.",
                     }
                 ],
-                notes=str(result.get("last_message") or ""),
+                notes=result_text,
             )
 
-        return _parse_verdict(str(result.get("last_message") or ""))
+        return _parse_verdict(result_text)
     finally:
         if worktree.exists():
             _make_writable(worktree)

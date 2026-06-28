@@ -11,8 +11,7 @@ Stages and roles (the only code author/fixer is the Contributor — everything e
                                 accepted contributions and merge them onward.
 
 Every fail/reject routes back to the Contributor. Two integration tiers (subsystem + mainline); deeper
-nesting only if a subsystem needs it. LLM-backed roles go through the platform carrier seam
-(``platform/carrier.py``).
+nesting only if a subsystem needs it. LLM-backed roles run their stage calls directly.
 
-Everything here is currently a STUB: orchestration shape is real; the carrier is not wired.
+Everything here is currently a STUB: orchestration shape is real.
 """

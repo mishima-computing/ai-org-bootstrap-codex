@@ -7,8 +7,6 @@ import shutil
 import subprocess
 import tempfile
 
-from ..platform import carrier
-
 CAP = 5
 MAINLINE_REF = "refs/heads/ai-org/mainline"
 
@@ -42,13 +40,23 @@ def review_and_integrate(subsystem_refs: list[str], repo: str | Path) -> str:
         schema = td_path / "verdict.schema.json"
         out = td_path / "verdict.json"
         schema.write_text(json.dumps(_VERDICT), encoding="utf-8")
-        result = carrier.run_codex(repo, prompt, "read-only", out_file=out, output_schema=schema)
+        cmd = ["codex", "exec", "--sandbox", "read-only", "-C", str(repo), "-o", str(out)]
+        if schema is not None:
+            cmd += ["--output-schema", str(schema)]
+        cmd.append(prompt)
+        completed = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        result_text = Path(out).read_text(encoding="utf-8")
         try:
-            verdict = json.loads(result.get("last_message") or "{}")
+            verdict = json.loads(result_text or "{}")
         except json.JSONDecodeError:
             return "reject"
 
-    if not result.get("ok") or not verdict.get("accept"):
+    if completed.returncode != 0 or not verdict.get("accept"):
         return "reject"
     return MAINLINE_REF if _merge_refs(repo, refs) else "reject"
 

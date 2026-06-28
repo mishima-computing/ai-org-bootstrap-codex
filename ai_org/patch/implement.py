@@ -1,7 +1,7 @@
 """Patch-stage Contributor implementation role.
 
 The Contributor is the only writer. It runs Codex in an isolated git worktree,
-on a contribution branch, through ``ai_org.platform.carrier.run_codex``.
+on a contribution branch, through a plain Codex subprocess.
 """
 from __future__ import annotations
 
@@ -13,23 +13,19 @@ import subprocess
 import tempfile
 from uuid import uuid4
 
-from ..platform import carrier
-from ..rfc.task import Task
-
 SELF_CHECK_CAP = 3
 
 
 def run(
-    task: Task,
+    task,
     *,
     feedback: str | None = None,
-    resume_session: str | None = None,
     repo: str | Path | None = None,
     branch_ref: str | None = None,
 ) -> dict:
-    """Write or revise one Task in its own worktree and return branch metadata."""
+    """Write or revise one task in its own worktree and return branch metadata."""
     repo_path = Path(repo or Path.cwd()).resolve()
-    branch_name = _branch_name(task, branch_ref, resume_session, repo_path)
+    branch_name = _branch_name(task, branch_ref, repo_path)
     branch_ref = f"refs/heads/{branch_name}"
     base = task.base_sha or _git(repo_path, "rev-parse", "HEAD").strip()
 
@@ -42,54 +38,71 @@ def run(
             _git(repo_path, "worktree", "add", "-b", branch_name, str(worktree), base)
 
         out_file = temp_dir / "codex-last-message.txt"
-        result = carrier.run_codex(
-            worktree,
-            _prompt(
-                task,
-                feedback=feedback,
-                resume_session=resume_session,
-                localization=_pre_localize(worktree, task),
-            ),
-            "workspace-write",
-            out_file=out_file,
-            resume_session=resume_session,
+        prompt = _prompt(
+            task,
+            feedback=feedback,
+            localization=_pre_localize(worktree, task),
         )
-        session_id = result.get("session_id") or resume_session
+        cmd = ["codex", "exec", "--sandbox", "workspace-write", "-C", str(worktree), "-o", str(out_file)]
+        schema_file = None
+        if schema_file is not None:
+            cmd += ["--output-schema", str(schema_file)]
+        cmd.append(prompt)
+        completed = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        result_text = Path(out_file).read_text(encoding="utf-8")
+        if completed.returncode != 0:
+            return {
+                "branch": branch_ref,
+                "ok": False,
+                "message": result_text,
+            }
+
         failures = _deterministic_failures(worktree, task, base)
         if not failures:
             return {
                 "branch": branch_ref,
-                "session_id": session_id,
                 "ok": True,
             }
 
         for _ in range(SELF_CHECK_CAP):
-            if not session_id:
-                break
-            result = carrier.run_codex(
-                worktree,
-                _prompt(
-                    task,
-                    feedback=_self_check_feedback(failures),
-                    resume_session=session_id,
-                    localization=None,
-                ),
-                "workspace-write",
-                out_file=out_file,
-                resume_session=session_id,
+            prompt = _prompt(
+                task,
+                feedback=_self_check_feedback(failures),
+                localization=None,
             )
-            session_id = result.get("session_id") or session_id
+            cmd = ["codex", "exec", "--sandbox", "workspace-write", "-C", str(worktree), "-o", str(out_file)]
+            schema_file = None
+            if schema_file is not None:
+                cmd += ["--output-schema", str(schema_file)]
+            cmd.append(prompt)
+            completed = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            result_text = Path(out_file).read_text(encoding="utf-8")
+            if completed.returncode != 0:
+                return {
+                    "branch": branch_ref,
+                    "ok": False,
+                    "message": result_text,
+                }
+
             failures = _deterministic_failures(worktree, task, base)
             if not failures:
                 return {
                     "branch": branch_ref,
-                    "session_id": session_id,
                     "ok": True,
                 }
 
         return {
             "branch": branch_ref,
-            "session_id": session_id,
             "ok": False,
         }
     finally:
@@ -105,20 +118,22 @@ def run(
 
 
 def _prompt(
-    task: Task,
+    task,
     *,
     feedback: str | None,
-    resume_session: str | None,
     localization: list[dict] | None,
 ) -> str:
     scope = "\n".join(f"- {item}" for item in task.scope) if task.scope else "- (no scope listed)"
-    if resume_session:
-        delta = feedback or "Acceptance failed without additional detail. Inspect the branch and fix the gap."
+    if feedback:
+        delta = feedback
         return (
-            "Revise the existing implementation in this same Codex session.\n"
-            "Use only this feedback delta; do not restart or re-derive the original task.\n\n"
+            "Revise the existing implementation in this checkout.\n"
+            "Use the feedback delta below to fix the implementation without changing the task scope.\n\n"
+            f"objective:\n{task.objective}\n\n"
+            f"contract to satisfy:\n{task.contract}\n\n"
             f"feedback:\n{delta}\n\n"
-            "Continue to respect the original exact allowed files/symbols scope.\n"
+            "exact files/symbols you may touch:\n"
+            f"{scope}\n\n"
             "Make focused, one-logical-change commits with good messages."
         )
 
@@ -135,7 +150,7 @@ def _prompt(
     )
 
 
-def _deterministic_failures(worktree: Path, task: Task, base: str) -> list[dict]:
+def _deterministic_failures(worktree: Path, task, base: str) -> list[dict]:
     failures: list[dict] = []
     deviations = _scope_deviations(_changed_files_since_base(worktree, base), task.scope)
     if deviations:
@@ -304,7 +319,7 @@ _TOKEN_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
-def _pre_localize(worktree: Path, task: Task) -> list[dict]:
+def _pre_localize(worktree: Path, task) -> list[dict]:
     # Pre-localization complements rfc/decompose: decompose decides task.scope (WHAT may be touched);
     # this deterministic grep grounds the Contributor in the relevant existing code so it understands
     # the area before editing. It is advisory context, never a write-scope expander.
@@ -402,9 +417,8 @@ def _localization_block(localization: list[dict]) -> str:
 
 
 def _branch_name(
-    task: Task,
+    task,
     branch_ref: str | None,
-    resume_session: str | None,
     repo: Path,
 ) -> str:
     if branch_ref:
@@ -412,7 +426,7 @@ def _branch_name(
 
     base_name = f"contrib/{_slug(task.id) or uuid4().hex}"
     base_ref = f"refs/heads/{base_name}"
-    if resume_session or not _branch_exists(repo, base_ref):
+    if not _branch_exists(repo, base_ref):
         return base_name
     return f"{base_name}-{uuid4().hex[:8]}"
 
