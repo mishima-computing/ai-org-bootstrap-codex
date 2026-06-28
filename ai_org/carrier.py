@@ -132,10 +132,14 @@ def _kill_process_group(pgid: int) -> None:
 
 
 def _find_session_id(value: Any) -> str | None:
+    # codex v0.142+ emits the conversation id as "thread_id" (in the thread.started event); older codex
+    # used "session_id". Accept BOTH so resume works across versions. The captured UUID is exactly what
+    # `codex exec resume <id>` takes (its [SESSION_ID] arg = "Conversation/session id (UUID) or thread name").
     if isinstance(value, dict):
-        candidate = value.get("session_id")
-        if isinstance(candidate, str) and candidate:
-            return candidate
+        for key in ("thread_id", "session_id"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
         for child in value.values():
             found = _find_session_id(child)
             if found:

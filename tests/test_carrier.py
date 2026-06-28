@@ -113,3 +113,12 @@ time.sleep(30)
         pass
     else:  # pragma: no cover - failure path
         raise AssertionError("stalled codex process was not killed")
+
+
+def test_find_session_id_accepts_thread_id_and_session_id():
+    # Real codex v0.142+ emits the conversation id as "thread_id" (thread.started); older codex used
+    # "session_id". _find_session_id must accept both, including nested under "msg".
+    assert carrier._find_session_id({"type": "thread.started", "thread_id": "uuid-new"}) == "uuid-new"
+    assert carrier._find_session_id({"session_id": "uuid-old"}) == "uuid-old"
+    assert carrier._find_session_id({"msg": {"thread_id": "uuid-nested"}}) == "uuid-nested"
+    assert carrier._find_session_id({"type": "turn.completed"}) is None
