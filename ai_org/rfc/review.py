@@ -1,3 +1,14 @@
+# review.py — this IS the RFC FORMATION / MATURATION engine. It was mis-framed (and I, via amnesia,
+# treated it) as a SEPARATE "direction review" phase. It is NOT separate. The RFC phase = receive
+# (intake of a raw REQUEST) + THIS (mature that request into a contributor-takeable RFC). The 5 roles
+# + Aufheben loop below ARE the maturation ("the 5 過程" / the vetting): they REFINE the request's
+# common-8 fields and CRAFT the exit-only fields, converging on a contributor-takeable RFC (buy-in)
+# or sending it back / NAK. (See receive.py top for the input/output field contract.)
+#
+# OPEN (to resolve when this is rewritten — step 2): the input should be the REQUEST (not an already
+# finished rfc.json), the output the crafted RFC; and reconcile the 5 dimensions named here
+# (need/approach/compat/scope/maintenance) with the early-stage 5 過程
+# (specify problem / early discussion / who to talk to / when to post / get buy-in).
 """RFC review — debate the DIRECTION, not the code.
 
 Mirrors how a Linux subsystem maintainer + community review an RFC on the mailing list: they

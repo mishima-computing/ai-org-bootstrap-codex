@@ -1,10 +1,11 @@
 # receive.py — the INTAKE GATE: judges whether an incoming REQUEST may become an RFC.
 # This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (差し戻し):
 #     request --[receive gate]--> promote to RFC | send back for revision | reject.
-# Only requests that PASS this gate become an RFC (ai-org/rfc/<id>), which then goes to rfc/review
-# (the direction debate). So the RFC phase has TWO gates, in order:
-#     1) receive : can this REQUEST become an RFC?   (this file)
-#     2) review  : is the RFC's DIRECTION ok?        (review.py)
+# Only requests that PASS this gate go on to be MATURED into an RFC. The RFC phase has two parts:
+#     1) receive : intake — can this REQUEST become an RFC at all? (this file)
+#     2) review  : the FORMATION / MATURATION engine — mature the request into a contributor-takeable
+#                  RFC (refine the common-8, craft the exit-only). NOT a separate "direction review";
+#                  it IS the formation (the 5 過程). (review.py)
 # THE RFC PHASE'S JOB = take a raw REQUEST and make it CONTRIBUTOR-TAKEABLE. That promotion is real
 # work, not a load. It mirrors the Linux early-stage process (kernel.org process/3.Early-stage) — the
 # "5 過程" that turn a request into a proposable RFC:
