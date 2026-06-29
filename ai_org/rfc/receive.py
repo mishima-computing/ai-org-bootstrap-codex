@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+import subprocess
 from typing import Any, Mapping
 
 
@@ -98,6 +100,29 @@ def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     return data
 
 
+def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path: str = "rfc.json") -> dict[str, Any]:
+    """Write a validated COMMON-8 request to git as ai-org/rfc/<id>:rfc.json."""
+    rfc = _common_8(validated_request)
+    repo_path = Path(repo).resolve()
+    rfc_id = _slug(rfc["title"])
+    branch = f"ai-org/rfc/{rfc_id}"
+    base = _default_branch(repo_path)
+    original = _current_branch(repo_path)
+
+    try:
+        _git(repo_path, "checkout", "-B", branch, base)
+        path = repo_path / rfc_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rfc, indent=2) + "\n", encoding="utf-8")
+        _git(repo_path, "add", rfc_path)
+        _git(repo_path, "commit", "--allow-empty", "-m", f"rfc: receive {rfc['title']}")
+        commit = _git(repo_path, "rev-parse", "HEAD").strip()
+    finally:
+        if original:
+            _git(repo_path, "checkout", original)
+    return {"ok": True, "id": rfc_id, "branch": branch, "commit": commit}
+
+
 def _required_string_field(data: Mapping[str, Any], field: str) -> None:
     value = data.get(field)
     if not isinstance(value, str) or not value.strip():
@@ -114,3 +139,59 @@ def _optional_list_field(data: dict[str, Any], field: str) -> None:
     value = data.setdefault(field, [])
     if not isinstance(value, list):
         raise ValueError(f"Request field {field!r} must be a list when provided.")
+    if not all(isinstance(item, str) for item in value):
+        raise ValueError(f"Request field {field!r} must contain only strings.")
+
+
+def _common_8(data: Mapping[str, Any]) -> dict[str, Any]:
+    rfc = {field: data[field] for field in COMMON_8_FIELDS}
+    for field in REQUIRED_FIELDS + OPTIONAL_STRING_FIELDS:
+        if not isinstance(rfc[field], str):
+            raise ValueError(f"Request field {field!r} must be a string.")
+    alternatives = rfc["alternatives"]
+    if not isinstance(alternatives, list) or not all(isinstance(item, str) for item in alternatives):
+        raise ValueError("Request field 'alternatives' must be a list of strings.")
+    return rfc
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:80] or "rfc"
+
+
+def _default_branch(repo: Path) -> str:
+    origin_head = _git_run(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if origin_head.returncode == 0:
+        ref = origin_head.stdout.strip()
+        if ref.startswith("origin/"):
+            return ref
+
+    current = _git_run(repo, "symbolic-ref", "--short", "HEAD")
+    if current.returncode == 0 and current.stdout.strip():
+        return current.stdout.strip()
+
+    raise RuntimeError("could not determine repository default branch")
+
+
+def _current_branch(repo: Path) -> str:
+    current = _git_run(repo, "symbolic-ref", "--short", "HEAD")
+    if current.returncode == 0:
+        return current.stdout.strip()
+    return ""
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = _git_run(repo, *args)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git command failed")
+    return result.stdout
+
+
+def _git_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )

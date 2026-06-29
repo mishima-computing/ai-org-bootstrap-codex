@@ -6,6 +6,8 @@ import subprocess
 
 from ai_org import patch
 
+RFC_ID = "add-feature-file"
+
 
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
@@ -30,9 +32,12 @@ def _repo(tmp_path: Path) -> Path:
             {
                 "title": "Add Feature File",
                 "problem": "The repo lacks a feature marker.",
-                "proposed_change": "Create feature.txt with the implemented marker.",
-                "interface_sketch": "feature.txt",
-                "notes": "Keep the change focused.",
+                "proposal": "Create feature.txt with the implemented marker.",
+                "alternatives": ["Leave the repo without a feature marker."],
+                "intended_users": "Repository contributors.",
+                "affected_area": "feature.txt",
+                "impact": "A marker file appears on the contribution branch.",
+                "context": "Keep the change focused.",
             }
         ),
         encoding="utf-8",
@@ -46,8 +51,16 @@ def test_make_returns_reachable_attempt_one(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     calls = []
 
-    def fake_run(repo_arg, *, rfc_path="rfc.json", feedback=None, attempt=1):
-        calls.append({"repo": repo_arg, "rfc_path": rfc_path, "feedback": feedback, "attempt": attempt})
+    def fake_run(repo_arg, rfc_id_or_branch, *, rfc_path="rfc.json", feedback=None, attempt=1):
+        calls.append(
+            {
+                "repo": repo_arg,
+                "rfc": rfc_id_or_branch,
+                "rfc_path": rfc_path,
+                "feedback": feedback,
+                "attempt": attempt,
+            }
+        )
         return {"ok": True, "branch": "ai-org/contrib/add-feature-file"}
 
     verdict = {"ok": True, "reachable": True, "blockers": [], "notes": "reachable"}
@@ -60,13 +73,13 @@ def test_make_returns_reachable_attempt_one(tmp_path, monkeypatch):
         lambda repo_arg, branch: checked.append((repo_arg, branch)) or verdict,
     )
 
-    assert patch.make(repo) == {
+    assert patch.make(repo, RFC_ID) == {
         "ok": True,
         "branch": "ai-org/contrib/add-feature-file",
         "verdict": verdict,
         "attempts": 1,
     }
-    assert calls == [{"repo": repo, "rfc_path": "rfc.json", "feedback": None, "attempt": 1}]
+    assert calls == [{"repo": repo, "rfc": RFC_ID, "rfc_path": "rfc.json", "feedback": None, "attempt": 1}]
     assert checked == [(repo, "ai-org/contrib/add-feature-file")]
 
 
@@ -81,22 +94,30 @@ def test_make_retries_with_acceptance_blockers_as_feedback(tmp_path, monkeypatch
         ]
     )
 
-    def fake_run(repo_arg, *, rfc_path="rfc.json", feedback=None, attempt=1):
-        calls.append({"repo": repo_arg, "rfc_path": rfc_path, "feedback": feedback, "attempt": attempt})
+    def fake_run(repo_arg, rfc_id_or_branch, *, rfc_path="rfc.json", feedback=None, attempt=1):
+        calls.append(
+            {
+                "repo": repo_arg,
+                "rfc": rfc_id_or_branch,
+                "rfc_path": rfc_path,
+                "feedback": feedback,
+                "attempt": attempt,
+            }
+        )
         suffix = "" if attempt == 1 else f"-a{attempt}"
         return {"ok": True, "branch": f"ai-org/contrib/add-feature-file{suffix}"}
 
     monkeypatch.setattr(patch.implement, "run", fake_run)
     monkeypatch.setattr(patch.functional_check, "check", lambda _repo_arg, _branch: next(verdicts))
 
-    result = patch.make(repo)
+    result = patch.make(repo, RFC_ID)
 
     assert result["ok"] is True
     assert result["branch"] == "ai-org/contrib/add-feature-file-a2"
     assert result["attempts"] == 2
     assert calls == [
-        {"repo": repo, "rfc_path": "rfc.json", "feedback": None, "attempt": 1},
-        {"repo": repo, "rfc_path": "rfc.json", "feedback": blockers, "attempt": 2},
+        {"repo": repo, "rfc": RFC_ID, "rfc_path": "rfc.json", "feedback": None, "attempt": 1},
+        {"repo": repo, "rfc": RFC_ID, "rfc_path": "rfc.json", "feedback": blockers, "attempt": 2},
     ]
 
 
@@ -110,15 +131,23 @@ def test_make_returns_blocked_after_cap(tmp_path, monkeypatch):
         "notes": "blocked",
     }
 
-    def fake_run(repo_arg, *, rfc_path="rfc.json", feedback=None, attempt=1):
-        calls.append({"repo": repo_arg, "rfc_path": rfc_path, "feedback": feedback, "attempt": attempt})
+    def fake_run(repo_arg, rfc_id_or_branch, *, rfc_path="rfc.json", feedback=None, attempt=1):
+        calls.append(
+            {
+                "repo": repo_arg,
+                "rfc": rfc_id_or_branch,
+                "rfc_path": rfc_path,
+                "feedback": feedback,
+                "attempt": attempt,
+            }
+        )
         suffix = "" if attempt == 1 else f"-a{attempt}"
         return {"ok": True, "branch": f"ai-org/contrib/add-feature-file{suffix}"}
 
     monkeypatch.setattr(patch.implement, "run", fake_run)
     monkeypatch.setattr(patch.functional_check, "check", lambda _repo_arg, _branch: verdict)
 
-    assert patch.make(repo, cap=3) == {
+    assert patch.make(repo, RFC_ID, cap=3) == {
         "ok": False,
         "branch": "ai-org/contrib/add-feature-file-a3",
         "verdict": verdict,

@@ -28,10 +28,11 @@ def review_and_integrate(
     repo: str | Path,
     subsystem: str = SUBSYSTEM_BRANCH,
     mainline: str = MAINLINE_BRANCH,
-    base: str = "master",
+    base: str | None = None,
 ) -> dict[str, Any]:
     """Review a subsystem branch and merge it into the mainline tree on accept."""
     repo = Path(repo)
+    base = base or _default_branch(repo)
     mainline_ref = f"refs/heads/{mainline}"
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-mainline-"))
@@ -207,6 +208,32 @@ def _git_ok(repo: Path, *args: str) -> bool:
         text=True,
     )
     return result.returncode == 0
+
+
+def _default_branch(repo: Path) -> str:
+    origin_head = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if origin_head.returncode == 0:
+        ref = origin_head.stdout.strip()
+        if ref.startswith("origin/"):
+            return ref
+
+    current = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if current.returncode == 0 and current.stdout.strip():
+        return current.stdout.strip()
+
+    raise RuntimeError("could not determine repository default branch")
 
 
 def _remove_worktree(repo: Path, worktree: Path) -> None:

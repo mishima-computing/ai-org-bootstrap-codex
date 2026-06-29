@@ -9,27 +9,37 @@ import pytest
 from ai_org.rfc import review
 
 
-def _rfc_view() -> dict[str, str]:
+RFC_ID = "manual-rfc"
+RFC_BRANCH = f"ai-org/rfc/{RFC_ID}"
+
+
+def _rfc_view() -> dict[str, object]:
     return {
         "title": "Manual RFC",
         "problem": "The workflow needs real RFC review.",
-        "proposed_change": "Run five dimension reviewers and consolidate objections.",
-        "interface_sketch": "run_rfc_review(repo)",
-        "notes": "Keep the target repo read-only during review.",
+        "proposal": "Run five dimension reviewers and consolidate objections.",
+        "alternatives": ["Keep loading RFCs directly."],
+        "intended_users": "Contributors taking RFC work.",
+        "affected_area": "ai_org.rfc",
+        "impact": "RFC direction converges before patch work starts.",
+        "context": "Keep the target repo read-only during review.",
     }
 
 
-def _revised_rfc(suffix: str = "") -> dict[str, str]:
+def _revised_rfc(suffix: str = "") -> dict[str, object]:
     return {
         "title": f"Revised Manual RFC{suffix}",
         "problem": f"The RFC review workflow needs structured convergence{suffix}.",
-        "proposed_change": f"Run five reviewers, then synthesize into a revised RFC{suffix}.",
-        "interface_sketch": f"run_rfc_review(repo) -> ReviewResult{suffix}",
-        "notes": f"Keep all codex calls read-only and schema-backed{suffix}.",
+        "proposal": f"Run five reviewers, then synthesize into a revised RFC{suffix}.",
+        "alternatives": [f"Skip consolidation and accept reviewer drift{suffix}."],
+        "intended_users": f"Contributors and maintainers{suffix}.",
+        "affected_area": "ai_org.rfc",
+        "impact": f"Review state stays schema-backed{suffix}.",
+        "context": f"Keep all codex calls read-only and schema-backed{suffix}.",
     }
 
 
-def _aufheben_response(verdict: str, revised_rfc: dict[str, str], **extra) -> str:
+def _aufheben_response(verdict: str, revised_rfc: dict[str, object], **extra) -> str:
     payload = {
         "verdict": verdict,
         "revised_rfc": revised_rfc,
@@ -48,21 +58,27 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _init_repo(repo: Path, rfc: dict[str, str] | None = None) -> None:
+def _init_repo(repo: Path, rfc: dict[str, object] | None = None) -> None:
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
     _git(repo, "config", "user.name", "RFC Test")
     _git(repo, "config", "user.email", "rfc-test@example.invalid")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "checkout", "-B", RFC_BRANCH, "main")
     (repo / "rfc.json").write_text(json.dumps(rfc or _rfc_view()) + "\n", encoding="utf-8")
     _git(repo, "add", "rfc.json")
     _git(repo, "commit", "-m", "initial rfc")
+    _git(repo, "checkout", "main")
 
 
 def _latest_commit_message(repo: Path) -> str:
     return _git(repo, "log", "-1", "--pretty=%B").stdout
 
 
-def _commit_count(repo: Path) -> int:
-    return int(_git(repo, "rev-list", "--count", "HEAD").stdout.strip())
+def _commit_count(repo: Path, ref: str = "HEAD") -> int:
+    return int(_git(repo, "rev-list", "--count", ref).stdout.strip())
 
 
 def _schema_kind(output_schema: str | Path) -> str:
@@ -103,8 +119,8 @@ def test_all_reviewers_clear_direction_ok_in_one_round(tmp_path, monkeypatch):
 
     _install_codex_fake(monkeypatch, handler)
 
-    before = _commit_count(tmp_path)
-    result = review.run_rfc_review(tmp_path)
+    before = _commit_count(tmp_path, RFC_BRANCH)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "direction-ok"
     assert result.rounds == 1
@@ -113,7 +129,7 @@ def test_all_reviewers_clear_direction_ok_in_one_round(tmp_path, monkeypatch):
     assert result.unresolved == []
     assert len(calls) == 5
     assert all(call["repo"] == tmp_path for call in calls)
-    assert _commit_count(tmp_path) == before + 1
+    assert _commit_count(tmp_path, RFC_BRANCH) == before + 1
     assert _latest_commit_message(tmp_path).startswith("rfc: direction-ok (1 rounds)")
 
 
@@ -148,12 +164,12 @@ def test_aufheben_proceed_revised_rfc_feeds_next_review_round(tmp_path, monkeypa
 
     _install_codex_fake(monkeypatch, handler)
 
-    result = review.run_rfc_review(tmp_path)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "direction-ok"
     assert result.rounds == 2
     assert result.final_view == revised
-    assert json.loads((tmp_path / "rfc.json").read_text(encoding="utf-8")) == revised
+    assert json.loads(_git(tmp_path, "show", f"{RFC_BRANCH}:rfc.json").stdout) == revised
     assert _latest_commit_message(tmp_path).startswith("rfc: direction-ok (2 rounds)")
     assert aufheben_calls == 1
     assert reviewer_calls == 2 * len(review.DIMENSIONS)
@@ -161,8 +177,11 @@ def test_aufheben_proceed_revised_rfc_feeds_next_review_round(tmp_path, monkeypa
     assert len(second_round_prompts) == len(review.DIMENSIONS)
     for prompt in second_round_prompts:
         assert "Current structured revised RFC to re-critique" in prompt
-        for value in revised.values():
-            assert value in prompt
+        for field, value in revised.items():
+            if field == "alternatives":
+                assert value[0] in prompt
+            else:
+                assert value in prompt
     assert result.history[0]["aufheben"]["verdict"] == "proceed"
     assert result.history[0]["aufheben"]["situation_read"]
 
@@ -193,7 +212,7 @@ def test_aufheben_escalate_naks_immediately(tmp_path, monkeypatch):
 
     _install_codex_fake(monkeypatch, handler)
 
-    result = review.run_rfc_review(tmp_path)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
     assert result.rounds == 1
@@ -224,7 +243,7 @@ def test_garbled_aufheben_json_fail_closed_nak(tmp_path, monkeypatch):
 
     _install_codex_fake(monkeypatch, handler)
 
-    result = review.run_rfc_review(tmp_path)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
     assert result.rounds == 1
@@ -263,7 +282,7 @@ def test_persistent_objection_naks_after_cap_and_consolidates_each_round(tmp_pat
 
     _install_codex_fake(monkeypatch, handler)
 
-    result = review.run_rfc_review(tmp_path)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
     assert result.rounds == review.CAP
@@ -324,15 +343,34 @@ def test_reviewers_use_read_only_sandbox_and_output_schema(tmp_path, monkeypatch
     assert "Revised Manual RFC current" in calls[0]["prompt"]
 
 
-def test_missing_rfc_at_head_fail_closed_nak(tmp_path):
+def test_aufheben_schema_uses_common_8_and_codex_valid_required_properties():
+    schema = review.AUFHEBEN_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    assert schema["additionalProperties"] is False
+    assert sorted(schema["required"]) == sorted(schema["properties"])
+
+    revised_rfc = schema["properties"]["revised_rfc"]
+    assert revised_rfc["additionalProperties"] is False
+    assert tuple(revised_rfc["required"]) == review.RFC_VIEW_FIELDS
+    assert sorted(revised_rfc["required"]) == sorted(revised_rfc["properties"])
+    assert revised_rfc["properties"]["alternatives"]["type"] == "array"
+
+
+def test_missing_rfc_on_rfc_branch_fail_closed_nak(tmp_path):
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True, text=True)
     _git(tmp_path, "config", "user.name", "RFC Test")
     _git(tmp_path, "config", "user.email", "rfc-test@example.invalid")
     (tmp_path / "README.md").write_text("empty\n", encoding="utf-8")
     _git(tmp_path, "add", "README.md")
     _git(tmp_path, "commit", "-m", "initial")
+    _git(tmp_path, "branch", "-M", "main")
+    _git(tmp_path, "checkout", "-B", RFC_BRANCH, "main")
+    _git(tmp_path, "checkout", "main")
 
-    result = review.run_rfc_review(tmp_path)
+    result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
     assert result.rounds == 0

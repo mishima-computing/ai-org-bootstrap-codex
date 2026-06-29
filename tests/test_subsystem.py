@@ -88,16 +88,16 @@ def _init_repo(tmp_path):
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-m", "base")
-    _git(repo, "branch", "-M", "master")
+    _git(repo, "branch", "-M", "main")
     return repo
 
 
 def _commit_on_branch(repo, branch, filename):
-    _git(repo, "checkout", "-B", branch, "master")
+    _git(repo, "checkout", "-B", branch, "main")
     (repo / filename).write_text(f"{filename}\n", encoding="utf-8")
     _git(repo, "add", filename)
     _git(repo, "commit", "-m", f"add {filename}")
-    _git(repo, "checkout", "master")
+    _git(repo, "checkout", "main")
     return branch
 
 

@@ -10,21 +10,32 @@ import re
 import shutil
 import subprocess
 import tempfile
+from typing import Any
 
 
-RFC_FIELDS = ("title", "problem", "proposed_change", "interface_sketch", "notes")
+RFC_FIELDS = (
+    "title",
+    "problem",
+    "proposal",
+    "alternatives",
+    "intended_users",
+    "affected_area",
+    "impact",
+    "context",
+)
 
 
 def run(
     repo,
+    rfc_id_or_branch: str,
     rfc_path: str = "rfc.json",
     branch: str | None = None,
     feedback=None,
     attempt: int = 1,
 ) -> dict:
-    """Implement the RFC committed at HEAD and return contribution branch metadata."""
+    """Implement the RFC committed on ai-org/rfc/<id> and return contribution branch metadata."""
     repo_path = Path(repo).resolve()
-    rfc = _read_rfc_from_head(repo_path, rfc_path)
+    rfc = _read_rfc_from_git(repo_path, rfc_id_or_branch, rfc_path)
     if not rfc["ok"]:
         return rfc
 
@@ -48,7 +59,7 @@ def run(
             "-b",
             branch_name,
             str(worktree),
-            "HEAD",
+            _default_branch(repo_path),
         )
         if worktree_result.returncode != 0:
             return _failure(
@@ -134,11 +145,12 @@ def run(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _read_rfc_from_head(repo: Path, rfc_path: str) -> dict:
-    result = _git_run(repo, "show", f"HEAD:{rfc_path}")
+def _read_rfc_from_git(repo: Path, rfc_id_or_branch: str, rfc_path: str) -> dict:
+    rfc_branch = _rfc_branch(rfc_id_or_branch)
+    result = _git_run(repo, "show", f"{rfc_branch}:{rfc_path}")
     if result.returncode != 0:
         return _failure(
-            f"{rfc_path} missing at HEAD",
+            f"{rfc_path} missing at {rfc_branch}",
             stderr=result.stderr,
             stdout=result.stdout,
         )
@@ -146,24 +158,26 @@ def _read_rfc_from_head(repo: Path, rfc_path: str) -> dict:
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        return _failure(f"{rfc_path} at HEAD is not parseable JSON: {exc}")
+        return _failure(f"{rfc_path} at {rfc_branch} is not parseable JSON: {exc}")
 
-    missing = [field for field in RFC_FIELDS if field not in data]
-    if missing:
-        return _failure(f"{rfc_path} at HEAD is missing required fields: {', '.join(missing)}")
+    if not _is_common_8(data):
+        return _failure(f"{rfc_path} at {rfc_branch} must contain exactly the COMMON-8 fields")
 
-    return {"ok": True, "rfc": {field: str(data[field]) for field in RFC_FIELDS}}
+    return {"ok": True, "rfc": {field: data[field] for field in RFC_FIELDS}}
 
 
-def _prompt(rfc: dict) -> str:
+def _prompt(rfc: dict[str, Any]) -> str:
     return (
         "Implement the RFC in this repository.\n"
         "Edit the working tree only. Do not commit.\n\n"
         f"title:\n{rfc['title']}\n\n"
         f"problem:\n{rfc['problem']}\n\n"
-        f"proposed_change:\n{rfc['proposed_change']}\n\n"
-        f"interface_sketch:\n{rfc['interface_sketch']}\n\n"
-        f"notes:\n{rfc['notes']}\n"
+        f"proposal:\n{rfc['proposal']}\n\n"
+        f"alternatives:\n{_format_alternatives(rfc['alternatives'])}\n\n"
+        f"intended_users:\n{rfc['intended_users']}\n\n"
+        f"affected_area:\n{rfc['affected_area']}\n\n"
+        f"impact:\n{rfc['impact']}\n\n"
+        f"context:\n{rfc['context']}\n"
     )
 
 
@@ -175,6 +189,44 @@ def _slug(value: str) -> str:
 def _branch_exists(repo: Path, branch: str) -> bool:
     result = _git_run(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
     return result.returncode == 0
+
+
+def _rfc_branch(rfc_id_or_branch: str) -> str:
+    if rfc_id_or_branch.startswith("refs/heads/"):
+        return rfc_id_or_branch.removeprefix("refs/heads/")
+    if rfc_id_or_branch.startswith("ai-org/rfc/"):
+        return rfc_id_or_branch
+    return f"ai-org/rfc/{rfc_id_or_branch}"
+
+
+def _is_common_8(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(RFC_FIELDS)
+        and all(isinstance(value[field], str) for field in RFC_FIELDS if field != "alternatives")
+        and isinstance(value["alternatives"], list)
+        and all(isinstance(item, str) for item in value["alternatives"])
+    )
+
+
+def _format_alternatives(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(f"- {item}" for item in value)
+    return str(value)
+
+
+def _default_branch(repo: Path) -> str:
+    origin_head = _git_run(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if origin_head.returncode == 0:
+        ref = origin_head.stdout.strip()
+        if ref.startswith("origin/"):
+            return ref
+
+    current = _git_run(repo, "symbolic-ref", "--short", "HEAD")
+    if current.returncode == 0 and current.stdout.strip():
+        return current.stdout.strip()
+
+    raise RuntimeError("could not determine repository default branch")
 
 
 def _git(repo: Path, *args: str) -> str:

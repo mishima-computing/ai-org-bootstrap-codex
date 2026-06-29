@@ -108,7 +108,16 @@ OBJECTION_SCHEMA: dict[str, Any] = {
     },
 }
 
-RFC_VIEW_FIELDS = ("title", "problem", "proposed_change", "interface_sketch", "notes")
+RFC_VIEW_FIELDS = (
+    "title",
+    "problem",
+    "proposal",
+    "alternatives",
+    "intended_users",
+    "affected_area",
+    "impact",
+    "context",
+)
 
 AUFHEBEN_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -124,9 +133,12 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
             "properties": {
                 "title": {"type": "string"},
                 "problem": {"type": "string"},
-                "proposed_change": {"type": "string"},
-                "interface_sketch": {"type": "string"},
-                "notes": {"type": "string"},
+                "proposal": {"type": "string"},
+                "alternatives": {"type": "array", "items": {"type": "string"}},
+                "intended_users": {"type": "string"},
+                "affected_area": {"type": "string"},
+                "impact": {"type": "string"},
+                "context": {"type": "string"},
             },
         },
         "situation_read": {"type": "string", "maxLength": 1000},
@@ -145,7 +157,7 @@ class Objection:
 @dataclass
 class AufhebenDecision:
     verdict: str
-    revised_rfc: dict[str, str]
+    revised_rfc: dict[str, Any]
     situation_read: str
     escalation_reason: str = ""
 
@@ -154,7 +166,7 @@ class AufhebenDecision:
 class ReviewResult:
     status: str                 # "direction-ok" (converged) | "nak" (not converged within CAP)
     rounds: int                 # rounds actually run
-    final_view: dict[str, str] | str  # the latest structured RFC view (or "" if none)
+    final_view: dict[str, Any] | str  # the latest structured RFC view (or "" if none)
     resolved: list = field(default_factory=list)     # dimension keys with NO objection at the end
     unresolved: list = field(default_factory=list)   # Objection list still open at the end (NAK)
     history: list = field(default_factory=list)       # per-round objections, for the record
@@ -163,9 +175,9 @@ class ReviewResult:
 
 def _review_one(
     dim: Dimension,
-    rfc_view: dict[str, str],
+    rfc_view: dict[str, Any],
     repo: str | Path,
-    current_view: dict[str, str] | None,
+    current_view: dict[str, Any] | None,
 ) -> Objection:
     """One reviewer critiques the RFC (or the latest aufheben consolidation) on ONE dimension.
 
@@ -230,26 +242,29 @@ def _parse_objection(dimension: str, raw: str) -> Objection:
     return Objection(dimension, has_objection, detail)
 
 
-def _rfc_to_view(rfc_view: dict[str, str]) -> dict[str, str]:
+def _rfc_to_view(rfc_view: dict[str, Any]) -> dict[str, Any]:
     return {field: rfc_view[field] for field in RFC_VIEW_FIELDS}
 
 
-def _format_rfc(label: str, view: dict[str, str]) -> str:
+def _format_rfc(label: str, view: dict[str, Any]) -> str:
     return (
         f"{label}:\n"
         f"title: {view['title']}\n"
         f"problem: {view['problem']}\n"
-        f"proposed_change: {view['proposed_change']}\n"
-        f"interface_sketch: {view['interface_sketch']}\n"
-        f"notes: {view['notes']}\n"
+        f"proposal: {view['proposal']}\n"
+        f"alternatives: {_format_alternatives(view['alternatives'])}\n"
+        f"intended_users: {view['intended_users']}\n"
+        f"affected_area: {view['affected_area']}\n"
+        f"impact: {view['impact']}\n"
+        f"context: {view['context']}\n"
     )
 
 
 def _aufheben_consolidate(
-    rfc_view: dict[str, str],
+    rfc_view: dict[str, Any],
     objections: list[Objection],
     repo: str | Path,
-    current_view: dict[str, str] | None,
+    current_view: dict[str, Any] | None,
 ) -> AufhebenDecision:
     """The Aufheben step merges objections into one revised RFC, or escalates.
 
@@ -339,47 +354,76 @@ def _is_rfc_view(value: object) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == set(RFC_VIEW_FIELDS)
-        and all(isinstance(value[field], str) for field in RFC_VIEW_FIELDS)
+        and all(isinstance(value[field], str) for field in RFC_VIEW_FIELDS if field != "alternatives")
+        and isinstance(value["alternatives"], list)
+        and all(isinstance(item, str) for item in value["alternatives"])
     )
 
 
 def _aufheben_fail_closed(reason: str) -> AufhebenDecision:
     return AufhebenDecision(
         verdict="escalate",
-        revised_rfc={field: "" for field in RFC_VIEW_FIELDS},
+        revised_rfc={field: ([] if field == "alternatives" else "") for field in RFC_VIEW_FIELDS},
         situation_read=reason[:1000],
         escalation_reason=reason,
     )
 
 
-def _read_rfc_from_git(repo: str | Path, rfc_path: str) -> tuple[dict[str, str] | None, str]:
+def _format_alternatives(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(f"- {item}" for item in value)
+    return str(value)
+
+
+def _rfc_branch(rfc_id_or_branch: str) -> str:
+    if rfc_id_or_branch.startswith("refs/heads/"):
+        return rfc_id_or_branch.removeprefix("refs/heads/")
+    if rfc_id_or_branch.startswith("ai-org/rfc/"):
+        return rfc_id_or_branch
+    return f"ai-org/rfc/{rfc_id_or_branch}"
+
+
+def _read_rfc_from_git(repo: str | Path, rfc_id_or_branch: str, rfc_path: str) -> tuple[dict[str, Any] | None, str]:
+    branch = _rfc_branch(rfc_id_or_branch)
     completed = subprocess.run(
-        ["git", "-C", str(repo), "show", f"HEAD:{rfc_path}"],
+        ["git", "-C", str(repo), "show", f"{branch}:{rfc_path}"],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or f"could not read HEAD:{rfc_path}"
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"could not read {branch}:{rfc_path}"
         return None, detail
     try:
         parsed = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        return None, f"HEAD:{rfc_path} is invalid JSON: {exc}"
+        return None, f"{branch}:{rfc_path} is invalid JSON: {exc}"
     if not _is_rfc_view(parsed):
-        return None, f"HEAD:{rfc_path} must contain exactly these string fields: {', '.join(RFC_VIEW_FIELDS)}"
+        return None, f"{branch}:{rfc_path} must contain exactly the COMMON-8 fields"
     return _rfc_to_view(parsed), ""
 
 
-def _write_direction_ok(repo: str | Path, rfc_path: str, final_view: dict[str, str], rounds: int) -> None:
+def _write_direction_ok(
+    repo: str | Path,
+    rfc_id_or_branch: str,
+    rfc_path: str,
+    final_view: dict[str, Any],
+    rounds: int,
+) -> None:
+    branch = _rfc_branch(rfc_id_or_branch)
+    _checkout(repo, branch)
     target = Path(repo, rfc_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(final_view, indent=2) + "\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", rfc_path], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", f"rfc: direction-ok ({rounds} rounds)"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-m", f"rfc: direction-ok ({rounds} rounds)"],
+        check=True,
+    )
 
 
-def _write_nak(repo: str | Path, rounds: int, unresolved_dimensions: list[str]) -> None:
+def _write_nak(repo: str | Path, rfc_id_or_branch: str, rounds: int, unresolved_dimensions: list[str]) -> None:
+    _checkout(repo, _rfc_branch(rfc_id_or_branch))
     dimensions = ", ".join(unresolved_dimensions) if unresolved_dimensions else "none"
     subprocess.run(
         [
@@ -395,9 +439,9 @@ def _write_nak(repo: str | Path, rounds: int, unresolved_dimensions: list[str]) 
     )
 
 
-# PROVEN end-to-end against real codex (2026-06-29): git read (rfc.json@HEAD) -> 5 reviewers + Aufheben (real
+# PROVEN end-to-end against real codex (2026-06-29): git read (rfc.json@RFC branch) -> 5 reviewers + Aufheben (real
 # substantive verdicts) -> git write (commit "rfc: direction-ok|nak" lands in the repo's git log).
-def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult:
+def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc.json") -> ReviewResult:
     """Loop up to CAP rounds: 5 reviewers -> (if objections) aufheben consolidates -> 5 re-critique.
 
     Converged within CAP (no unresolved objection) -> "direction-ok".
@@ -406,7 +450,7 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
     """
     # git is done HERE in python, NOT by codex: codex --sandbox workspace-write can edit the working tree but
     # CANNOT write .git (PROVEN: ".git/index.lock: Operation not permitted"). So python reads/writes git around codex.
-    rfc_view, read_error = _read_rfc_from_git(repo, rfc_path)
+    rfc_view, read_error = _read_rfc_from_git(repo, rfc_id_or_branch, rfc_path)
     if rfc_view is None:
         result = ReviewResult(
             "nak",
@@ -418,12 +462,12 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
             escalation_reason=read_error,
         )
         try:
-            _write_nak(repo, 0, ["rfc-read"])
+            _write_nak(repo, rfc_id_or_branch, 0, ["rfc-read"])
         except subprocess.CalledProcessError as exc:
             result.escalation_reason = f"{read_error}; failed to commit NAK: {exc}"
         return result
 
-    current_view: dict[str, str] | None = None
+    current_view: dict[str, Any] | None = None
     history: list = []
     for rounds in range(1, CAP + 1):
         objections = [_review_one(dim, rfc_view, repo, current_view) for dim in DIMENSIONS]
@@ -433,7 +477,7 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
         if not unresolved:                                   # converged -> direction OK
             resolved = [o.dimension for o in objections]
             final_view = current_view or rfc_view
-            _write_direction_ok(repo, rfc_path, final_view, rounds)
+            _write_direction_ok(repo, rfc_id_or_branch, rfc_path, final_view, rounds)
             return ReviewResult("direction-ok", rounds, final_view,
                                 resolved=resolved, unresolved=[], history=history)
         decision = _aufheben_consolidate(rfc_view, objections, repo, current_view)  # revise, then re-critique
@@ -444,7 +488,7 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
         }
         if decision.verdict == "escalate":
             resolved = [o.dimension for o in objections if not o.has_objection]
-            _write_nak(repo, rounds, [o.dimension for o in unresolved])
+            _write_nak(repo, rfc_id_or_branch, rounds, [o.dimension for o in unresolved])
             return ReviewResult(
                 "nak",
                 rounds,
@@ -457,9 +501,13 @@ def run_rfc_review(repo: str | Path, rfc_path: str = "rfc.json") -> ReviewResult
         current_view = decision.revised_rfc
         if rounds == CAP:                                    # cap reached, still open -> NAK
             resolved = [o.dimension for o in objections if not o.has_objection]
-            _write_nak(repo, rounds, [o.dimension for o in unresolved])
+            _write_nak(repo, rfc_id_or_branch, rounds, [o.dimension for o in unresolved])
             return ReviewResult("nak", rounds, current_view or "",
                                 resolved=resolved, unresolved=unresolved, history=history)
+
+
+def _checkout(repo: str | Path, branch: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "checkout", branch], check=True)
 
 
 # Entry (manual for now):

@@ -12,13 +12,13 @@ from __future__ import annotations
 from . import functional_check, implement
 
 
-def make(repo, rfc_path: str = "rfc.json", cap: int = 3) -> dict:
+def make(repo, rfc_id_or_branch: str, rfc_path: str = "rfc.json", cap: int = 3) -> dict:
     """Produce an accepted contribution branch, retrying rejected attempts."""
     feedback = None
     branch = None
     verdict = None
     for attempt in range(1, cap + 1):
-        result = implement.run(repo, rfc_path=rfc_path, feedback=feedback, attempt=attempt)
+        result = implement.run(repo, rfc_id_or_branch, rfc_path=rfc_path, feedback=feedback, attempt=attempt)
         branch = result["branch"]
         verdict = functional_check.check(repo, branch)
         if verdict["ok"]:

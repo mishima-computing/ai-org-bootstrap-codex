@@ -29,9 +29,12 @@ def _repo(tmp_path: Path) -> Path:
             {
                 "title": "Playable feature",
                 "problem": "A real user needs to reach the feature.",
-                "proposed_change": "Expose the feature through app.py.",
-                "interface_sketch": "python app.py",
-                "notes": "Acceptance checks reachability.",
+                "proposal": "Expose the feature through app.py.",
+                "alternatives": ["Leave app.py without a reachable feature."],
+                "intended_users": "Application users.",
+                "affected_area": "app.py",
+                "impact": "Users can reach the feature.",
+                "context": "Acceptance checks reachability.",
             }
         )
         + "\n",
@@ -40,11 +43,12 @@ def _repo(tmp_path: Path) -> Path:
     (repo / "app.py").write_text("BASE = True\n", encoding="utf-8")
     _git(repo, "add", "rfc.json", "app.py")
     _git(repo, "commit", "-m", "base")
+    _git(repo, "branch", "-M", "main")
     _git(repo, "checkout", "-b", "feature/playable")
     (repo / "app.py").write_text("GOAL = 'reachable'\n", encoding="utf-8")
     _git(repo, "add", "app.py")
     _git(repo, "commit", "-m", "feature")
-    _git(repo, "checkout", "master")
+    _git(repo, "checkout", "main")
     return repo
 
 
