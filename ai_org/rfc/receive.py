@@ -16,6 +16,11 @@
 # Only after these is the RFC ready for a Contributor to TAKE and implement. (This whole front-end was
 # being IGNORED — receive was treated as a loader. It is not: it does the promotion work + the gate.)
 #
+# DECISION: these 5 過程 happen INSIDE the RFC formation — one codex-driven stage, like review's internal
+# 5-reviewer + Aufheben loop — NOT as 5 separate git stages/branches/commits. Git stores ONLY the result:
+# the promoted, contributor-takeable RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker. Doing
+# the 5 過程 inside the RFC (not in git) keeps the git state from exploding.
+#
 # Shape (to match the other stages): git-read the request -> codex judges (gate) -> git-write either
 # the promoted RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker.
 #
