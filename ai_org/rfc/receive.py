@@ -5,6 +5,17 @@
 # (the direction debate). So the RFC phase has TWO gates, in order:
 #     1) receive : can this REQUEST become an RFC?   (this file)
 #     2) review  : is the RFC's DIRECTION ok?        (review.py)
+# THE RFC PHASE'S JOB = take a raw REQUEST and make it CONTRIBUTOR-TAKEABLE. That promotion is real
+# work, not a load. It mirrors the Linux early-stage process (kernel.org process/3.Early-stage) — the
+# "5 過程" that turn a request into a proposable RFC:
+#     1) Specify the problem   — what must be solved, who is affected, where the system falls short
+#     2) Early discussion      — surface objections / alternatives BEFORE implementation
+#     3) Who do you talk to    — route to the right reviewers/maintainers (the right subsystem)
+#     4) When to post          — the problem + intended approach are stated well enough to act on
+#     5) Get buy-in            — go / no-go approval to proceed
+# Only after these is the RFC ready for a Contributor to TAKE and implement. (This whole front-end was
+# being IGNORED — receive was treated as a loader. It is not: it does the promotion work + the gate.)
+#
 # Shape (to match the other stages): git-read the request -> codex judges (gate) -> git-write either
 # the promoted RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker.
 #
