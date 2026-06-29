@@ -6,73 +6,66 @@ import subprocess
 from ai_org import tracking
 
 
-def test_list_rfcs_returns_ids_from_rfc_branches(tmp_path):
+def test_branches_lists_matching_local_branches(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/alpha", "rfc: alpha")
-    _branch_with_commit(repo, "ai-org/rfc/beta", "rfc: beta")
-    _branch_with_commit(repo, "other/topic", "other")
+    _branch_with_commit(repo, "feature/alpha", "alpha")
+    _branch_with_commit(repo, "feature/beta", "beta")
+    _branch_with_commit(repo, "topic/gamma", "gamma")
 
-    assert tracking.list_rfcs(repo) == ["alpha", "beta"]
+    assert tracking.branches(repo, "feature/*") == ["feature/alpha", "feature/beta"]
+    assert tracking.branches(repo, "missing/*") == []
 
 
-def test_proposed_stage_and_next_action(tmp_path):
+def test_branch_exists_checks_local_branch(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/proposed", "rfc: proposed")
+    _branch_with_commit(repo, "feature/alpha", "alpha")
 
-    assert tracking.stage_of(repo, "proposed") == "proposed"
-    assert tracking.next_action(repo, "proposed") == "review"
+    assert tracking.branch_exists(repo, "feature/alpha") is True
+    assert tracking.branch_exists(repo, "feature/missing") is False
 
 
-def test_direction_ok_stage_and_next_action(tmp_path):
+def test_log_subjects_returns_subjects_for_ref(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/direction-ok", "rfc: proposed")
-    _commit_on_branch(repo, "ai-org/rfc/direction-ok", "rfc: direction-ok")
+    _branch_with_commit(repo, "feature/alpha", "alpha: first")
+    _commit_on_branch(repo, "feature/alpha", "alpha: second")
 
-    assert tracking.stage_of(repo, "direction-ok") == "direction-ok"
-    assert tracking.next_action(repo, "direction-ok") == "make"
+    assert tracking.log_subjects(repo, "feature/alpha") == [
+        "alpha: second",
+        "alpha: first",
+        "base",
+    ]
+    assert tracking.log_subjects(repo, "feature/missing") == []
 
 
-def test_accepted_stage_and_next_action(tmp_path):
+def test_has_subject_matches_subject_substring(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/accepted", "rfc: direction-ok")
-    _branch_with_commit(repo, "ai-org/contrib/accepted", "patch: accepted")
-    _commit_on_branch(repo, "ai-org/contrib/accepted", "acceptance: reachable")
+    _branch_with_commit(repo, "feature/alpha", "alpha: first")
+    _commit_on_branch(repo, "feature/alpha", "alpha: second")
 
-    assert tracking.stage_of(repo, "accepted") == "accepted"
-    assert tracking.next_action(repo, "accepted") == "subsystem"
+    assert tracking.has_subject(repo, "feature/alpha", "first") is True
+    assert tracking.has_subject(repo, "feature/alpha", "missing") is False
+    assert tracking.has_subject(repo, "feature/missing", "first") is False
 
 
-def test_in_subsystem_stage_and_next_action(tmp_path):
+def test_is_ancestor_checks_reachability(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/in-subsystem", "rfc: direction-ok")
-    _branch_with_commit(repo, "ai-org/contrib/in-subsystem", "patch: in-subsystem")
-    _commit_on_branch(repo, "ai-org/contrib/in-subsystem", "acceptance: reachable")
-    _branch_at(repo, "ai-org/subsystem", "ai-org/contrib/in-subsystem")
+    _branch_with_commit(repo, "feature/alpha", "alpha")
+    _branch_at(repo, "integration", "feature/alpha")
+    _branch_with_commit(repo, "feature/beta", "beta")
 
-    assert tracking.stage_of(repo, "in-subsystem") == "in-subsystem"
-    assert tracking.next_action(repo, "in-subsystem") == "mainline"
+    assert tracking.is_ancestor(repo, "feature/alpha", "integration") is True
+    assert tracking.is_ancestor(repo, "feature/beta", "integration") is False
+    assert tracking.is_ancestor(repo, "feature/missing", "integration") is False
+    assert tracking.is_ancestor(repo, "feature/alpha", "missing") is False
 
 
-def test_merged_stage_and_next_action(tmp_path):
+def test_head_sha_returns_commit_sha_or_none(tmp_path):
     repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/merged", "rfc: direction-ok")
-    _branch_with_commit(repo, "ai-org/contrib/merged", "patch: merged")
-    _commit_on_branch(repo, "ai-org/contrib/merged", "acceptance: reachable")
-    _branch_at(repo, "ai-org/subsystem", "ai-org/contrib/merged")
-    _branch_at(repo, "ai-org/mainline", "ai-org/contrib/merged")
+    _branch_with_commit(repo, "feature/alpha", "alpha")
+    expected = _git(repo, "rev-parse", "feature/alpha").stdout.strip()
 
-    assert tracking.stage_of(repo, "merged") == "merged"
-    assert tracking.next_action(repo, "merged") == "done"
-
-
-def test_rejected_stage_and_next_action(tmp_path):
-    repo = _init_repo(tmp_path)
-    _branch_with_commit(repo, "ai-org/rfc/rejected", "rfc: proposed")
-    _commit_on_branch(repo, "ai-org/rfc/rejected", "rfc: direction-ok")
-    _commit_on_branch(repo, "ai-org/rfc/rejected", "rfc: nak")
-
-    assert tracking.stage_of(repo, "rejected") == "rejected"
-    assert tracking.next_action(repo, "rejected") == "none"
+    assert tracking.head_sha(repo, "feature/alpha") == expected
+    assert tracking.head_sha(repo, "feature/missing") is None
 
 
 def _init_repo(tmp_path: Path) -> Path:
@@ -84,20 +77,20 @@ def _init_repo(tmp_path: Path) -> Path:
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-m", "base")
-    _git(repo, "branch", "-M", "master")
+    _git(repo, "branch", "-M", "main")
     return repo
 
 
 def _branch_with_commit(repo: Path, branch: str, message: str) -> None:
-    _git(repo, "checkout", "-B", branch, "master")
+    _git(repo, "checkout", "-B", branch, "main")
     _write_branch_file(repo, branch, message)
-    _git(repo, "checkout", "master")
+    _git(repo, "checkout", "main")
 
 
 def _commit_on_branch(repo: Path, branch: str, message: str) -> None:
     _git(repo, "checkout", branch)
     _write_branch_file(repo, branch, message)
-    _git(repo, "checkout", "master")
+    _git(repo, "checkout", "main")
 
 
 def _write_branch_file(repo: Path, branch: str, message: str) -> None:
