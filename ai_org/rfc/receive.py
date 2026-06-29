@@ -1,3 +1,15 @@
+# receive.py — the INTAKE GATE: judges whether an incoming REQUEST may become an RFC.
+# This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (差し戻し):
+#     request --[receive gate]--> promote to RFC | send back for revision | reject.
+# Only requests that PASS this gate become an RFC (ai-org/rfc/<id>), which then goes to rfc/review
+# (the direction debate). So the RFC phase has TWO gates, in order:
+#     1) receive : can this REQUEST become an RFC?   (this file)
+#     2) review  : is the RFC's DIRECTION ok?        (review.py)
+# Shape (to match the other stages): git-read the request -> codex judges (gate) -> git-write either
+# the promoted RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker.
+#
+# STATUS (be honest): the code BELOW is still only the manual loader/translator — the GATE (codex
+# judgment + send-back, git read/write) is NOT built yet. TODO: build the gate in this form.
 """RFC receive — step 1 of the RFC phase: take in the RFC (the apex).
 
 A raw requirement arriving at the AI Org is NOT in Linux-RFC form. The AI Org must first TRANSLATE it
