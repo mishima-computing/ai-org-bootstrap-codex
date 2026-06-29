@@ -37,62 +37,80 @@
 #
 # STATUS (be honest): the code BELOW is still only the manual loader/translator — the GATE (codex
 # judgment + send-back, git read/write) is NOT built yet. TODO: build the gate in this form.
-"""RFC receive — step 1 of the RFC phase: take in the RFC (the apex).
-
-A raw requirement arriving at the AI Org is NOT in Linux-RFC form. The AI Org must first TRANSLATE it
-into an implementable RFC (problem + proposed change + interface sketch). That translation is assumed
-done here; for now the RFC is received MANUALLY (hand-written). An RFC mirrors a Linux mailing-list RFC.
-"""
+"""RFC receive — step 1 of the RFC phase: validate the entrance request."""
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 
-@dataclass
-class RFC:
-    title: str
-    problem: str               # what is wrong / what is needed, stated concretely (the goal)
-    proposed_change: str       # the intended change / approach
-    interface_sketch: str = "" # the API/contract this would introduce or touch
-    notes: str = ""
+COMMON_8_FIELDS = (
+    "title",
+    "problem",
+    "proposal",
+    "alternatives",
+    "intended_users",
+    "affected_area",
+    "impact",
+    "context",
+)
+
+REQUIRED_FIELDS = ("title", "problem")
+OPTIONAL_FIELDS = ("proposal", "alternatives", "intended_users", "affected_area", "impact", "context")
+OPTIONAL_STRING_FIELDS = ("proposal", "intended_users", "affected_area", "impact", "context")
+OPTIONAL_LIST_FIELDS = ("alternatives",)
+
+REQUEST_SCHEMA: dict[str, Any] = {
+    "recognized_fields": list(COMMON_8_FIELDS),
+    "required": list(REQUIRED_FIELDS),
+    "optional": list(OPTIONAL_FIELDS),
+    "additional_properties": True,
+}
 
 
-def receive(source: str | Path | Mapping[str, Any]) -> RFC:
-    """Load a hand-written RFC from a dict or a JSON file path."""
+def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
+    """Load and validate a raw request from a dict or a JSON file path."""
     if isinstance(source, Mapping):
-        data = source
+        data = dict(source)
     elif isinstance(source, (str, Path)):
         path = Path(source)
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except OSError as exc:
-            raise ValueError(f"Could not read RFC JSON file {path}: {exc}") from exc
+            raise ValueError(f"Could not read request JSON file {path}: {exc}") from exc
         except json.JSONDecodeError as exc:
-            raise ValueError(f"RFC JSON file {path} is invalid JSON: {exc}") from exc
+            raise ValueError(f"Request JSON file {path} is invalid JSON: {exc}") from exc
         if not isinstance(loaded, dict):
-            raise ValueError(f"RFC JSON file {path} must contain a JSON object.")
+            raise ValueError(f"Request JSON file {path} must contain a JSON object.")
         data = loaded
     else:
         raise TypeError("receive(source) expects a dict or a path to a JSON file.")
 
-    missing = [field for field in ("title", "problem", "proposed_change") if data.get(field) is None]
-    if missing:
-        raise ValueError(f"RFC is missing required field(s): {', '.join(missing)}")
+    for field in REQUIRED_FIELDS:
+        _required_string_field(data, field)
 
-    return RFC(
-        title=_string_field(data, "title"),
-        problem=_string_field(data, "problem"),
-        proposed_change=_string_field(data, "proposed_change"),
-        interface_sketch=_string_field(data, "interface_sketch", default=""),
-        notes=_string_field(data, "notes", default=""),
-    )
+    for field in OPTIONAL_STRING_FIELDS:
+        _optional_string_field(data, field)
+    for field in OPTIONAL_LIST_FIELDS:
+        _optional_list_field(data, field)
+
+    return data
 
 
-def _string_field(data: Mapping[str, Any], field: str, *, default: str | None = None) -> str:
-    value = data.get(field, default)
+def _required_string_field(data: Mapping[str, Any], field: str) -> None:
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Request field {field!r} is required and must be a non-empty string.")
+
+
+def _optional_string_field(data: dict[str, Any], field: str) -> None:
+    value = data.setdefault(field, "")
     if not isinstance(value, str):
-        raise ValueError(f"RFC field {field!r} must be a string.")
-    return value
+        raise ValueError(f"Request field {field!r} must be a string when provided.")
+
+
+def _optional_list_field(data: dict[str, Any], field: str) -> None:
+    value = data.setdefault(field, [])
+    if not isinstance(value, list):
+        raise ValueError(f"Request field {field!r} must be a list when provided.")
