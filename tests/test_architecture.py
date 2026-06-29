@@ -38,12 +38,15 @@ def test_ai_org_import_graph_is_acyclic_and_respects_boundaries():
     ]
     assert domain_back_edges == []
 
+    # No central orchestrator: after the demolition there is NO driver. The pull model means each role
+    # finds its own work; nothing is allowed to import all three domain phases (that would be a central
+    # crosser / orchestrator, which we deliberately removed).
     all_phase_importers = [
         source
         for source, targets in graph.items()
         if _imported_phases(targets) == set(PHASES)
     ]
-    assert all_phase_importers == ["ai_org.driver"]
+    assert all_phase_importers == []
 
 
 def _package_modules() -> dict[str, Path]:
