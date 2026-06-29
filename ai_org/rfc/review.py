@@ -9,6 +9,27 @@
 # finished rfc.json), the output the crafted RFC; and reconcile the 5 dimensions named here
 # (need/approach/compat/scope/maintenance) with the early-stage 5 過程
 # (specify problem / early discussion / who to talk to / when to post / get buy-in).
+#
+# ── REFERENCE: how the Linux community FORMS an RFC (grounded by research; our design may differ/evolve,
+#    but this is the model we are abstracting — keep it here so we can revise against it). The number "5"
+#    is NOT absolute: it is one doc's enumeration; the real process varies and has no global fixed rule.
+#
+#    A) Before posting — early-stage formation (kernel.org process/3.Early-stage):
+#         specify the problem (what/who/where-it-falls-short) · early discussion (surface objections/
+#         alternatives BEFORE code) · who do you talk to (route to the right list/maintainers, MAINTAINERS
+#         / get_maintainer.pl) · when to post (problem + approach solid enough to act on) · get buy-in.
+#    B) The RFC artifact posted: an [RFC]/[RFC PATCH] cover letter — a CONCRETE object reviewers can argue
+#         about: problem/motivation, proposed design + interface, comparison to ALTERNATIVES/prior-art,
+#         tradeoffs, TODO/open-questions, deliberate scope decisions, diffstat. (kpatch RFC: lkml 1405.0/00278)
+#    C) Discussion / maturation: reviewers bring expertise AND alternatives (kGraft author proposed a better
+#         approach), Reviewed-by/Acked-by/Nacked-by, repost as [RFC v2]/[v3]; iterate to consensus or it is
+#         sent back / dropped.
+#    D) Lifecycle around it (kernel.org process/2.Process, 5+1): Design · Early review · Wider review ·
+#         Merging into mainline · Stable release (· long-term maintenance).
+#    E) Transition: when consensus + review issues resolved + code ready, the subject changes RFC -> PATCH
+#         and it becomes a real, bisectable patch series headed for a subsystem tree -> linux-next -> mainline.
+#    Sources: kernel.org process/{2.Process,3.Early-stage,6.Followthrough}; Rust RFC 0000-template; PEP 12;
+#    Fuchsia RFC best_practices; Google "Design Docs"; LWN kpatch (597123) + livepatch (634649).
 """RFC review — debate the DIRECTION, not the code.
 
 Mirrors how a Linux subsystem maintainer + community review an RFC on the mailing list: they
