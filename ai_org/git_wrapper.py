@@ -1,4 +1,4 @@
-# tracking.py - read-only GIT WRAPPER; the ONE sanctioned "super-module".
+# git_wrapper.py - read-only GIT WRAPPER; the ONE sanctioned "super-module".
 # Normally we forbid super-modules (a single thing everyone is forced through), because that became a
 # state-exploding crossing layer (the deleted platform/). This module is the deliberate EXCEPTION, and only
 # because git ITSELF is already a super-module: git is the single source of truth / the super-state.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from ai_org import tracking
+from ai_org import git_wrapper
 
 
 def test_branches_lists_matching_local_branches(tmp_path):
@@ -12,16 +12,16 @@ def test_branches_lists_matching_local_branches(tmp_path):
     _branch_with_commit(repo, "feature/beta", "beta")
     _branch_with_commit(repo, "topic/gamma", "gamma")
 
-    assert tracking.branches(repo, "feature/*") == ["feature/alpha", "feature/beta"]
-    assert tracking.branches(repo, "missing/*") == []
+    assert git_wrapper.branches(repo, "feature/*") == ["feature/alpha", "feature/beta"]
+    assert git_wrapper.branches(repo, "missing/*") == []
 
 
 def test_branch_exists_checks_local_branch(tmp_path):
     repo = _init_repo(tmp_path)
     _branch_with_commit(repo, "feature/alpha", "alpha")
 
-    assert tracking.branch_exists(repo, "feature/alpha") is True
-    assert tracking.branch_exists(repo, "feature/missing") is False
+    assert git_wrapper.branch_exists(repo, "feature/alpha") is True
+    assert git_wrapper.branch_exists(repo, "feature/missing") is False
 
 
 def test_log_subjects_returns_subjects_for_ref(tmp_path):
@@ -29,12 +29,12 @@ def test_log_subjects_returns_subjects_for_ref(tmp_path):
     _branch_with_commit(repo, "feature/alpha", "alpha: first")
     _commit_on_branch(repo, "feature/alpha", "alpha: second")
 
-    assert tracking.log_subjects(repo, "feature/alpha") == [
+    assert git_wrapper.log_subjects(repo, "feature/alpha") == [
         "alpha: second",
         "alpha: first",
         "base",
     ]
-    assert tracking.log_subjects(repo, "feature/missing") == []
+    assert git_wrapper.log_subjects(repo, "feature/missing") == []
 
 
 def test_has_subject_matches_subject_substring(tmp_path):
@@ -42,9 +42,9 @@ def test_has_subject_matches_subject_substring(tmp_path):
     _branch_with_commit(repo, "feature/alpha", "alpha: first")
     _commit_on_branch(repo, "feature/alpha", "alpha: second")
 
-    assert tracking.has_subject(repo, "feature/alpha", "first") is True
-    assert tracking.has_subject(repo, "feature/alpha", "missing") is False
-    assert tracking.has_subject(repo, "feature/missing", "first") is False
+    assert git_wrapper.has_subject(repo, "feature/alpha", "first") is True
+    assert git_wrapper.has_subject(repo, "feature/alpha", "missing") is False
+    assert git_wrapper.has_subject(repo, "feature/missing", "first") is False
 
 
 def test_is_ancestor_checks_reachability(tmp_path):
@@ -53,10 +53,10 @@ def test_is_ancestor_checks_reachability(tmp_path):
     _branch_at(repo, "integration", "feature/alpha")
     _branch_with_commit(repo, "feature/beta", "beta")
 
-    assert tracking.is_ancestor(repo, "feature/alpha", "integration") is True
-    assert tracking.is_ancestor(repo, "feature/beta", "integration") is False
-    assert tracking.is_ancestor(repo, "feature/missing", "integration") is False
-    assert tracking.is_ancestor(repo, "feature/alpha", "missing") is False
+    assert git_wrapper.is_ancestor(repo, "feature/alpha", "integration") is True
+    assert git_wrapper.is_ancestor(repo, "feature/beta", "integration") is False
+    assert git_wrapper.is_ancestor(repo, "feature/missing", "integration") is False
+    assert git_wrapper.is_ancestor(repo, "feature/alpha", "missing") is False
 
 
 def test_head_sha_returns_commit_sha_or_none(tmp_path):
@@ -64,8 +64,8 @@ def test_head_sha_returns_commit_sha_or_none(tmp_path):
     _branch_with_commit(repo, "feature/alpha", "alpha")
     expected = _git(repo, "rev-parse", "feature/alpha").stdout.strip()
 
-    assert tracking.head_sha(repo, "feature/alpha") == expected
-    assert tracking.head_sha(repo, "feature/missing") is None
+    assert git_wrapper.head_sha(repo, "feature/alpha") == expected
+    assert git_wrapper.head_sha(repo, "feature/missing") is None
 
 
 def _init_repo(tmp_path: Path) -> Path:
