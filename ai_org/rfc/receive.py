@@ -21,6 +21,16 @@
 # the promoted, contributor-takeable RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker. Doing
 # the 5 過程 inside the RFC (not in git) keeps the git state from exploding.
 #
+# INPUT/OUTPUT field contract (grounded in REAL templates — Rust RFC 0000-template, PEP 12, Fuchsia RFC,
+# Google design doc, GitLab feature proposal, kernel submitting-patches; not abstraction):
+#   入り口 REQUEST (rough) carries the COMMON-8 through-line fields:
+#       title, problem/motivation, proposal, alternatives, intended_users, affected_area, impact, context/links
+#   出口 RFC (contributor-takeable) = the COMMON-8 (now REFINED) + the EXIT-ONLY fields the formation crafts:
+#       goals & non-goals, reference-level design/spec, API/interface, backwards-compat, security, privacy,
+#       testing, drawbacks, open-questions, future-possibilities, + meta (status, reviewers, resolution)
+#   Formation's job = refine the common-8 AND craft the exit-only -> a contributor-takeable RFC (or send-back).
+#   (A good request template is already a mini-RFC; the RFC adds the design/decision/meta the request lacks.)
+#
 # Shape (to match the other stages): git-read the request -> codex judges (gate) -> git-write either
 # the promoted RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker.
 #
