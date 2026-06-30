@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import base64
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,87 +11,160 @@ import pytest
 from ai_org import reference
 
 
-def test_store_write_read_round_trip(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference-store"))
-    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic dict cache")
-    monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "delta"})
-    monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "high", "reason": "rigorous"})
+def test_fetch_candidates_uses_derived_repo_search_not_literal_term(monkeypatch):
+    calls = []
+    literal = "hit points implementation"
+
+    monkeypatch.setattr(
+        reference,
+        "_codex_search_keywords",
+        lambda term, context: ["turn-based combat system", "rpg battle system"],
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_extract_pattern",
+        lambda term, context, repo, path, content: {
+            "relevant": True,
+            "snippet": "hp = max(0, min(max_hp, hp - damage)); if hp == 0: enter_ko_state()",
+            "summary": "Clamp damage into a valid health range and transition at zero HP.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": "Preserve KO transitions when healing or applying overkill damage.",
+        },
+    )
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "search", "repos"]:
+            assert cmd[3] != literal
+            assert "code" not in cmd
+            stdout = json.dumps([{"fullName": "studio/rpg", "url": "https://github.com/studio/rpg"}])
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "git/trees" in cmd[2]:
+            stdout = json.dumps({"tree": [{"type": "blob", "path": "src/combat/health.py"}]})
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "contents" in cmd[2]:
+            encoded = base64.b64encode(b"class Combatant:\n    def take_damage(self, damage): ...").decode()
+            return subprocess.CompletedProcess(cmd, 0, stdout=encoded, stderr="")
+        raise AssertionError(f"unexpected gh command: {cmd}")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    candidates = reference.fetch_candidates(literal, {"language": "Python", "version": "3.12"})
+
+    search_calls = [cmd for cmd in calls if cmd[:3] == ["gh", "search", "repos"]]
+    assert search_calls
+    assert all(cmd[3] in {"turn-based combat system", "rpg battle system"} for cmd in search_calls)
+    assert all(literal not in " ".join(cmd) for cmd in calls)
+    assert candidates[0]["source_url"] == "https://github.com/studio/rpg/blob/HEAD/src/combat/health.py"
+    assert "Clamp damage" in candidates[0]["summary"]
+
+
+def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
     monkeypatch.setattr(
         reference,
         "fetch_candidates",
         lambda term, context: [
             {
-                "snippet": "cache[key] = value if value is not _MISS else recompute()",
-                "summary": "Sentinel-aware cache write.",
-                "source_url": "https://github.com/example/repo/blob/main/cache.py",
+                "snippet": "health = health - damage; if health <= 0: alive = False",
+                "summary": "Subtracts damage and marks death.",
+                "source_url": "https://github.com/example/simple/blob/HEAD/combat.py",
                 "lang_env_version": "Python 3.12",
-                "pitfalls": "Do not conflate cached None with a miss.",
+                "pitfalls": "No special edge cases.",
             }
         ],
     )
+    monkeypatch.setattr(
+        reference,
+        "_codex_delta_inclusion",
+        lambda term, context, baseline, candidate: {"keep": False, "reason": "baseline-equivalent"},
+    )
 
-    entry = reference.expand("sentinel cache", {"language": "Python", "version": "3.12"})
-    read = reference.lookup("sentinel cache", {"language": "Python", "version": "3.12"})
+    entry = reference.expand("hit points implementation", {"language": "Python", "version": "3.12"})
 
-    assert entry["term"] == "sentinel cache"
-    assert read is not None
-    assert read["term"] == "sentinel cache"
-    assert read["candidates"][0]["snippet"] == "cache[key] = value if value is not _MISS else recompute()"
-    assert read["candidates"][0]["applicability"]["matches_context"] is True
-    assert reference._entry_path("sentinel cache").is_relative_to(tmp_path)
-    assert not reference._entry_path("sentinel cache").is_relative_to(reference.REPO_ROOT)
+    assert entry["candidates"] == []
+    assert entry["notes"] == "baseline-sufficient-nothing-added: baseline already sufficient; nothing valuable to add."
 
 
-def test_expand_keeps_delta_candidates_and_drops_baseline_equivalent(monkeypatch, tmp_path):
+def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
-    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "fetch(url).json()")
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
     monkeypatch.setattr(
         reference,
         "fetch_candidates",
         lambda term, context: [
             {
-                "snippet": "fetch(url).json()",
-                "summary": "Baseline fetch.",
-                "source_url": "https://github.com/example/simple/blob/main/api.js",
-                "lang_env_version": "React 18 hooks",
-                "pitfalls": "",
-            },
-            {
-                "snippet": "const ctrl = new AbortController(); useEffect(() => () => ctrl.abort(), []);",
-                "summary": "Abort in-flight request on unmount.",
-                "source_url": "https://github.com/example/rigorous/blob/main/api.jsx",
-                "lang_env_version": "React 18 hooks",
-                "pitfalls": "Do not reuse an aborted controller.",
-            },
+                "snippet": "class Health: apply raw and elemental damage through shields before clamping hp",
+                "summary": "Extracted health component.",
+                "source_url": "https://github.com/example/rigorous/blob/HEAD/health.py",
+                "lang_env_version": "Python 3.12 turn-based RPG",
+                "pitfalls": "Shield ordering matters.",
+            }
         ],
     )
+    monkeypatch.setattr(
+        reference,
+        "_codex_delta_inclusion",
+        lambda term, context, baseline, candidate: {
+            "keep": True,
+            "reason": "handles shields, overkill clamping, and KO transition ordering missing from baseline",
+        },
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, delta_reason: {
+            "snippet": "remaining = shields.absorb(damage); hp = clamp(hp - remaining, 0, max_hp); if hp == 0: set_state('ko')",
+            "summary": "Applies mitigation before HP clamping and preserves a single KO transition, beating the baseline's raw subtraction.",
+            "lang_env_version": "Python 3.12 turn-based RPG",
+            "pitfalls": "Do not trigger KO before shields and overkill clamping have resolved.",
+        },
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_author_level",
+        lambda term, context, candidate: {"author_level": "expert", "reason": "cohesive state transition handling"},
+    )
 
-    def delta(_term, _context, _baseline, candidate):
-        return {"keep": "AbortController" in candidate["snippet"], "reason": "compared"}
-
-    monkeypatch.setattr(reference, "_codex_delta_inclusion", delta)
-    monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "expert", "reason": "cleanup"})
-
-    entry = reference.expand("abortable fetch hook", {"language": "JavaScript", "environment": "React", "version": "18"})
+    entry = reference.expand("hit points implementation", {"language": "Python", "version": "3.12"})
+    read = reference.lookup("hit points implementation", {"language": "Python", "version": "3.12"})
 
     assert len(entry["candidates"]) == 1
-    assert "AbortController" in entry["candidates"][0]["snippet"]
-    assert entry["candidates"][0]["source_url"] == "https://github.com/example/rigorous/blob/main/api.jsx"
+    candidate = entry["candidates"][0]
+    assert "beating the baseline" in candidate["summary"]
+    assert "Do not trigger KO" in candidate["pitfalls"]
+    assert "clamp" in candidate["snippet"]
+    assert candidate["author_level"] == "expert"
+    assert read is not None
+    assert read["candidates"][0]["applicability"]["matches_context"] is True
+    assert reference._entry_path("hit points implementation").is_relative_to(tmp_path)
+    assert not reference._entry_path("hit points implementation").is_relative_to(reference.REPO_ROOT)
 
 
-def test_low_level_author_delta_is_stored_with_honesty_note(monkeypatch, tmp_path):
+def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic loop")
     monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "real edge case"})
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, delta_reason: {
+            "snippet": "if node is root: return 0",
+            "summary": "Handles root depth explicitly, beating the baseline that starts counting from children.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": "Only applies when root depth is defined as zero.",
+        },
+    )
     monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "low", "reason": "rough style"})
     monkeypatch.setattr(
         reference,
         "fetch_candidates",
         lambda term, context: [
             {
-                "snippet": "if node is root: return 0  # root-depth edge case",
+                "snippet": "if node is root: return 0",
                 "summary": "Handles a root-depth edge case.",
-                "source_url": "https://github.com/example/learner/blob/main/tree.py",
+                "source_url": "https://github.com/example/learner/blob/HEAD/tree.py",
                 "lang_env_version": "Python 3.12",
                 "pitfalls": "Narrow but real delta.",
             }
@@ -100,10 +175,10 @@ def test_low_level_author_delta_is_stored_with_honesty_note(monkeypatch, tmp_pat
 
     assert len(entry["candidates"]) == 1
     assert entry["candidates"][0]["author_level"] == "low"
-    assert "Only low-level-author candidates were found" in entry["notes"]
+    assert entry["notes"].startswith("low-level-only:")
 
 
-def test_lookup_marks_applicability_from_lang_env_version(monkeypatch, tmp_path):
+def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     reference._write_entry(
         {
@@ -112,7 +187,7 @@ def test_lookup_marks_applicability_from_lang_env_version(monkeypatch, tmp_path)
                 {
                     "snippet": "setState(prev => prev + 1)",
                     "summary": "Functional update.",
-                    "source_url": "https://github.com/example/react/blob/main/state.jsx",
+                    "source_url": "https://github.com/example/react/blob/HEAD/state.jsx",
                     "lang_env_version": "React 18 hooks",
                     "author_level": "medium",
                     "pitfalls": "Avoid stale closures.",
@@ -120,7 +195,7 @@ def test_lookup_marks_applicability_from_lang_env_version(monkeypatch, tmp_path)
                 {
                     "snippet": "self.value += 1",
                     "summary": "Plain Python mutation.",
-                    "source_url": "https://github.com/example/python/blob/main/state.py",
+                    "source_url": "https://github.com/example/python/blob/HEAD/state.py",
                     "lang_env_version": "Python 3.12",
                     "author_level": "medium",
                     "pitfalls": "Not a React pattern.",
@@ -176,7 +251,10 @@ def test_reference_store_rejects_work_repo_paths(monkeypatch):
 def test_reference_schemas_are_codex_valid():
     for schema in [
         reference.BASELINE_SCHEMA,
+        reference.SEARCH_KEYWORDS_SCHEMA,
+        reference.EXTRACT_SCHEMA,
         reference.DELTA_SCHEMA,
+        reference.DISTILL_SCHEMA,
         reference.AUTHOR_LEVEL_SCHEMA,
         reference.GENERIC_TERM_SCHEMA,
     ]:
@@ -199,6 +277,11 @@ def test_reference_imports_no_pipeline_or_archive_modules():
             imports.add(node.module)
 
     assert not {name for name in imports if name in forbidden or any(name.startswith(f"{item}.") for item in forbidden)}
+
+
+def test_reference_module_contains_no_japanese_text():
+    text = Path(reference.__file__).read_text(encoding="utf-8")
+    assert not any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in text)
 
 
 def _assert_required_is_all_properties(schema):

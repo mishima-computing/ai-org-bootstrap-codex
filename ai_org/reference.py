@@ -29,6 +29,39 @@ CANDIDATE_FIELDS = (
     "author_level",
     "pitfalls",
 )
+SOURCE_EXTENSIONS = {
+    "python": (".py",),
+    "javascript": (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"),
+    "typescript": (".ts", ".tsx", ".js", ".jsx"),
+    "react": (".tsx", ".jsx", ".ts", ".js"),
+    "java": (".java",),
+    "go": (".go",),
+    "rust": (".rs",),
+    "ruby": (".rb",),
+    "php": (".php",),
+    "c#": (".cs",),
+    "c++": (".cpp", ".cc", ".cxx", ".hpp", ".h"),
+    "c": (".c", ".h"),
+}
+DEFAULT_SOURCE_EXTENSIONS = (
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".rb",
+    ".php",
+    ".cs",
+    ".cpp",
+    ".c",
+    ".h",
+)
+MAX_REPOS = 8
+MAX_FILES_PER_REPO = 3
+MAX_FILE_CHARS = 24000
 
 # Proven Codex --output-schema constraints used by the other modules: no
 # allOf/anyOf/oneOf, additionalProperties false, and required lists every prop.
@@ -41,6 +74,31 @@ BASELINE_SCHEMA = {
     },
 }
 
+SEARCH_KEYWORDS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["keywords"],
+    "properties": {
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+}
+
+EXTRACT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["relevant", "snippet", "summary", "lang_env_version", "pitfalls"],
+    "properties": {
+        "relevant": {"type": "boolean"},
+        "snippet": {"type": "string"},
+        "summary": {"type": "string"},
+        "lang_env_version": {"type": "string"},
+        "pitfalls": {"type": "string"},
+    },
+}
+
 DELTA_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -48,6 +106,18 @@ DELTA_SCHEMA = {
     "properties": {
         "keep": {"type": "boolean"},
         "reason": {"type": "string"},
+    },
+}
+
+DISTILL_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["snippet", "summary", "lang_env_version", "pitfalls"],
+    "properties": {
+        "snippet": {"type": "string"},
+        "summary": {"type": "string"},
+        "lang_env_version": {"type": "string"},
+        "pitfalls": {"type": "string"},
     },
 }
 
@@ -109,6 +179,11 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
         if not delta.get("keep"):
             continue
 
+        distilled = _codex_distill_candidate(term, context, baseline, normalized, str(delta.get("reason") or ""))
+        normalized = _normalize_raw_candidate({**normalized, **distilled})
+        if normalized is None or not _real_distillation(normalized):
+            continue
+
         author = _codex_author_level(term, context, normalized)
         author_level = _clean_author_level(author.get("author_level", "unknown"))
         normalized["author_level"] = author_level
@@ -118,11 +193,11 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
 
     notes = ""
     if kept and low_level_count == len(kept):
-        notes = "Only low-level-author candidates were found; stored because each surviving candidate is a real delta."
+        notes = "low-level-only: only low-level-author candidates were found; stored because each surviving candidate is a real delta."
     elif not kept and fetched:
-        notes = "Fetched candidates were baseline-equivalent or invalid; no delta was stored."
+        notes = "baseline-sufficient-nothing-added: baseline already sufficient; nothing valuable to add."
     elif not fetched:
-        notes = "No public repository or web candidates were fetched."
+        notes = "nothing-fetched: no public repository candidates were fetched."
 
     entry = {"term": str(term), "candidates": kept, "notes": notes}
     _write_entry(entry)
@@ -162,27 +237,162 @@ def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | Non
 def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     """Fetch public implementation candidates.
 
-    This helper intentionally stays small and monkeypatchable. It uses GitHub
-    CLI code search when available; tests can replace it with deterministic
-    public-repo and web fixtures.
+    This helper intentionally stays small and monkeypatchable. It derives
+    broader search concepts for the target term, searches repositories, then
+    reads likely implementation files and extracts the target pattern.
     """
-    language = str((context or {}).get("language") or "").strip()
-    query = str(term)
-    if language:
-        query = f"{query} language:{language}"
+    context = dict(context or {})
+    candidates: list[dict[str, Any]] = []
+    for repo in _search_repositories(_codex_search_keywords(term, context), context):
+        full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
+        if not full_name:
+            continue
+        source_url = str(repo.get("url") or f"https://github.com/{full_name}").strip()
+        for path in _candidate_paths_for_repo(full_name, term, context):
+            content = _read_github_file(full_name, path)
+            if not content:
+                continue
+            extracted = _codex_extract_pattern(term, context, full_name, path, content)
+            if not extracted.get("relevant"):
+                continue
+            snippet = str(extracted.get("snippet") or "").strip()
+            if not snippet:
+                continue
+            candidates.append(
+                {
+                    "snippet": snippet,
+                    "summary": str(extracted.get("summary") or "").strip(),
+                    "source_url": f"{source_url}/blob/HEAD/{path}",
+                    "lang_env_version": str(extracted.get("lang_env_version") or "").strip()
+                    or _context_lang_env_version(context),
+                    "pitfalls": str(extracted.get("pitfalls") or "").strip(),
+                }
+            )
+            if len(candidates) >= MAX_REPOS * MAX_FILES_PER_REPO:
+                return candidates
+    return candidates
 
+
+def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
+    result = _codex_json(
+        _search_keywords_prompt(term, context),
+        SEARCH_KEYWORDS_SCHEMA,
+        "search-keywords.json",
+    )
+    raw_keywords = result.get("keywords")
+    if not isinstance(raw_keywords, list):
+        return []
+    term_key = " ".join(str(term).lower().split())
+    keywords = []
+    for value in raw_keywords:
+        keyword = " ".join(str(value).strip().split())
+        if not keyword:
+            continue
+        if keyword.lower() == term_key:
+            continue
+        keywords.append(keyword)
+    return _unique(keywords)[:8]
+
+
+def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    language = str(context.get("language") or "").strip()
+    repos: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        cmd = [
+            "gh",
+            "search",
+            "repos",
+            keyword,
+            "--limit",
+            "5",
+            "--json",
+            "fullName,url,description,primaryLanguage,stargazersCount",
+        ]
+        if language:
+            cmd.extend(["--language", language])
+        raw_repos = _gh_json(cmd)
+        if not isinstance(raw_repos, list):
+            continue
+        for repo in raw_repos:
+            if not isinstance(repo, Mapping):
+                continue
+            full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
+            if not full_name or full_name.lower() in seen:
+                continue
+            seen.add(full_name.lower())
+            repos.append(dict(repo))
+            if len(repos) >= MAX_REPOS:
+                return repos
+    return repos
+
+
+def _candidate_paths_for_repo(repo: str, term: str, context: Mapping[str, Any]) -> list[str]:
+    tree = _gh_json(["gh", "api", f"repos/{repo}/git/trees/HEAD?recursive=1"])
+    items = tree.get("tree") if isinstance(tree, Mapping) else None
+    if not isinstance(items, list):
+        return []
+
+    extensions = _source_extensions(context)
+    scored: list[tuple[int, str]] = []
+    term_tokens = _version_tokens(term)
+    for item in items:
+        if not isinstance(item, Mapping) or item.get("type") != "blob":
+            continue
+        path = str(item.get("path") or "")
+        if not path or not path.lower().endswith(extensions):
+            continue
+        lowered = path.lower()
+        score = sum(4 for token in term_tokens if token in lowered)
+        score += sum(2 for word in ("combat", "battle", "health", "damage", "stats", "state", "system") if word in lowered)
+        score -= sum(8 for word in ("testdata", "fixture", "vendor", "node_modules", "dist", "build") if word in lowered)
+        scored.append((score, path))
+
+    return [path for _score, path in sorted(scored, key=lambda item: (-item[0], len(item[1]), item[1]))[:MAX_FILES_PER_REPO]]
+
+
+def _read_github_file(repo: str, path: str) -> str:
+    completed = _run_gh(["gh", "api", f"repos/{repo}/contents/{path}", "--jq", ".content"])
+    if completed is None or completed.returncode != 0:
+        return ""
+    encoded = "".join((completed.stdout or "").split())
+    if not encoded:
+        return ""
     try:
-        completed = subprocess.run(
-            [
-                "gh",
-                "search",
-                "code",
-                query,
-                "--limit",
-                "10",
-                "--json",
-                "path,repository,url,textMatches",
-            ],
+        import base64
+        import binascii
+
+        decoded = base64.b64decode(encoded, validate=False).decode("utf-8", errors="replace")
+    except (ValueError, OSError, binascii.Error):
+        return ""
+    return decoded[:MAX_FILE_CHARS]
+
+
+def _source_extensions(context: Mapping[str, Any]) -> tuple[str, ...]:
+    keys = [
+        str(context.get("language") or "").strip().lower(),
+        str(context.get("environment") or "").strip().lower(),
+    ]
+    for key in keys:
+        if key in SOURCE_EXTENSIONS:
+            return SOURCE_EXTENSIONS[key]
+    return DEFAULT_SOURCE_EXTENSIONS
+
+
+def _gh_json(cmd: list[str]) -> Any:
+    completed = _run_gh(cmd)
+    if completed is None or completed.returncode != 0:
+        return []
+    try:
+        return json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+
+
+def _run_gh(cmd: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            cmd,
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -190,40 +400,7 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
             text=True,
         )
     except OSError:
-        return []
-
-    if completed.returncode != 0:
-        return []
-
-    try:
-        results = json.loads(completed.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
-
-    candidates = []
-    if not isinstance(results, list):
-        return candidates
-
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        snippet = _snippet_from_gh_item(item)
-        if not snippet:
-            continue
-        repo = item.get("repository")
-        source_url = item.get("url") or ""
-        if isinstance(repo, dict) and repo.get("url"):
-            source_url = str(repo["url"])
-        candidates.append(
-            {
-                "snippet": snippet,
-                "summary": "GitHub public code search candidate.",
-                "source_url": source_url,
-                "lang_env_version": _context_lang_env_version(context or {}),
-                "pitfalls": "",
-            }
-        )
-    return candidates
+        return None
 
 
 def _codex_baseline(term: str, context: Mapping[str, Any]) -> str:
@@ -250,6 +427,40 @@ def _codex_delta_inclusion(
     if isinstance(result.get("keep"), bool) and isinstance(result.get("reason"), str):
         return result
     return {"keep": False, "reason": "invalid delta judgment"}
+
+
+def _codex_extract_pattern(
+    term: str,
+    context: Mapping[str, Any],
+    repo: str,
+    path: str,
+    content: str,
+) -> dict[str, Any]:
+    result = _codex_json(
+        _extract_prompt(term, context, repo, path, content),
+        EXTRACT_SCHEMA,
+        "extract.json",
+    )
+    if isinstance(result.get("relevant"), bool):
+        return result
+    return {"relevant": False, "snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
+
+
+def _codex_distill_candidate(
+    term: str,
+    context: Mapping[str, Any],
+    baseline: str,
+    candidate: Mapping[str, Any],
+    delta_reason: str,
+) -> dict[str, Any]:
+    result = _codex_json(
+        _distill_prompt(term, context, baseline, candidate, delta_reason),
+        DISTILL_SCHEMA,
+        "distill.json",
+    )
+    if all(isinstance(result.get(field), str) for field in DISTILL_SCHEMA["properties"]):
+        return result
+    return {"snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
 
 
 def _codex_author_level(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -324,16 +535,66 @@ def _baseline_prompt(term: str, context: Mapping[str, Any]) -> str:
     )
 
 
+def _search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
+    return (
+        "Derive effective GitHub repository search keywords for finding high-quality implementations "
+        "that contain this target term's implementation pattern. Do not return the literal term. Prefer "
+        "related systems, mechanics, APIs, or containing features where the implementation actually lives.\n"
+        f"Reference target term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        "Examples: for 'hit points implementation', return concepts such as turn-based combat system, "
+        "rpg battle system, character stats, damage system, health bar. Return only schema JSON."
+    )
+
+
+def _extract_prompt(term: str, context: Mapping[str, Any], repo: str, path: str, content: str) -> str:
+    return (
+        "Inspect this repository file and extract the implementation pattern for the target term. "
+        "Do not return a grep fragment. Return the smallest coherent pattern that shows the relevant "
+        "state, update rules, edge cases, and integration points. If the file does not implement the "
+        "target term, return relevant=false.\n"
+        f"Reference target term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        f"Repository: {repo}\n"
+        f"Path: {path}\n"
+        f"File content:\n{content}\n"
+        "The summary must say what the pattern does. Pitfalls must be concrete. Return only schema JSON."
+    )
+
+
 def _delta_prompt(term: str, context: Mapping[str, Any], baseline: str, candidate: Mapping[str, Any]) -> str:
     return (
-        "Judge whether the candidate contains implementation knowledge that goes beyond the baseline. "
-        "Keep only real deltas: concrete pattern, code, edge-case handling, integration technique, or "
-        "ecosystem-specific rigor that the baseline would not produce unaided.\n"
+        "Strictly judge whether the candidate contains implementation knowledge that genuinely beats "
+        "the baseline. Keep only real deltas: it handles cases the baseline misses, uses a better or "
+        "non-obvious technique, or is materially more robust. Different but baseline-equivalent code "
+        "must be rejected.\n"
         f"Term: {term}\n"
         f"Consuming stack context: {_json_for_prompt(context)}\n"
         f"Baseline:\n{baseline}\n\n"
         f"Candidate:\n{_json_for_prompt(candidate)}\n"
-        "Return keep=false for baseline-equivalent prose or trivial code. Return only schema JSON."
+        "Return keep=false for baseline-equivalent prose, trivial variations, or merely different names. "
+        "Return only schema JSON."
+    )
+
+
+def _distill_prompt(
+    term: str,
+    context: Mapping[str, Any],
+    baseline: str,
+    candidate: Mapping[str, Any],
+    delta_reason: str,
+) -> str:
+    return (
+        "Distill this kept candidate into a stored implementation reference. The summary must be real: "
+        "state what the pattern does and why it beats the baseline. The snippet must be the extracted "
+        "implementation pattern, not a placeholder. Pitfalls must be concrete, including when not to use "
+        "the pattern or edge cases to preserve.\n"
+        f"Term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        f"Baseline:\n{baseline}\n\n"
+        f"Delta reason:\n{delta_reason}\n\n"
+        f"Candidate:\n{_json_for_prompt(candidate)}\n"
+        "Return only schema JSON."
     )
 
 
@@ -430,6 +691,23 @@ def _normalize_raw_candidate(value: Any) -> dict[str, str] | None:
         "author_level": str(value.get("author_level") or "").strip(),
         "pitfalls": str(value.get("pitfalls") or "").strip(),
     }
+
+
+def _real_distillation(candidate: Mapping[str, str]) -> bool:
+    summary = str(candidate.get("summary") or "").strip()
+    snippet = str(candidate.get("snippet") or "").strip()
+    pitfalls = str(candidate.get("pitfalls") or "").strip()
+    lang_env_version = str(candidate.get("lang_env_version") or "").strip()
+    if not summary or not snippet or not pitfalls or not lang_env_version:
+        return False
+    placeholder_markers = (
+        "github public code search candidate",
+        "placeholder",
+        "todo",
+        "n/a",
+        "none",
+    )
+    return not any(marker == summary.lower() or marker == pitfalls.lower() for marker in placeholder_markers)
 
 
 def _stored_candidate(candidate: Mapping[str, str]) -> dict[str, str]:
