@@ -10,6 +10,7 @@ from ai_org.rfc import receive as receive_module
 from ai_org.rfc.receive import (
     COMMON_8_FIELDS,
     GROUNDING_SCHEMA,
+    GROUNDING_VERDICT_SCHEMA,
     REQUEST_SCHEMA,
     GroundingResult,
     intake,
@@ -108,7 +109,7 @@ def test_produce_rfc_writes_common_8_to_rfc_branch_from_default_branch(tmp_path,
         }
     )
 
-    monkeypatch.setattr(receive_module, "_ground_request", lambda repo, rfc: GroundingResult(rfc, "identity"))
+    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(rfc, "identity"))
 
     result = produce_rfc(request, repo)
 
@@ -145,11 +146,23 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
     }
     notes = "Found kumo is an auto-battle party dungeon RPG; corrected wrong maze-arcade framing."
 
+    calls = []
+
     def handler(cmd):
         assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        calls.append(kind)
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+
         assert cmd[cmd.index("-C") + 1] == str(repo.resolve())
         assert cmd[cmd.index("--enable") + 1] == "web_search"
-        assert _schema_kind(cmd[cmd.index("--output-schema") + 1]) == "grounding"
         _assert_prompt_preserves_named_thing_specificity(cmd[-1])
         return {
             "confident": True,
@@ -169,6 +182,7 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
     assert result["grounding_notes"] == notes
     assert json.loads(_git(repo, "show", "ai-org/rfc/auto-battle-party-dungeon-rpg:rfc.json")) == grounded
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
+    assert calls == ["grounding", "verifier"]
 
 
 def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_path, monkeypatch):
@@ -197,6 +211,15 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
 
     def handler(cmd):
         assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
         return {
             "confident": False,
             "proposed_rfc": proposed_rfc,
@@ -225,13 +248,75 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
 
 
-def test_grounding_schema_is_codex_valid_common_8():
-    serialized = json.dumps(GROUNDING_SCHEMA)
-    assert "allOf" not in serialized
-    assert "anyOf" not in serialized
-    assert "oneOf" not in serialized
-    assert GROUNDING_SCHEMA["additionalProperties"] is False
-    assert sorted(GROUNDING_SCHEMA["required"]) == sorted(GROUNDING_SCHEMA["properties"])
+def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive(
+        {
+            "title": "Make Dragon Quest",
+            "problem": "Make Dragon Quest.",
+            "proposal": "Build Dragon Quest.",
+        }
+    )
+    bad_grounding = {
+        "title": "Generic Dragon Quest-Style Retro RPG Demo",
+        "problem": "Build a generic RPG inspired by the 1986 Famicom Dragon Quest instead of the current Dragon Quest experience.",
+        "proposal": "Build a one town MVP prototype with a 10-minute vertical slice and short demo scope.",
+        "alternatives": ["Avoid trademark, copyright, IP, legal, licensing, and material usage risk."],
+        "intended_users": "Players seeking a generic classic RPG.",
+        "affected_area": "game",
+        "impact": "This shrinks the named request into a dated demo.",
+        "context": "Grounding chose retro Famicom constraints without a retro request.",
+    }
+    grounding_prompts = []
+    verifier_calls = 0
+
+    def handler(cmd):
+        nonlocal verifier_calls
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            verifier_calls += 1
+            return {
+                "faithful_specific": False,
+                "full_scope": False,
+                "non_legal": False,
+                "latest_default": False,
+                "reasons": ["Generalized, shrank scope, centered legal risk, and targeted a dated version."],
+            }
+
+        grounding_prompts.append(cmd[-1])
+        return {
+            "confident": True,
+            "proposed_rfc": bad_grounding,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounded as a generic retro Famicom prototype with trademark, copyright, IP, legal, licensing, and material usage concerns.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = intake(request, repo)
+
+    assert result["status"] == "needs_confirmation"
+    assert result["proposed_rfc"] == bad_grounding
+    assert "violations" in result
+    assert any("C1 faithfulness/specificity" in violation for violation in result["violations"])
+    assert any("C2 full scope" in violation for violation in result["violations"])
+    assert any("C3 non-legal" in violation for violation in result["violations"])
+    assert any("C4 latest-default" in violation for violation in result["violations"])
+    assert len(grounding_prompts) == 3
+    assert verifier_calls == 3
+    assert "Your previous grounding violated" in grounding_prompts[1]
+    assert "branch" not in result
+
+
+def test_grounding_and_verifier_schemas_are_codex_valid_common_8():
+    for schema in (GROUNDING_SCHEMA, GROUNDING_VERDICT_SCHEMA):
+        serialized = json.dumps(schema)
+        assert "allOf" not in serialized
+        assert "anyOf" not in serialized
+        assert "oneOf" not in serialized
+        assert schema["additionalProperties"] is False
+        assert sorted(schema["required"]) == sorted(schema["properties"])
 
     schema_rfc = GROUNDING_SCHEMA["properties"]["proposed_rfc"]
     assert schema_rfc["additionalProperties"] is False
@@ -281,6 +366,8 @@ def _schema_kind(output_schema: str | Path) -> str:
     schema = json.loads(Path(output_schema).read_text(encoding="utf-8"))
     if schema == GROUNDING_SCHEMA:
         return "grounding"
+    if schema == GROUNDING_VERDICT_SCHEMA:
+        return "verifier"
     raise AssertionError(f"unexpected schema: {schema}")
 
 
@@ -299,3 +386,6 @@ def _assert_prompt_preserves_named_thing_specificity(prompt: str) -> None:
     assert "Do not perform IP, trademark, copyright, or licensing risk analysis" in prompt
     assert "do not add legal disclaimers" in prompt
     assert "Do not avoid perceived IP risk by renaming, generalizing, or shrinking" in prompt
+    assert "Default to the latest or current version" in prompt
+    assert "unless the request explicitly asks for a retro, classic, old, vintage" in prompt
+    assert "games should target the current experience, modern graphics, scope, and conventions" in prompt
