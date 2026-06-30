@@ -124,7 +124,7 @@ def test_produce_rfc_writes_common_8_to_rfc_branch_from_default_branch(tmp_path,
     assert "custom_priority" not in produced
 
 
-def test_intake_grounding_sufficient_writes_grounded_rfc_branch(tmp_path, monkeypatch):
+def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive(
         {
@@ -151,10 +151,11 @@ def test_intake_grounding_sufficient_writes_grounded_rfc_branch(tmp_path, monkey
         assert cmd[cmd.index("--enable") + 1] == "web_search"
         assert _schema_kind(cmd[cmd.index("--output-schema") + 1]) == "grounding"
         return {
-            "sufficient": True,
-            "grounded_rfc": grounded,
-            "grounding_notes": notes,
+            "confident": True,
+            "proposed_rfc": grounded,
+            "assumptions": [],
             "questions": [],
+            "grounding_notes": notes,
         }
 
     _install_codex_fake(monkeypatch, handler)
@@ -169,7 +170,7 @@ def test_intake_grounding_sufficient_writes_grounded_rfc_branch(tmp_path, monkey
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
 
 
-def test_intake_grounding_insufficient_returns_questions_without_branch(tmp_path, monkeypatch):
+def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive(
         {
@@ -177,25 +178,39 @@ def test_intake_grounding_insufficient_returns_questions_without_branch(tmp_path
             "problem": "Make it like that thing we discussed.",
         }
     )
-    questions = [
-        "Which specific game, product, or genre should this request reference?",
-        "What core loop should the RFC preserve?",
+    proposed_rfc = {
+        "title": "Conversation-Inferred Dungeon Automation Game",
+        "problem": "The requester likely wants the previously discussed automation game, but the exact reference is not fully recoverable from the request alone.",
+        "proposal": "Build a small dungeon automation loop with party setup, automated runs, rewards, and progression.",
+        "alternatives": ["Wait for a named reference before shaping the RFC."],
+        "intended_users": "Players who want a lightweight automated dungeon progression game.",
+        "affected_area": "game",
+        "impact": "The RFC gives the requester a concrete interpretation to confirm or correct before branch creation.",
+        "context": "Grounding inferred a likely game request from the available wording and repository game context.",
+    }
+    assumptions = [
+        "I assumed 'that thing we discussed' refers to a dungeon automation game because the repository context points at game work and the request asks for a rough game.",
+        "I assumed the first RFC should cover core loop and progression rather than art polish because the problem does not name a visual style.",
     ]
+    questions = ["Can you name the exact prior reference if this inferred game is wrong?"]
 
     def handler(cmd):
         assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
         return {
-            "sufficient": False,
-            "grounded_rfc": {field: request[field] for field in COMMON_8_FIELDS},
-            "grounding_notes": "The reference is ambiguous and cannot be researched confidently.",
+            "confident": False,
+            "proposed_rfc": proposed_rfc,
+            "assumptions": assumptions,
             "questions": questions,
+            "grounding_notes": "The reference is ambiguous, but grounding inferred a likely RFC from repo context.",
         }
 
     _install_codex_fake(monkeypatch, handler)
 
     result = intake(request, repo)
 
-    assert result["status"] == "needs_clarification"
+    assert result["status"] == "needs_confirmation"
+    assert result["proposed_rfc"] == proposed_rfc
+    assert result["assumptions"] == assumptions
     assert result["questions"] == questions
     assert "branch" not in result
     missing_branch = subprocess.run(
@@ -217,7 +232,7 @@ def test_grounding_schema_is_codex_valid_common_8():
     assert GROUNDING_SCHEMA["additionalProperties"] is False
     assert sorted(GROUNDING_SCHEMA["required"]) == sorted(GROUNDING_SCHEMA["properties"])
 
-    schema_rfc = GROUNDING_SCHEMA["properties"]["grounded_rfc"]
+    schema_rfc = GROUNDING_SCHEMA["properties"]["proposed_rfc"]
     assert schema_rfc["additionalProperties"] is False
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])

@@ -2,7 +2,7 @@
 
 The RFC phase has two isolated responsibilities:
 
-- `receive.py` turns a raw common-8 request into a grounded RFC branch, or sends it back with clarification questions.
+- `receive.py` turns a raw common-8 request into a grounded RFC branch, or sends it back with a proposed interpretation and assumptions to confirm or correct.
 - `review.py` debates the direction of an already-formed `rfc.json` and commits `direction-ok` or `nak`.
 
 ```mermaid
@@ -11,8 +11,8 @@ flowchart TD
   REQ -->|"intake(): receive() validates title + problem"| V{valid?}
   V -->|no| REJ["status: rejected<br/>error"]
   V -->|yes| GROUND["_ground_request in receive.py<br/>read-only codex + web_search<br/>research subject, genre, prior art, and repo"]
-  GROUND --> S{sufficient?}
-  S -->|no| CLARIFY["status: needs_clarification<br/>questions[] + grounding_notes<br/>no RFC branch"]
+  GROUND --> S{confident?}
+  S -->|no| CONFIRM["status: needs_confirmation<br/>proposed_rfc + assumptions<br/>confirm/correct<br/>questions[] only for uninferable gaps<br/>no RFC branch"]
   S -->|yes| PROD["produce_rfc(): write grounded rfc.json<br/>on ai-org/rfc/&lt;id&gt;"]
 
   PROD --> RUN["run_rfc_review(repo, id)"]
@@ -30,7 +30,7 @@ flowchart TD
 
   DOK --> NEXT["patch phase pulls the direction-ok RFC"]
   REJ --> BACK["back to requester"]
-  CLARIFY --> BACK
+  CONFIRM --> BACK
   NAK0 --> BACK
   NAK1 --> BACK
   NAK2 --> BACK
@@ -39,14 +39,14 @@ flowchart TD
   classDef bad fill:#f8d6d6,stroke:#a33;
   classDef codex fill:#e6e6fa,stroke:#66c;
   class DOK,NEXT ok;
-  class REJ,CLARIFY,NAK0,NAK1,NAK2,BACK bad;
+  class REJ,CONFIRM,NAK0,NAK1,NAK2,BACK bad;
   class GROUND,REV,AUF codex;
 ```
 
 ## Notes
 
-- `intake(request, repo)` is the public entrance for raw requests. It returns `status: promoted`, `status: needs_clarification`, or `status: rejected`.
+- `intake(request, repo)` is the public entrance for raw requests. It returns `status: promoted`, `status: needs_confirmation`, or `status: rejected`.
 - Grounding belongs to intake because it forms the RFC. It may correct a wrong request, such as a mistaken genre reference, before a branch exists.
-- If grounding cannot confidently identify the intended subject or scope, intake returns specific requester questions and does not create `ai-org/rfc/<id>`.
+- If grounding cannot confidently identify the intended subject or scope, intake still returns its best grounded guess as `proposed_rfc`, lists the `assumptions` behind that guess, and asks the requester to confirm or correct it. `questions` are only for gaps that research genuinely could not infer.
 - `review.py` assumes `rfc.json` is already grounded. It only runs the five-reviewer and Aufheben direction debate.
 - Codex output schemas remain codex-valid: no `allOf`, `anyOf`, or `oneOf`; `additionalProperties` is false; `required` lists every property.

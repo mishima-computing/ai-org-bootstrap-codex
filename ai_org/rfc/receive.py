@@ -24,7 +24,7 @@
 #   grounded RFC view = the common-8 after research, correction, and repository-context enrichment.
 #
 # Shape (to match the other stages): validate the request -> codex grounds it -> git-write the
-# promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with specific questions.
+# promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 
@@ -67,10 +67,10 @@ GROUNDING_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["sufficient", "grounded_rfc", "grounding_notes", "questions"],
+    "required": ["confident", "proposed_rfc", "assumptions", "questions", "grounding_notes"],
     "properties": {
-        "sufficient": {"type": "boolean"},
-        "grounded_rfc": {
+        "confident": {"type": "boolean"},
+        "proposed_rfc": {
             "type": "object",
             "additionalProperties": False,
             "required": list(RFC_VIEW_FIELDS),
@@ -85,8 +85,9 @@ GROUNDING_SCHEMA: dict[str, Any] = {
                 "context": {"type": "string"},
             },
         },
-        "grounding_notes": {"type": "string", "maxLength": 2000},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
         "questions": {"type": "array", "items": {"type": "string"}},
+        "grounding_notes": {"type": "string", "maxLength": 2000},
     },
 }
 
@@ -95,7 +96,8 @@ GROUNDING_SCHEMA: dict[str, Any] = {
 class GroundingResult:
     rfc_view: dict[str, Any]
     grounding_notes: str = ""
-    sufficient: bool = True
+    confident: bool = True
+    assumptions: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
 
 
@@ -129,7 +131,7 @@ def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
 
 
 def intake(source: str | Path | Mapping[str, Any], repo: str | Path, rfc_path: str = "rfc.json") -> dict[str, Any]:
-    """Validate and ground a raw request, then promote it only when grounding is sufficient."""
+    """Validate and ground a raw request, then promote it only when grounding is confident."""
     try:
         request = receive(source)
         return produce_rfc(request, repo, rfc_path)
@@ -142,9 +144,11 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
     raw_rfc = _common_8(validated_request)
     repo_path = Path(repo).resolve()
     grounding = _ground_request(repo_path, raw_rfc)
-    if not grounding.sufficient:
+    if not grounding.confident:
         return {
-            "status": "needs_clarification",
+            "status": "needs_confirmation",
+            "proposed_rfc": grounding.rfc_view,
+            "assumptions": grounding.assumptions,
             "questions": grounding.questions,
             "grounding_notes": grounding.grounding_notes,
         }
@@ -187,13 +191,16 @@ def _ground_request(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResu
         "including genre, core mechanics, conventions, and prior art. Correct misconceptions in the request. "
         "Also inspect the target repository read-only to identify existing code, patterns, constraints, "
         "and affected areas. Do not modify files.\n\n"
-        "If the request is too under-specified to ground confidently, set sufficient=false, keep grounded_rfc "
-        "as the best common-8 view of the current request, and return specific requester questions. Do not "
-        "invent missing product references, scope, or acceptance criteria.\n\n"
-        "If sufficient=true, return a grounded common-8 RFC view that preserves useful user intent while "
-        "correcting false assumptions, wrong genre/scope, and missing context. grounding_notes must briefly "
-        "state what you found, what you corrected, and cite web references when used. questions must be an "
-        "empty list when sufficient=true.\n\n"
+        "Always do the research and commit to the most-likely interpretation as proposed_rfc, even when the "
+        "request is ambiguous or under-specified. Do not send back blank open questions instead of grounding. "
+        "If you are confident, set confident=true and make proposed_rfc the grounded common-8 RFC view that "
+        "should be promoted. If you are not fully confident, set confident=false and still return the best-guess "
+        "grounded common-8 proposed_rfc for requester confirmation: this is what I think you mean, right? "
+        "List the specific inferences you made in assumptions, each phrased so the requester can confirm or "
+        "correct it, such as 'I assumed X because <research>'. Reserve questions only for gaps that research "
+        "genuinely cannot resolve after you have inferred the most likely interpretation; questions is usually "
+        "empty. grounding_notes must briefly state what you researched, what you corrected, and cite web "
+        "references when used.\n\n"
         + _format_rfc("Current request common-8", _rfc_to_view(rfc_view))
         + "\nReturn only JSON matching the provided schema."
     )
@@ -248,26 +255,28 @@ def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> Grou
     if not isinstance(parsed, dict):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned non-object JSON: {raw}")
 
-    sufficient = parsed.get("sufficient")
-    grounded_rfc = parsed.get("grounded_rfc")
+    confident = parsed.get("confident")
+    proposed_rfc = parsed.get("proposed_rfc")
+    assumptions = parsed.get("assumptions")
     grounding_notes = parsed.get("grounding_notes")
     questions = parsed.get("questions")
-    if not isinstance(sufficient, bool):
-        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid sufficient: {raw}")
-    if not _is_rfc_view(grounded_rfc):
-        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid grounded_rfc: {raw}")
+    if not isinstance(confident, bool):
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid confident: {raw}")
+    if not _is_rfc_view(proposed_rfc):
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid proposed_rfc: {raw}")
+    if not isinstance(assumptions, list) or not all(isinstance(assumption, str) for assumption in assumptions):
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid assumptions: {raw}")
     if not isinstance(grounding_notes, str) or len(grounding_notes) > 2000:
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid grounding_notes: {raw}")
     if not isinstance(questions, list) or not all(isinstance(question, str) for question in questions):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid questions: {raw}")
-    if not sufficient and not [question for question in questions if question.strip()]:
-        return _grounding_fail_closed(original_rfc_view, "Grounding marked insufficient without questions")
-    return GroundingResult(_rfc_to_view(grounded_rfc), grounding_notes, sufficient, questions)
+    return GroundingResult(_rfc_to_view(proposed_rfc), grounding_notes, confident, assumptions, questions)
 
 
 def _grounding_fail_closed(rfc_view: dict[str, Any], reason: str) -> GroundingResult:
-    question = "Please clarify the request so intake can ground it confidently."
-    return GroundingResult(_rfc_to_view(rfc_view), reason[:2000], False, [question])
+    assumption = "I assumed the current common-8 request is the closest available interpretation because grounding failed before it could produce a researched proposal."
+    question = "Can you confirm or correct the proposed RFC interpretation?"
+    return GroundingResult(_rfc_to_view(rfc_view), reason[:2000], False, [assumption], [question])
 
 
 def _required_string_field(data: Mapping[str, Any], field: str) -> None:
