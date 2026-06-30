@@ -18,6 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SVG_TECHNIQUES = REPO_ROOT / "docs" / "svg-asset-techniques.md"
 DEFAULT_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+ANIMATE_RUNTIME_FILENAME = "animate-runtime.js"
+RIG_FILENAME = "rig.json"
+PREVIEW_FILENAME = "preview.html"
 
 
 def constructive_svg(spec, out_path, model=None, view="three-quarter", style="painterly"):
@@ -67,6 +70,62 @@ def constructive_svg(spec, out_path, model=None, view="three-quarter", style="pa
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(svg, encoding="utf-8")
     return out_path
+
+
+def animate(svg_path, spec, out_dir, state="walk"):
+    """Generate a JSON rig and fixed FK preview runtime for a segmented SVG asset."""
+    svg_path = Path(svg_path)
+    out_dir = Path(out_dir)
+    try:
+        svg_text = svg_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    prompt = _animate_prompt(svg_text, spec, state=state)
+    with tempfile.TemporaryDirectory(prefix="graphicist-rig-codex-") as tmp:
+        codex_out = Path(tmp) / "rig-output.txt"
+        cmd = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "-C",
+            str(REPO_ROOT),
+            "-o",
+            str(codex_out),
+            prompt,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError:
+            return None
+
+        output = ""
+        if codex_out.exists():
+            output = codex_out.read_text(encoding="utf-8", errors="replace")
+        if not output:
+            output = result.stdout or ""
+
+    rig = _extract_json_object(output)
+    if not _valid_rig(rig):
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rig_path = out_dir / RIG_FILENAME
+    runtime_path = out_dir / ANIMATE_RUNTIME_FILENAME
+    preview_path = out_dir / PREVIEW_FILENAME
+    rig_path.write_text(json.dumps(rig, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    runtime_path.write_text(_animation_runtime_js(), encoding="utf-8")
+    preview_path.write_text(_preview_html(svg_text, state=state), encoding="utf-8")
+    return preview_path
 
 
 def fetch_web_image(query, out_dir, n=5):
@@ -204,6 +263,7 @@ def _constructive_svg_prompt(spec, view="three-quarter", style="painterly") -> s
     style_text = _normalized_style(style)
     style_reference = _style_reference_prompt(style_text)
     style_requirement = _style_hard_requirement(style_text)
+    segmentation_requirement = _segmentation_requirement(style_text)
     spec_text = spec if isinstance(spec, str) else json.dumps(spec, indent=2, sort_keys=True)
     face_canon = f"\n{_face_canon_prompt()}\n" if _asset_has_face(spec) else ""
     return f"""Build a standalone flat/structural SVG asset from this spec:
@@ -221,6 +281,10 @@ Hard requirements:
 - Mirror repeated symmetric parts with transforms and/or <use> elements so symmetry and proportion are guaranteed by construction.
 - Do not eyeball anatomy with unrelated freehand coordinates.
 - {style_requirement}
+- {segmentation_requirement}
+- Make the asset riggable: every animatable body part MUST be its own <g id="..."> with a stable, predictable id.
+- Use this id convention for creatures and characters: core body ids such as "cephalothorax", "abdomen", "head", and limb ids such as "leg-L1-upper", "leg-L1-lower", "leg-L1-foot", "leg-R1-upper", "leg-R1-lower", "leg-R1-foot". Number legs from front to back in side/profile view; use L/R for the visible side pair or mirrored side when both sides are present.
+- Put a rig manifest XML comment inside the SVG listing each animatable part id, parent id or null, and a suggested pivot [x,y] in viewBox coordinates at the joint location. Example line: part leg-L1-upper parent cephalothorax pivot [198,276]. These pivots are consumed by a JSON FK rig and must be stable.
 - Keep the asset flat/structural; do not call external images or remote resources.
 
 Style reference to incorporate:
@@ -243,6 +307,18 @@ def _style_hard_requirement(style: str) -> str:
             "flat fills, consistent rounded strokes, and clean cel-shadow shapes where appropriate."
         )
     return "Use constructive SVG primitives, reusable <defs>, clipping, gradients, filters, and layered paths where appropriate."
+
+
+def _segmentation_requirement(style: str) -> str:
+    if style == "painterly":
+        return (
+            "Use proper anatomical segmentation for realism. For example, a spider must have EACH of the 8 legs as "
+            "separate segmented parts with visible joints, including coxa/femur/patella/tibia/tarsus where readable, "
+            "plus distinct cephalothorax and abdomen body segments."
+        )
+    return (
+        "Keep defining body parts segmented enough to rig later, while preserving the requested cute simplified style."
+    )
 
 
 def _style_reference_prompt(style: str) -> str:
@@ -289,7 +365,384 @@ def _view_prompt(view="three-quarter") -> str:
             "- Show angled side faces and overlapping depth cues so the result reads as an object in space, not a flat "
             "top-down diagram.\n"
         )
+    if view_text.strip().lower() in {"side", "profile", "orthographic side", "orthographic-side", "side view", "side-view"}:
+        prompt += (
+            "- For side/profile view, construct an orthographic side silhouette with the creature in PROFILE.\n"
+            "- For a walking creature, keep legs visible from the side so the gait reads, with front-to-back leg "
+            "numbering and clear body segments readable in side view.\n"
+        )
     return prompt.rstrip()
+
+
+def _animate_prompt(svg_text, spec, state="walk") -> str:
+    spec_text = spec if isinstance(spec, str) else json.dumps(spec, indent=2, sort_keys=True)
+    part_ids = _svg_group_ids(svg_text)
+    manifest = _svg_manifest_comments(svg_text)
+    spider_guidance = ""
+    if re.search(r"\bspider|arachnid\b", spec_text, flags=re.IGNORECASE):
+        spider_guidance = (
+            "\nSpider animation guidance:\n"
+            "- idle: subtle body bob plus slow leg sway.\n"
+            "- walk: alternating-tetrapod gait. Put legs L1/R2/L3/R4 in one phase and R1/L2/R3/L4 in the opposite phase, with body bob.\n"
+        )
+    return f"""Create an animation rig JSON for this segmented SVG.
+
+Spec:
+{spec_text}
+
+Requested default state: {state}
+
+SVG group ids detected:
+{json.dumps(part_ids, indent=2)}
+
+Rig manifest comments detected:
+{manifest or "(none)"}
+
+Rig schema:
+{{
+  "parts": {{
+    "<id>": {{"selector": "#<id>", "pivot": [x, y], "parent": "<id-or-null>"}}
+  }},
+  "states": {{
+    "idle": {{"duration": 1.6, "parts": {{"<id>": [{{"t": 0, "rot": 0}}, {{"t": 0.8, "rot": 2}}]}}}},
+    "walk": {{"duration": 1.0, "parts": {{"<id>": [{{"t": 0, "rot": -12, "x": 0, "y": 0}}, {{"t": 0.5, "rot": 12}}]}}}}
+  }}
+}}
+
+Rules:
+- Output ONLY valid JSON. No markdown, prose, comments, or trailing commas.
+- Do not edit or regenerate SVG path geometry. Animate only by JSON keyframes.
+- Include every riggable SVG part id from the manifest when possible.
+- Use selectors matching the SVG group ids, normally "#<id>".
+- Use pivots in the SVG viewBox coordinate system at the anatomical joint location.
+- Parent core body parts sensibly, with null for the root body part.
+- Include both "idle" and "walk" states even if the requested default state differs.
+- Keyframes use seconds in t, degrees in rot, and optional x/y/sx/sy local pose values.
+{spider_guidance}"""
+
+
+def _svg_group_ids(svg_text: str) -> list[str]:
+    ids = re.findall(r"<g\b[^>]*\bid=[\"']([^\"']+)[\"']", svg_text, flags=re.IGNORECASE)
+    return sorted(dict.fromkeys(ids))
+
+
+def _svg_manifest_comments(svg_text: str) -> str:
+    comments = re.findall(r"<!--(.*?)-->", svg_text, flags=re.DOTALL)
+    relevant = [comment.strip() for comment in comments if re.search(r"\brig|pivot|part\b", comment, re.I)]
+    return "\n\n".join(relevant)
+
+
+def _extract_json_object(output: str):
+    text = (output or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _valid_rig(rig) -> bool:
+    if not isinstance(rig, dict):
+        return False
+    parts = rig.get("parts")
+    states = rig.get("states")
+    if not isinstance(parts, dict) or not parts:
+        return False
+    if not isinstance(states, dict) or not states:
+        return False
+
+    for part_id, part in parts.items():
+        if not isinstance(part_id, str) or not part_id:
+            return False
+        if not isinstance(part, dict):
+            return False
+        selector = part.get("selector")
+        pivot = part.get("pivot")
+        parent = part.get("parent")
+        if not isinstance(selector, str) or not selector:
+            return False
+        if not _valid_number_pair(pivot):
+            return False
+        if parent is not None and not isinstance(parent, str):
+            return False
+        if isinstance(parent, str) and parent not in parts:
+            return False
+
+    for state in states.values():
+        if not isinstance(state, dict):
+            return False
+        duration = state.get("duration")
+        state_parts = state.get("parts")
+        if not isinstance(duration, (int, float)) or duration <= 0:
+            return False
+        if not isinstance(state_parts, dict) or not state_parts:
+            return False
+        for part_id, keyframes in state_parts.items():
+            if part_id not in parts:
+                return False
+            if not isinstance(keyframes, list) or not keyframes:
+                return False
+            for frame in keyframes:
+                if not isinstance(frame, dict):
+                    return False
+                if not isinstance(frame.get("t"), (int, float)):
+                    return False
+                for key in ("rot", "x", "y", "sx", "sy"):
+                    if key in frame and not isinstance(frame[key], (int, float)):
+                        return False
+    return True
+
+
+def _valid_number_pair(value) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(item, (int, float)) for item in value)
+    )
+
+
+def _preview_html(svg_text: str, state="walk") -> str:
+    inline_svg = re.sub(r"<\?xml[^>]*\?>", "", svg_text, flags=re.IGNORECASE).strip()
+    inline_svg = re.sub(r"<!DOCTYPE[^>]*>", "", inline_svg, flags=re.IGNORECASE).strip()
+    state_json = json.dumps(str(state))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Animated SVG Preview</title>
+  <style>
+    html, body {{
+      margin: 0;
+      min-height: 100%;
+      background: #f5f7fa;
+    }}
+    body {{
+      display: grid;
+      place-items: center;
+    }}
+    main {{
+      width: min(92vmin, 760px);
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+    }}
+    svg {{
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }}
+  </style>
+</head>
+<body>
+  <main id="stage">
+{inline_svg}
+  </main>
+  <script src="./animate-runtime.js"></script>
+  <script>
+    const requestedState = {state_json};
+    fetch("./rig.json")
+      .then((response) => response.json())
+      .then((rig) => {{
+        const svg = document.querySelector("#stage svg");
+        window.GraphicistAnimation.play(svg, rig, requestedState);
+      }})
+      .catch((error) => {{
+        console.error("Animation rig failed to load", error);
+      }});
+  </script>
+</body>
+</html>
+"""
+
+
+def _animation_runtime_js() -> str:
+    return """(function () {
+  "use strict";
+
+  function numberOr(value, fallback) {
+    return Number.isFinite(Number(value)) ? Number(value) : fallback;
+  }
+
+  function matrixAttribute(matrix) {
+    return "matrix(" + [
+      matrix.a,
+      matrix.b,
+      matrix.c,
+      matrix.d,
+      matrix.e,
+      matrix.f
+    ].map(function (value) {
+      return Number(value.toFixed(6));
+    }).join(" ") + ")";
+  }
+
+  function partMatrix(pivot, offset, pose) {
+    var p = Array.isArray(pivot) ? pivot : [0, 0];
+    var o = Array.isArray(offset) ? offset : [0, 0];
+    var current = pose || {};
+    var x = numberOr(current.x, 0) + numberOr(o[0], 0);
+    var y = numberOr(current.y, 0) + numberOr(o[1], 0);
+    var rot = numberOr(current.rot, 0);
+    var sx = numberOr(current.sx, 1);
+    var sy = numberOr(current.sy, 1);
+    var px = numberOr(p[0], 0);
+    var py = numberOr(p[1], 0);
+    var matrix = new DOMMatrix();
+    matrix.translateSelf(px + x, py + y);
+    matrix.rotateSelf(rot);
+    matrix.scaleSelf(sx, sy);
+    matrix.translateSelf(-px, -py);
+    return matrix;
+  }
+
+  function sortedPartIds(rig) {
+    var parts = rig.parts || {};
+    var order = [];
+    var visiting = {};
+    var visited = {};
+
+    function visit(id) {
+      if (visited[id] || visiting[id]) {
+        return;
+      }
+      visiting[id] = true;
+      var parent = parts[id] && parts[id].parent;
+      if (parent && parts[parent]) {
+        visit(parent);
+      }
+      visiting[id] = false;
+      visited[id] = true;
+      order.push(id);
+    }
+
+    Object.keys(parts).forEach(visit);
+    return order;
+  }
+
+  function escapeSelectorId(id) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return "#" + window.CSS.escape(id);
+    }
+    return "#" + String(id).replace(/([ #;?%&,.+*~':"!^$[\\]()=>|/@])/g, "\\\\$1");
+  }
+
+  function renderRig(svg, rig, poseByPart) {
+    if (!svg || !rig || !rig.parts) {
+      return;
+    }
+    var parts = rig.parts;
+    var world = {};
+    sortedPartIds(rig).forEach(function (id) {
+      var part = parts[id];
+      var local = partMatrix(part.pivot || [0, 0], [0, 0], poseByPart[id] || {});
+      var parent = part.parent;
+      var matrix = parent && world[parent] ? world[parent].multiply(local) : local;
+      world[id] = matrix;
+      var selector = part.selector || escapeSelectorId(id);
+      var node = svg.querySelector(selector);
+      if (node) {
+        node.setAttribute("transform", matrixAttribute(matrix));
+      }
+    });
+  }
+
+  function interpolateFrames(frames, seconds, duration) {
+    if (!Array.isArray(frames) || frames.length === 0) {
+      return {};
+    }
+    var sorted = frames.slice().sort(function (a, b) {
+      return numberOr(a.t, 0) - numberOr(b.t, 0);
+    });
+    if (sorted.length === 1) {
+      return Object.assign({}, sorted[0]);
+    }
+    var localTime = ((seconds % duration) + duration) % duration;
+    var previous = sorted[0];
+    var next = sorted[0];
+
+    for (var index = 0; index < sorted.length; index += 1) {
+      var current = sorted[index];
+      var candidate = sorted[(index + 1) % sorted.length];
+      var currentT = numberOr(current.t, 0);
+      var candidateT = numberOr(candidate.t, 0);
+      var wrappedCandidateT = index === sorted.length - 1 ? candidateT + duration : candidateT;
+      var wrappedLocalTime = localTime < currentT ? localTime + duration : localTime;
+      if (wrappedLocalTime >= currentT && wrappedLocalTime <= wrappedCandidateT) {
+        previous = current;
+        next = candidate;
+        localTime = wrappedLocalTime;
+        break;
+      }
+    }
+
+    var prevT = numberOr(previous.t, 0);
+    var nextT = numberOr(next.t, 0);
+    if (nextT <= prevT) {
+      nextT += duration;
+    }
+    var span = Math.max(0.0001, nextT - prevT);
+    var alpha = Math.max(0, Math.min(1, (localTime - prevT) / span));
+    var pose = {};
+    ["rot", "x", "y", "sx", "sy"].forEach(function (key) {
+      var startDefault = key === "sx" || key === "sy" ? 1 : 0;
+      var start = numberOr(previous[key], startDefault);
+      var end = numberOr(next[key], start);
+      pose[key] = start + (end - start) * alpha;
+    });
+    return pose;
+  }
+
+  function play(svg, rig, stateName) {
+    var state = rig && rig.states && rig.states[stateName];
+    if (!state) {
+      state = rig && rig.states && rig.states.idle;
+    }
+    if (!svg || !state) {
+      return null;
+    }
+    var duration = Math.max(0.0001, numberOr(state.duration, 1));
+    var start = performance.now();
+    var frameId = null;
+
+    function frame(now) {
+      var seconds = (now - start) / 1000;
+      var poses = {};
+      Object.keys(state.parts || {}).forEach(function (id) {
+        poses[id] = interpolateFrames(state.parts[id], seconds, duration);
+      });
+      renderRig(svg, rig, poses);
+      frameId = requestAnimationFrame(frame);
+    }
+
+    frameId = requestAnimationFrame(frame);
+    return {
+      stop: function () {
+        if (frameId !== null) {
+          cancelAnimationFrame(frameId);
+        }
+      }
+    };
+  }
+
+  window.GraphicistAnimation = {
+    partMatrix: partMatrix,
+    renderRig: renderRig,
+    interpolateFrames: interpolateFrames,
+    play: play
+  };
+}());
+"""
 
 
 def _asset_has_face(spec) -> bool:
