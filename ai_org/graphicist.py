@@ -23,6 +23,64 @@ RIG_FILENAME = "rig.json"
 PREVIEW_FILENAME = "preview.html"
 
 
+def autonomous_create(request, out_dir, animate=False):
+    """Create an asset from only a plain request by researching, briefing, generating, QAing, and optionally animating."""
+    brief = _research_art_brief(request)
+    if brief is None:
+        return None
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    svg_path = out_dir / "asset.svg"
+    png_path = out_dir / "asset.png"
+
+    spec = _spec_from_brief(request, brief)
+    generated = constructive_svg(
+        spec,
+        svg_path,
+        view=brief["view"],
+        style=brief["style"],
+    )
+    if generated is None:
+        return None
+
+    rendered = render_svg(svg_path, png_path)
+    qa_result = qa(png_path)
+
+    for _attempt in range(2):
+        if not rendered or not png_path.exists():
+            break
+
+        critique = _critique_rendered_asset(brief, svg_path, png_path, qa_result)
+        if critique is None:
+            break
+
+        if critique.get("matches") is True and qa_result.get("ok") is True:
+            break
+
+        corrected_svg = critique.get("svg")
+        if not corrected_svg:
+            break
+
+        svg_path.write_text(corrected_svg, encoding="utf-8")
+        rendered = render_svg(svg_path, png_path)
+        qa_result = qa(png_path)
+
+    preview_path = None
+    if bool(animate) or _brief_requests_animation(brief):
+        states = brief.get("animation", {}).get("states") or ["walk"]
+        state = states[0] if isinstance(states[0], str) and states[0] else "walk"
+        preview_path = globals()["animate"](svg_path, spec, out_dir / "anim", state=state)
+
+    return {
+        "brief": brief,
+        "svg": svg_path,
+        "png": png_path,
+        "qa": qa_result,
+        "preview": preview_path,
+    }
+
+
 def constructive_svg(spec, out_path, model=None, view="three-quarter", style="painterly"):
     """Generate a flat, structural SVG asset through a Codex parametric construction prompt."""
     out_path = Path(out_path)
@@ -257,6 +315,226 @@ def image_model(spec, out_path):
     raise NotImplementedError(
         "raster image model not provisioned: set ASSET_IMAGE_MODEL + API key to enable painterly generation"
     )
+
+
+def _research_art_brief(request):
+    try:
+        techniques = SVG_TECHNIQUES.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    output = _codex_read_only(
+        _research_brief_prompt(request, techniques),
+        output_name="brief.json",
+        web_search=True,
+    )
+    brief = _extract_json_object(output or "")
+    return _normalize_art_brief(brief)
+
+
+def _critique_rendered_asset(brief, svg_path, png_path, qa_result):
+    try:
+        svg_text = Path(svg_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    output = _codex_read_only(
+        _critique_prompt(brief, svg_text, qa_result),
+        output_name="critique.json",
+        image_path=png_path,
+    )
+    if not output:
+        return None
+
+    parsed = _extract_json_object(output)
+    if isinstance(parsed, dict):
+        matches = parsed.get("matches")
+        corrected = parsed.get("svg")
+        if matches is True:
+            return {"matches": True, "svg": None}
+        if isinstance(corrected, str):
+            svg = _extract_svg(corrected)
+            if svg is not None:
+                return {"matches": False, "svg": svg}
+
+    svg = _extract_svg(output)
+    if svg is not None:
+        return {"matches": False, "svg": svg}
+    return None
+
+
+def _codex_read_only(prompt, output_name="codex-output.txt", image_path=None, web_search=False):
+    with tempfile.TemporaryDirectory(prefix="graphicist-autonomous-codex-") as tmp:
+        codex_out = Path(tmp) / output_name
+        cmd = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "-C",
+            str(REPO_ROOT),
+            "-o",
+            str(codex_out),
+        ]
+        if web_search:
+            cmd.extend(["--enable", "web_search"])
+        if image_path is not None:
+            cmd.extend(["-i", str(Path(image_path))])
+        cmd.append(prompt)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError:
+            return None
+
+        output = ""
+        if codex_out.exists():
+            output = codex_out.read_text(encoding="utf-8", errors="replace")
+        if not output:
+            output = result.stdout or ""
+        return output
+
+
+def _research_brief_prompt(request, techniques) -> str:
+    request_text = str(request or "")
+    return f"""You are the autonomous asset artist for ai_org.graphicist.
+
+The human provided ONLY this raw request:
+{request_text}
+
+Research what is actually being asked. If the request names a game, product, character type, genre, object,
+animal, place, historical style, or visual trope, use web search to ground the subject and identify the real
+references. Also research the relevant art principles needed to make a recognizable SVG asset.
+
+Seed SVG technique library:
+{techniques}
+
+Derive the art direction yourself. Do not ask the caller for style, view, canon, or features.
+
+Return ONLY one JSON object with at least this schema:
+{{
+  "subject": "specific grounded subject",
+  "defining_features": ["feature required for recognizability"],
+  "realism_cute": 0.0,
+  "style": "painterly",
+  "view": "three-quarter",
+  "palette_hint": "short palette direction",
+  "canon_notes": "grounded notes and constraints",
+  "animation": {{"needed": false, "states": []}}
+}}
+
+Rules:
+- realism_cute is a number from 0.0 to 1.0, where 0.0 means realistic/painterly and 1.0 means cute/appeal.
+- style must be exactly "painterly" or "cute".
+- view must be the best asset view, such as "three-quarter", "side", "front", or "top-down".
+- defining_features must include exact counts, silhouette markers, material cues, and canon details when they matter.
+- canon_notes must summarize what your research found without URLs unless a URL is essential.
+- animation.needed is true when the subject naturally needs motion or the request implies animation.
+- Output JSON only. No markdown, prose, or code fence."""
+
+
+def _critique_prompt(brief, svg_text, qa_result) -> str:
+    return f"""You are QAing a rendered SVG asset against its autonomous art brief.
+
+Brief:
+{json.dumps(brief, indent=2, sort_keys=True)}
+
+Model-free PNG QA result:
+{json.dumps(qa_result, indent=2, sort_keys=True)}
+
+Current SVG:
+{svg_text}
+
+The rendered PNG is attached as an image. Judge whether the asset visibly matches the brief's subject,
+defining_features, canon_notes, view, palette_hint, and realism_cute level.
+
+Return ONLY one JSON object:
+{{
+  "matches": true,
+  "svg": null
+}}
+
+If it does not match, set "matches" to false and put a corrected COMPLETE standalone
+<svg viewBox="0 0 512 512">...</svg> string in "svg". Correct the existing SVG directly. Do not redesign from
+scratch unless the current structure cannot satisfy the brief. Keep the SVG riggable with stable grouped parts."""
+
+
+def _normalize_art_brief(value):
+    if not isinstance(value, dict):
+        return None
+
+    subject = value.get("subject")
+    features = value.get("defining_features")
+    realism_cute = value.get("realism_cute")
+    style = value.get("style")
+    view = value.get("view")
+    palette_hint = value.get("palette_hint")
+    canon_notes = value.get("canon_notes")
+    animation = value.get("animation")
+
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    if not isinstance(features, list) or not features or not all(isinstance(item, str) and item.strip() for item in features):
+        return None
+    if isinstance(realism_cute, bool) or not isinstance(realism_cute, (int, float)) or not 0 <= realism_cute <= 1:
+        return None
+    style_text = str(style or "").strip().lower()
+    if style_text not in {"painterly", "cute"}:
+        return None
+    if not isinstance(view, str) or not view.strip():
+        return None
+    if not isinstance(palette_hint, str) or not palette_hint.strip():
+        return None
+    if not isinstance(canon_notes, str) or not canon_notes.strip():
+        return None
+    if not isinstance(animation, dict):
+        return None
+    needed = animation.get("needed")
+    states = animation.get("states")
+    if not isinstance(needed, bool):
+        return None
+    if not isinstance(states, list) or not all(isinstance(item, str) for item in states):
+        return None
+
+    brief = dict(value)
+    brief["subject"] = subject.strip()
+    brief["defining_features"] = [item.strip() for item in features]
+    brief["realism_cute"] = float(realism_cute)
+    brief["style"] = style_text
+    brief["view"] = view.strip()
+    brief["palette_hint"] = palette_hint.strip()
+    brief["canon_notes"] = canon_notes.strip()
+    brief["animation"] = {"needed": needed, "states": [item.strip() for item in states if item.strip()]}
+    return brief
+
+
+def _spec_from_brief(request, brief):
+    return {
+        "raw_request": str(request or ""),
+        "subject": brief["subject"],
+        "defining_features": brief["defining_features"],
+        "canon_notes": brief["canon_notes"],
+        "realism_cute": brief["realism_cute"],
+        "palette_hint": brief["palette_hint"],
+        "animation": brief.get("animation", {}),
+        "instruction": (
+            "Generate from this autonomous brief. Preserve the defining features and canon notes exactly; "
+            "use the realism_cute value to balance grounded detail against appeal simplification."
+        ),
+    }
+
+
+def _brief_requests_animation(brief) -> bool:
+    animation = brief.get("animation")
+    return isinstance(animation, dict) and animation.get("needed") is True
 
 
 def _constructive_svg_prompt(spec, view="three-quarter", style="painterly") -> str:

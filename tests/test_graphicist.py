@@ -150,6 +150,90 @@ def test_constructive_svg_fails_closed_without_svg(monkeypatch, tmp_path):
     assert not out_path.exists()
 
 
+def test_autonomous_create_researches_brief_drives_generation_and_returns_result(monkeypatch, tmp_path):
+    brief = {
+        "subject": "grounded clockwork fox",
+        "defining_features": ["fox ears", "brass gears", "bushy tail"],
+        "realism_cute": 0.25,
+        "style": "painterly",
+        "view": "side",
+        "palette_hint": "copper, cream, dark teal",
+        "canon_notes": "Readable fox silhouette with mechanical joints.",
+        "animation": {"needed": False, "states": []},
+    }
+    captured = {"codex_cmds": []}
+    known_svg = '<svg viewBox="0 0 512 512"><rect width="256" height="256" fill="red"/></svg>'
+
+    def fake_run(cmd, **kwargs):
+        captured["codex_cmds"].append(cmd)
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        if "-i" in cmd:
+            out_file.write_text(json.dumps({"matches": True, "svg": None}), encoding="utf-8")
+        else:
+            out_file.write_text(f"research notes\n{json.dumps(brief)}\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def fake_constructive(spec, out_path, model=None, view="three-quarter", style="painterly"):
+        captured["spec"] = spec
+        captured["view"] = view
+        captured["style"] = style
+        out_path.write_text(known_svg, encoding="utf-8")
+        return out_path
+
+    def fake_render(_svg, png, size=512):
+        _write_rgba_png(
+            png,
+            2,
+            2,
+            [
+                (255, 0, 0, 255),
+                (0, 255, 0, 255),
+                (0, 0, 255, 255),
+                (255, 255, 255, 255),
+            ],
+        )
+        return True
+
+    monkeypatch.setattr(graphicist.subprocess, "run", fake_run)
+    monkeypatch.setattr(graphicist, "constructive_svg", fake_constructive)
+    monkeypatch.setattr(graphicist, "render_svg", fake_render)
+
+    result = graphicist.autonomous_create("make me that fox automaton thing", tmp_path)
+
+    assert result["brief"] == brief
+    assert result["svg"] == tmp_path / "asset.svg"
+    assert result["png"] == tmp_path / "asset.png"
+    assert result["qa"]["ok"] is True
+    assert result["preview"] is None
+    assert captured["view"] == "side"
+    assert captured["style"] == "painterly"
+    assert captured["spec"]["raw_request"] == "make me that fox automaton thing"
+    assert captured["spec"]["defining_features"] == ["fox ears", "brass gears", "bushy tail"]
+    assert captured["spec"]["canon_notes"] == "Readable fox silhouette with mechanical joints."
+    assert "--enable" in captured["codex_cmds"][0]
+    assert "web_search" in captured["codex_cmds"][0]
+    assert "-i" in captured["codex_cmds"][1]
+
+
+def test_autonomous_create_fails_closed_when_brief_json_missing(monkeypatch, tmp_path):
+    calls = {"constructive": 0}
+
+    def fake_run(cmd, **kwargs):
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        out_file.write_text("no structured brief", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def fake_constructive(*args, **kwargs):
+        calls["constructive"] += 1
+        raise AssertionError("generation should not run without a parsed brief")
+
+    monkeypatch.setattr(graphicist.subprocess, "run", fake_run)
+    monkeypatch.setattr(graphicist, "constructive_svg", fake_constructive)
+
+    assert graphicist.autonomous_create("an unknown asset", tmp_path) is None
+    assert calls["constructive"] == 0
+
+
 def test_animate_generates_valid_rig_runtime_and_preview(monkeypatch, tmp_path):
     captured = {}
     svg = tmp_path / "spider.svg"
