@@ -27,7 +27,12 @@ def test_constructive_svg_extracts_svg_from_codex_output(monkeypatch, tmp_path):
     monkeypatch.setattr(graphicist.subprocess, "run", fake_run)
 
     out_path = tmp_path / "asset.svg"
-    result = graphicist.constructive_svg({"subject": "symmetric robot"}, out_path, model="test-model")
+    result = graphicist.constructive_svg(
+        {"subject": "symmetric robot"},
+        out_path,
+        model="test-model",
+        view="three-quarter",
+    )
 
     assert result == out_path
     assert out_path.read_text(encoding="utf-8") == known_svg
@@ -46,6 +51,67 @@ def test_constructive_svg_extracts_svg_from_codex_output(monkeypatch, tmp_path):
     prompt = captured["cmd"][-1]
     assert "parametrically and procedurally" in prompt
     assert "High-fidelity SVG asset techniques" in prompt
+    assert "COMPOSE in this requested view: three-quarter" in prompt
+    assert "not a flat top-down diagram" in prompt
+
+
+def test_constructive_svg_prompt_includes_view_and_face_canon():
+    prompt = graphicist._constructive_svg_prompt(
+        {"subject": "spider creature head with chelicerae"},
+        view="three-quarter",
+    )
+
+    assert "COMPOSE in this requested view: three-quarter" in prompt
+    assert "3/4 projection with mild foreshortening" in prompt
+    assert "Faces (dedicated canon)" in prompt
+    assert "eye-line at the vertical MIDLINE" in prompt
+    assert "chelicerae/mandibles" in prompt
+    assert "FOCAL detail zone" in prompt
+
+
+def test_constructive_svg_accepts_cute_style(monkeypatch, tmp_path):
+    captured = {}
+    known_svg = '<svg viewBox="0 0 512 512"><circle cx="256" cy="256" r="128"/></svg>'
+
+    def fake_run(cmd, **kwargs):
+        captured["prompt"] = cmd[-1]
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        out_file.write_text(known_svg, encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(graphicist.subprocess, "run", fake_run)
+
+    out_path = tmp_path / "cute.svg"
+    result = graphicist.constructive_svg(
+        {"subject": "cute friendly robot head"},
+        out_path,
+        style="cute",
+    )
+
+    assert result == out_path
+    assert out_path.read_text(encoding="utf-8") == known_svg
+    assert "CUTE / APPEAL CANON (Flash-era clean vector)" in captured["prompt"]
+    assert "closed vector shapes with flat fills" in captured["prompt"]
+    assert "Procedural texture (feTurbulence)" not in captured["prompt"]
+    assert "Cut-in shadow SHAPE" not in captured["prompt"]
+
+
+def test_constructive_svg_prompt_switches_between_cute_and_painterly_style():
+    cute_prompt = graphicist._constructive_svg_prompt(
+        {"subject": "cute friendly robot head"},
+        style="cute",
+    )
+    painterly_prompt = graphicist._constructive_svg_prompt(
+        {"subject": "armored robot head"},
+        style="painterly",
+    )
+
+    assert "CUTE / APPEAL CANON (Flash-era clean vector)" in cute_prompt
+    assert "Procedural texture (feTurbulence)" not in cute_prompt
+    assert "Cut-in shadow SHAPE" not in cute_prompt
+    assert "CUTE / APPEAL CANON (Flash-era clean vector)" not in painterly_prompt
+    assert "Procedural texture (feTurbulence)" in painterly_prompt
+    assert "Cut-in shadow SHAPE" in painterly_prompt
 
 
 def test_constructive_svg_fails_closed_without_svg(monkeypatch, tmp_path):

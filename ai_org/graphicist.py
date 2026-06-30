@@ -20,10 +20,10 @@ DEFAULT_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def constructive_svg(spec, out_path, model=None):
+def constructive_svg(spec, out_path, model=None, view="three-quarter", style="painterly"):
     """Generate a flat, structural SVG asset through a Codex parametric construction prompt."""
     out_path = Path(out_path)
-    prompt = _constructive_svg_prompt(spec)
+    prompt = _constructive_svg_prompt(spec, view=view, style=style)
 
     with tempfile.TemporaryDirectory(prefix="graphicist-codex-") as tmp:
         codex_out = Path(tmp) / "asset.txt"
@@ -200,28 +200,117 @@ def image_model(spec, out_path):
     )
 
 
-def _constructive_svg_prompt(spec) -> str:
-    techniques = SVG_TECHNIQUES.read_text(encoding="utf-8")
+def _constructive_svg_prompt(spec, view="three-quarter", style="painterly") -> str:
+    style_text = _normalized_style(style)
+    style_reference = _style_reference_prompt(style_text)
+    style_requirement = _style_hard_requirement(style_text)
     spec_text = spec if isinstance(spec, str) else json.dumps(spec, indent=2, sort_keys=True)
+    face_canon = f"\n{_face_canon_prompt()}\n" if _asset_has_face(spec) else ""
     return f"""Build a standalone flat/structural SVG asset from this spec:
 
 {spec_text}
 
 You are codex acting as a pipeline engineer, not a blind illustrator. Build the asset parametrically and procedurally.
 
+{_view_prompt(view)}
+{face_canon}
 Hard requirements:
 - Output ONLY one standalone <svg viewBox="0 0 512 512">...</svg>. No markdown, no prose, no code fence.
 - Define proportions as explicit ratios and derived measurements.
 - Place symmetric parts such as leg pairs, eyes, handles, panels, or ornaments by computed coordinates.
 - Mirror repeated symmetric parts with transforms and/or <use> elements so symmetry and proportion are guaranteed by construction.
 - Do not eyeball anatomy with unrelated freehand coordinates.
-- Use constructive SVG primitives, reusable <defs>, clipping, gradients, filters, and layered paths where appropriate.
+- {style_requirement}
 - Keep the asset flat/structural; do not call external images or remote resources.
 
-Technique reference to incorporate:
+Style reference to incorporate:
 
-{techniques}
+{style_reference}
 """
+
+
+def _normalized_style(style) -> str:
+    style_text = str(style or "painterly").strip().lower()
+    if style_text not in {"painterly", "cute"}:
+        return "painterly"
+    return style_text
+
+
+def _style_hard_requirement(style: str) -> str:
+    if style == "cute":
+        return (
+            "Use constructive SVG primitives, closed vector shapes, reusable <defs>/<use>, grouped semantic parts, "
+            "flat fills, consistent rounded strokes, and clean cel-shadow shapes where appropriate."
+        )
+    return "Use constructive SVG primitives, reusable <defs>, clipping, gradients, filters, and layered paths where appropriate."
+
+
+def _style_reference_prompt(style: str) -> str:
+    if style == "cute":
+        return _cute_canon_prompt()
+    return _painterly_techniques_prompt()
+
+
+def _painterly_techniques_prompt() -> str:
+    techniques = SVG_TECHNIQUES.read_text(encoding="utf-8")
+    cute_heading = "\n## 4. Cute / appeal style (Flash-era vector)"
+    sources_heading = "\n## Sources"
+    if cute_heading in techniques and sources_heading in techniques:
+        before_cute, after_cute = techniques.split(cute_heading, 1)
+        _, sources = after_cute.split(sources_heading, 1)
+        return before_cute.rstrip() + sources_heading + sources
+    return techniques
+
+
+def _cute_canon_prompt() -> str:
+    return """CUTE / APPEAL CANON (Flash-era clean vector):
+- Style priority: ORIGINAL appeal character art with a flat, clean vector-cartoon look. This style overrides painterly texture, noisy overlays, realistic lighting, heavy filters, and filter-heavy shadow stacks.
+- Construction: build closed vector shapes with flat fills and consistent strokes using rounded joins/caps. Put reusable repeated parts in <defs> and place them with <use>, especially eyes, highlights, limbs, and paired details. Group semantic parts such as head, face, body, arms, and legs. Keep the shape count economical, about 12-40 deliberate shapes.
+- Shape language: choose one dominant family. Use round/bean shapes for the default cute/friendly read, rounded-square shapes for sturdy appeal, or teardrops for energetic/magical appeal. Sharp angles are allowed only as tiny rounded accents. The silhouette must read at about 64px.
+- Cute proportions: normalize the character height to 100 units. Head is 42-55 units tall, body is 32-42, neck is minimal or hidden, and legs are short, thick, and rounded. Eyes are large, 18-28% of head height. Nose and mouth stay small and low on the face.
+- Eye system: layer each eye from outer shape, iris, pupil, large white highlight, tiny secondary highlight, and optional lid. Keep iris and pupil large. Show expression through brows, lids, and mouth, not by changing head anatomy. Default expression is warm, with open eyes and a small smile.
+- Palette: use one dominant color, one accent or hair color, one small complementary pop, and a dark hue-shifted outline color that is never pure black. Keep colors saturated but harmonious. Use flat cel shadows only, 0-2 shapes at 10-20% darker than the base. Avoid gradients except for a subtle iris gradient if useful.
+- Face focus: make the face the focal zone, structurally balanced and symmetric. Reuse the face canon for feature placement when the asset has a face."""
+
+
+def _view_prompt(view="three-quarter") -> str:
+    view_text = str(view or "three-quarter")
+    prompt = (
+        f"View / composition:\n"
+        f"- COMPOSE in this requested view: {view_text}.\n"
+        "- Do not default to a flat top-down map; use top-down only when the requested view explicitly says top-down, "
+        "overhead, map, or plan view.\n"
+    )
+    if view_text.strip().lower() in {"three-quarter", "3/4", "three quarter", "angled side", "angled-side"}:
+        prompt += (
+            "- For three-quarter view, construct the parts in a 3/4 projection with mild foreshortening, a consistent "
+            "ground plane, and light from upper-left.\n"
+            "- Show angled side faces and overlapping depth cues so the result reads as an object in space, not a flat "
+            "top-down diagram.\n"
+        )
+    return prompt.rstrip()
+
+
+def _asset_has_face(spec) -> bool:
+    spec_text = spec if isinstance(spec, str) else json.dumps(spec, sort_keys=True)
+    return bool(
+        re.search(
+            r"\b(face|head|portrait|character|creature|human|person|people|animal|monster|robot|eye|eyes|brow|nose|"
+            r"mouth|mandible|mandibles|chelicera|chelicerae|skull|mask)\b",
+            spec_text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _face_canon_prompt() -> str:
+    return """Faces (dedicated canon):
+- Treat the face/head region as the FOCAL detail zone; spend the highest precision and detail there.
+- Build the head on a construction frame, Loomis-style: cranial sphere plus face plane, with a clear vertical center line.
+- Make all facial features mirror across the center line; use computed ratios, transforms, and/or <use> mirroring instead of freehand paired coordinates.
+- Put the eye-line at the vertical MIDLINE of the head. Space eyes about one eye-width apart, with eye width, gaps, brow, nose, and mouth positions derived from head width/height ratios.
+- Place brow, nose, and mouth by facial thirds. For creatures, place the eye CLUSTER and chelicerae/mandibles by the same symmetric, ratio-driven rules.
+- Size and place features by explicit ratios relative to head size so the face reads correctly. Even small asymmetry or misplacement makes a face look wrong."""
 
 
 def _extract_svg(output: str) -> str | None:
