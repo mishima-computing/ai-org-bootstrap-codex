@@ -28,8 +28,9 @@ CANDIDATE_FIELDS = (
     "lang_env_version",
     "author_level",
     "pitfalls",
+    "found_via",
 )
-EXAMINED_FIELDS = ("repo", "language", "outcome")
+EXAMINED_FIELDS = ("repo", "language", "outcome", "found_via")
 EXAMINED_OUTCOMES = {
     "kept",
     "rejected-baseline-equivalent",
@@ -203,7 +204,7 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
     """Fetch, filter, annotate, and persist implementation knowledge for term."""
     context = dict(context or {})
     baseline = _codex_baseline(term, context)
-    search_keywords = _codex_search_keywords(term, context)
+    search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
     examined: list[dict[str, str]] = []
     fetched = fetch_candidates(
         term,
@@ -219,13 +220,14 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
     for raw_candidate in fetched:
         audit_repo = _candidate_audit_repo(raw_candidate)
         audit_language = _candidate_audit_language(raw_candidate)
+        audit_found_via = _candidate_audit_found_via(raw_candidate, search_keywords)
         if audit_repo:
-            _record_examined(examined, audit_repo, audit_language, "unreadable")
+            _record_examined(examined, audit_repo, audit_language, "unreadable", audit_found_via)
 
-        normalized = _normalize_raw_candidate(raw_candidate)
+        normalized = _normalize_raw_candidate(raw_candidate, search_keywords)
         if normalized is None:
             if audit_repo:
-                _record_examined(examined, audit_repo, audit_language, "rejected-low-value")
+                _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
             continue
 
         delta = _codex_delta_inclusion(term, context, baseline, normalized)
@@ -236,14 +238,15 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
                     audit_repo,
                     audit_language,
                     _delta_rejection_outcome(str(delta.get("reason") or "")),
+                    audit_found_via,
                 )
             continue
 
         distilled = _codex_distill_candidate(term, context, baseline, normalized, str(delta.get("reason") or ""))
-        normalized = _normalize_raw_candidate({**normalized, **distilled})
+        normalized = _normalize_raw_candidate({**normalized, **distilled}, search_keywords)
         if normalized is None or not _real_distillation(normalized):
             if audit_repo:
-                _record_examined(examined, audit_repo, audit_language, "rejected-low-value")
+                _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
             continue
 
         author = _codex_author_level(term, context, normalized)
@@ -253,7 +256,7 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
             low_level_count += 1
         kept.append(_stored_candidate(normalized))
         if audit_repo:
-            _record_examined(examined, audit_repo, audit_language, "kept")
+            _record_examined(examined, audit_repo, audit_language, "kept", audit_found_via)
 
     notes = ""
     if kept and low_level_count == len(kept):
@@ -265,7 +268,7 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
 
     entry = {
         "term": str(term),
-        "search_keywords": _clean_search_keywords(search_keywords),
+        "search_keywords": search_keywords,
         "examined": _clean_examined(examined),
         "candidates": kept,
         "notes": notes,
@@ -319,14 +322,16 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
     if not isinstance(examined, list):
         examined = None
 
+    cleaned_keywords = _clean_search_keywords(search_keywords)
     candidates: list[dict[str, Any]] = []
-    for repo in _search_repositories(_clean_search_keywords(search_keywords), context):
+    for repo in _search_repositories(cleaned_keywords, context):
         full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
         if not full_name:
             continue
         primary_language = _repo_primary_language(repo)
+        found_via = _clean_found_via(repo.get("found_via"), cleaned_keywords)
         if examined is not None:
-            _record_examined(examined, full_name, primary_language, "unreadable")
+            _record_examined(examined, full_name, primary_language, "unreadable", found_via)
         source_url = str(repo.get("url") or f"https://github.com/{full_name}").strip()
         read_any_file = False
         extracted_any_candidate = False
@@ -354,14 +359,16 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
                         context,
                     ),
                     "pitfalls": str(extracted.get("pitfalls") or "").strip(),
+                    "found_via": found_via,
                     "_reference_repo": full_name,
                     "_reference_language": primary_language,
+                    "_reference_found_via": found_via,
                 }
             )
             if len(candidates) >= MAX_REPOS * MAX_FILES_PER_REPO:
                 return candidates
         if examined is not None and read_any_file and not extracted_any_candidate:
-            _record_examined(examined, full_name, primary_language, "rejected-low-value")
+            _record_examined(examined, full_name, primary_language, "rejected-low-value", found_via)
     return candidates
 
 
@@ -411,6 +418,7 @@ def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> lis
             if not full_name or full_name.lower() in seen:
                 continue
             seen.add(full_name.lower())
+            normalized["found_via"] = keyword
             repos.append(normalized)
             if len(repos) >= MAX_REPOS:
                 return repos
@@ -851,16 +859,26 @@ def _valid_entry(value: Any) -> bool:
         return False
     if not isinstance(value["search_keywords"], list) or not all(isinstance(item, str) for item in value["search_keywords"]):
         return False
+    search_keywords = _clean_search_keywords(value["search_keywords"])
+    if search_keywords != value["search_keywords"]:
+        return False
     if not isinstance(value["examined"], list) or not all(_valid_examined(item) for item in value["examined"]):
         return False
+    keyword_set = {keyword.lower() for keyword in search_keywords}
+    if any(item["found_via"].lower() not in keyword_set for item in value["examined"]):
+        return False
     candidates = value["candidates"]
-    return isinstance(candidates, list) and all(_valid_candidate(candidate) for candidate in candidates)
+    return (
+        isinstance(candidates, list)
+        and all(_valid_candidate(candidate) for candidate in candidates)
+        and all(candidate["found_via"].lower() in keyword_set for candidate in candidates)
+    )
 
 
 def _valid_candidate(value: Any) -> bool:
     if not isinstance(value, Mapping) or set(value) != set(CANDIDATE_FIELDS):
         return False
-    return all(isinstance(value[field], str) for field in CANDIDATE_FIELDS)
+    return all(isinstance(value[field], str) for field in CANDIDATE_FIELDS) and bool(value["found_via"].strip())
 
 
 def _valid_examined(value: Any) -> bool:
@@ -870,16 +888,19 @@ def _valid_examined(value: Any) -> bool:
         isinstance(value["repo"], str)
         and isinstance(value["language"], str)
         and isinstance(value["outcome"], str)
+        and isinstance(value["found_via"], str)
         and value["outcome"] in EXAMINED_OUTCOMES
+        and bool(value["found_via"].strip())
     )
 
 
-def _normalize_raw_candidate(value: Any) -> dict[str, str] | None:
+def _normalize_raw_candidate(value: Any, search_keywords: list[str] | None = None) -> dict[str, str] | None:
     if not isinstance(value, Mapping):
         return None
     snippet = str(value.get("snippet") or "").strip()
     source_url = str(value.get("source_url") or "").strip()
-    if not snippet or not source_url:
+    found_via = _candidate_audit_found_via(value, search_keywords or [])
+    if not snippet or not source_url or not found_via:
         return None
     return {
         "snippet": snippet,
@@ -888,6 +909,7 @@ def _normalize_raw_candidate(value: Any) -> dict[str, str] | None:
         "lang_env_version": str(value.get("lang_env_version") or "").strip(),
         "author_level": str(value.get("author_level") or "").strip(),
         "pitfalls": str(value.get("pitfalls") or "").strip(),
+        "found_via": found_via,
     }
 
 
@@ -917,6 +939,7 @@ def _stored_candidate(candidate: Mapping[str, str]) -> dict[str, str]:
         "lang_env_version": lang_env_version,
         "author_level": candidate.get("author_level", "") or "unknown",
         "pitfalls": candidate.get("pitfalls", ""),
+        "found_via": candidate.get("found_via", ""),
     }
 
 
@@ -931,11 +954,24 @@ def _clean_search_keywords(values: Any) -> list[str]:
     return _unique(keywords)
 
 
-def _record_examined(examined: list[dict[str, str]], repo: str, language: str, outcome: str) -> None:
+def _clean_found_via(value: Any, search_keywords: list[str]) -> str:
+    found_via = " ".join(str(value or "").strip().split())
+    if not found_via:
+        return search_keywords[0] if len(search_keywords) == 1 else ""
+    allowed = {keyword.lower(): keyword for keyword in search_keywords}
+    if allowed:
+        return allowed.get(found_via.lower(), "")
+    return found_via
+
+
+def _record_examined(examined: list[dict[str, str]], repo: str, language: str, outcome: str, found_via: str) -> None:
     repo = str(repo or "").strip()
     if not repo or outcome not in EXAMINED_OUTCOMES:
         return
     language = str(language or "").strip()
+    found_via = " ".join(str(found_via or "").strip().split())
+    if not found_via:
+        return
     for item in examined:
         if item.get("repo", "").lower() != repo.lower():
             continue
@@ -943,8 +979,10 @@ def _record_examined(examined: list[dict[str, str]], repo: str, language: str, o
             item["outcome"] = outcome
         if language and not item.get("language"):
             item["language"] = language
+        if not item.get("found_via"):
+            item["found_via"] = found_via
         return
-    examined.append({"repo": repo, "language": language, "outcome": outcome})
+    examined.append({"repo": repo, "language": language, "outcome": outcome, "found_via": found_via})
 
 
 def _clean_examined(values: Any) -> list[dict[str, str]]:
@@ -958,7 +996,8 @@ def _clean_examined(values: Any) -> list[dict[str, str]]:
         outcome = str(value.get("outcome") or "").strip()
         if not repo or outcome not in EXAMINED_OUTCOMES:
             continue
-        _record_examined(cleaned, repo, str(value.get("language") or "").strip(), outcome)
+        found_via = " ".join(str(value.get("found_via") or "").strip().split())
+        _record_examined(cleaned, repo, str(value.get("language") or "").strip(), outcome, found_via)
     return cleaned
 
 
@@ -980,6 +1019,12 @@ def _candidate_audit_language(candidate: Any) -> str:
     if language:
         return language
     return str(candidate.get("lang_env_version") or "").strip()
+
+
+def _candidate_audit_found_via(candidate: Any, search_keywords: list[str]) -> str:
+    if not isinstance(candidate, Mapping):
+        return _clean_found_via("", search_keywords)
+    return _clean_found_via(candidate.get("_reference_found_via") or candidate.get("found_via"), search_keywords)
 
 
 def _delta_rejection_outcome(reason: str) -> str:

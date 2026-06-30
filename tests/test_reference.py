@@ -57,6 +57,7 @@ def test_fetch_candidates_uses_derived_repo_search_not_literal_term(monkeypatch)
     assert all(literal not in " ".join(cmd) for cmd in calls)
     assert candidates[0]["source_url"] == "https://github.com/studio/rpg/blob/HEAD/src/combat/health.py"
     assert "Clamp damage" in candidates[0]["summary"]
+    assert candidates[0]["found_via"] in {"turn-based combat system", "rpg battle system"}
 
 
 def test_search_repositories_does_not_hard_filter_context_language(monkeypatch):
@@ -137,6 +138,7 @@ def test_search_repositories_retries_gh_language_field_when_primary_language_is_
             "language": "GDScript",
             "stargazersCount": 21,
             "primaryLanguage": "GDScript",
+            "found_via": "turn based combat system",
         }
     ]
 
@@ -201,6 +203,7 @@ def test_fetch_candidates_reads_cross_language_files_and_records_actual_language
 
     assert candidates[0]["source_url"].endswith("/blob/HEAD/Assets/Scripts/TurnBasedCombat.cs")
     assert candidates[0]["lang_env_version"] == "C#"
+    assert candidates[0]["found_via"] == "turn based combat system"
 
 
 def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatch, tmp_path):
@@ -235,6 +238,7 @@ def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatc
             "repo": "example/simple",
             "language": "Python 3.12",
             "outcome": "rejected-baseline-equivalent",
+            "found_via": "turn based combat system",
         }
     ]
     assert entry["notes"] == "baseline-sufficient-nothing-added: baseline already sufficient; nothing valuable to add."
@@ -254,6 +258,7 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
                 "source_url": "https://github.com/example/rigorous/blob/HEAD/health.py",
                 "lang_env_version": "Python 3.12 turn-based RPG",
                 "pitfalls": "Shield ordering matters.",
+                "found_via": "rpg battle system",
             }
         ],
     )
@@ -286,12 +291,21 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
 
     assert len(entry["candidates"]) == 1
     assert entry["search_keywords"] == ["turn based combat system", "rpg battle system"]
-    assert entry["examined"] == [{"repo": "example/rigorous", "language": "Python 3.12 turn-based RPG", "outcome": "kept"}]
+    assert entry["examined"] == [
+        {
+            "repo": "example/rigorous",
+            "language": "Python 3.12 turn-based RPG",
+            "outcome": "kept",
+            "found_via": "rpg battle system",
+        }
+    ]
     candidate = entry["candidates"][0]
     assert "beating the baseline" in candidate["summary"]
     assert "Do not trigger KO" in candidate["pitfalls"]
     assert "clamp" in candidate["snippet"]
     assert candidate["author_level"] == "expert"
+    assert candidate["found_via"] == "rpg battle system"
+    assert candidate["found_via"] in entry["search_keywords"]
     assert read is not None
     assert read["candidates"][0]["applicability"]["matches_context"] is True
     assert reference._entry_path("hit points implementation").is_relative_to(tmp_path)
@@ -332,6 +346,7 @@ def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path
 
     assert len(entry["candidates"]) == 1
     assert entry["candidates"][0]["author_level"] == "low"
+    assert entry["candidates"][0]["found_via"] == "tree depth root"
     assert entry["search_keywords"] == ["tree depth root"]
     assert entry["notes"].startswith("low-level-only:")
 
@@ -404,6 +419,7 @@ def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
             "repo": "example/simple",
             "language": "Python",
             "outcome": "rejected-baseline-equivalent",
+            "found_via": "turn based combat system",
         }
     ]
     assert entry["notes"].startswith("baseline-sufficient")
@@ -416,8 +432,8 @@ def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeyp
             "term": "state update",
             "search_keywords": ["react state update"],
             "examined": [
-                {"repo": "example/react", "language": "JavaScript", "outcome": "kept"},
-                {"repo": "example/python", "language": "Python", "outcome": "kept"},
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept", "found_via": "react state update"},
+                {"repo": "example/python", "language": "Python", "outcome": "kept", "found_via": "react state update"},
             ],
             "candidates": [
                 {
@@ -427,6 +443,7 @@ def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeyp
                     "lang_env_version": "React 18 hooks",
                     "author_level": "medium",
                     "pitfalls": "Avoid stale closures.",
+                    "found_via": "react state update",
                 },
                 {
                     "snippet": "self.value += 1",
@@ -435,6 +452,7 @@ def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeyp
                     "lang_env_version": "Python 3.12",
                     "author_level": "medium",
                     "pitfalls": "Not a React pattern.",
+                    "found_via": "react state update",
                 },
             ],
             "notes": "",
