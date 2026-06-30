@@ -150,6 +150,7 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
         assert cmd[cmd.index("-C") + 1] == str(repo.resolve())
         assert cmd[cmd.index("--enable") + 1] == "web_search"
         assert _schema_kind(cmd[cmd.index("--output-schema") + 1]) == "grounding"
+        _assert_prompt_preserves_named_thing_specificity(cmd[-1])
         return {
             "confident": True,
             "proposed_rfc": grounded,
@@ -281,3 +282,20 @@ def _schema_kind(output_schema: str | Path) -> str:
     if schema == GROUNDING_SCHEMA:
         return "grounding"
     raise AssertionError(f"unexpected schema: {schema}")
+
+
+def _assert_prompt_preserves_named_thing_specificity(prompt: str) -> None:
+    assert "Faithfully render the request's specific identity" in prompt
+    assert "concrete defining signatures" in prompt
+    assert "ground down to that named thing" in prompt
+    assert "never generalize up to a broad category" in prompt
+    assert "faithfully reproduce <the specific named thing>" in prompt
+    assert "generic genre entry" in prompt
+    assert "Preserve the request's full scope" in prompt
+    assert "vertical slice" in prompt
+    assert "prototype, MVP, first iteration" in prompt
+    assert "complete requested deliverable" in prompt
+    assert "Grounding is not legal review" in prompt
+    assert "Do not perform IP, trademark, copyright, or licensing risk analysis" in prompt
+    assert "do not add legal disclaimers" in prompt
+    assert "Do not avoid perceived IP risk by renaming, generalizing, or shrinking" in prompt

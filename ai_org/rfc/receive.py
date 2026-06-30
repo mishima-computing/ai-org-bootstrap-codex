@@ -182,15 +182,35 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
 
 def _ground_request(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     """Research and correct a rough request before it becomes an RFC branch."""
+    # Grounding faithfully renders the request: the specific named thing at full scope.
+    # It never generalizes to the category, never shrinks scope, and is not the legal
+    # department: no IP, trademark, or copyright analysis.
     prompt = (
         "You are the RFC intake grounding step for AI Org.\n"
         "Your job is to turn a rough, vague, or even wrong request into the right well-grounded RFC view "
         "before an RFC branch is created.\n\n"
         "Use web search when the request names or implies a real product, game, genre, paper, standard, "
         "company, library, tool, or other external reference. Determine what the reference actually is, "
-        "including genre, core mechanics, conventions, and prior art. Correct misconceptions in the request. "
-        "Also inspect the target repository read-only to identify existing code, patterns, constraints, "
-        "and affected areas. Do not modify files.\n\n"
+        "including its concrete defining signatures, core mechanics, interaction rhythms, structure, tone, "
+        "progression cadence, characteristic look, conventions, and prior art. Correct misconceptions in the "
+        "request. Also inspect the target repository read-only to identify existing code, patterns, "
+        "constraints, and affected areas. Do not modify files.\n\n"
+        "Faithfully render the request's specific identity. When the request names a specific thing, ground "
+        "down to that named thing and preserve its full identity in proposed_rfc, including the title; never "
+        "generalize up to a broad category, genre, archetype, or safer-sounding substitute. proposed_rfc must "
+        "read as 'faithfully reproduce <the specific named thing>', and a reviewer should be able to tell it "
+        "apart from a generic genre entry. Do not turn 'make an elephant' into 'make a mammal'. Do not rename "
+        "a named thing as 'an original X-style' work.\n\n"
+        "Preserve the request's full scope. Do not reduce the request to a vertical slice, short demo, one "
+        "area, 10-minute experience, prototype, MVP, first iteration, or other smaller deliverable. Commit "
+        "the proposed_rfc to the complete requested deliverable at the fidelity implied by the named thing. "
+        "Downstream phases may decompose and iterate toward that full scope; intake must not hand down a "
+        "smaller goal. Do not put start-small, minimal, slice, demo, or MVP hedging in proposed_rfc or "
+        "assumptions.\n\n"
+        "Grounding is not legal review. Do not perform IP, trademark, copyright, or licensing risk analysis; "
+        "do not add legal disclaimers; do not spend proposed_rfc, assumptions, or grounding_notes on legal "
+        "concerns. Do not avoid perceived IP risk by renaming, generalizing, or shrinking the named thing. "
+        "Your job here is only to understand and faithfully render what to build.\n\n"
         "Always do the research and commit to the most-likely interpretation as proposed_rfc, even when the "
         "request is ambiguous or under-specified. Do not send back blank open questions instead of grounding. "
         "If you are confident, set confident=true and make proposed_rfc the grounded common-8 RFC view that "
