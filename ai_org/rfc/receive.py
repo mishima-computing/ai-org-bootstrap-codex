@@ -244,25 +244,20 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
     rfc_id = _slug(rfc["title"])
     branch = f"ai-org/rfc/{rfc_id}"
     base = _default_branch(repo_path)
-    original = _current_branch(repo_path)
-
-    try:
-        _git(repo_path, "checkout", "-B", branch, base)
-        path = repo_path / rfc_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(rfc, indent=2) + "\n", encoding="utf-8")
-        _git(repo_path, "add", rfc_path)
-        _git(repo_path, "commit", "--allow-empty", "-m", f"rfc: receive {rfc['title']}")
-        commit = _git(repo_path, "rev-parse", "HEAD").strip()
-    finally:
-        if original:
-            _git(repo_path, "checkout", original)
+    written = _write_rfc_branch(
+        repo_path,
+        branch,
+        base,
+        rfc,
+        rfc_path=rfc_path,
+        commit_message=f"rfc: receive {rfc['title']}",
+    )
     return {
         "ok": True,
         "status": "promoted",
         "id": rfc_id,
         "branch": branch,
-        "commit": commit,
+        "commit": written["commit"],
         "grounding_notes": grounding.grounding_notes,
     }
 
@@ -685,6 +680,38 @@ def _format_alternatives(value: Any) -> str:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug[:80] or "rfc"
+
+
+def _write_rfc_branch(
+    repo: Path,
+    branch: str,
+    base: str,
+    rfc: Mapping[str, Any],
+    *,
+    rfc_path: str = "rfc.json",
+    extra_files: Mapping[str, Any] | None = None,
+    commit_message: str | None = None,
+) -> dict[str, str]:
+    rfc_view = _common_8(rfc)
+    original = _current_branch(repo)
+    try:
+        _git(repo, "checkout", "-B", branch, base)
+        path = repo / rfc_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rfc_view, indent=2) + "\n", encoding="utf-8")
+        add_paths = [rfc_path]
+        for rel_path, payload in (extra_files or {}).items():
+            extra_path = repo / rel_path
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            add_paths.append(rel_path)
+        _git(repo, "add", *add_paths)
+        _git(repo, "commit", "--allow-empty", "-m", commit_message or f"rfc: write {rfc_view['title']}")
+        commit = _git(repo, "rev-parse", "HEAD").strip()
+        return {"branch": branch, "commit": commit}
+    finally:
+        if original:
+            _git(repo, "checkout", original)
 
 
 def _default_branch(repo: Path) -> str:

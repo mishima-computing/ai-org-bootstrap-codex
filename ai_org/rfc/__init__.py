@@ -5,10 +5,16 @@ Re-exports pull for the RFC review stage.
 from __future__ import annotations
 
 from ai_org import git_wrapper
+from ai_org.rfc import decompose as decomposition
 from ai_org.rfc import review
 
 
 RFC_PREFIX = "ai-org/rfc/"
+
+
+def decompose(repo, rfc_id_or_branch: str, **kwargs):
+    """Decompose an oversized RFC branch into child RFC branches."""
+    return decomposition.decompose(repo, rfc_id_or_branch, **kwargs)
 
 
 def pull(repo):
