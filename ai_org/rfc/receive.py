@@ -1,14 +1,14 @@
 # receive.py — the INTAKE GATE: judges whether an incoming REQUEST may become an RFC.
-# This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (差し戻し):
+# This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (send-back):
 #     request --[receive gate]--> promote to RFC | send back for revision | reject.
 # Only requests that PASS this gate go on to be MATURED into an RFC. The RFC phase has two parts:
 #     1) receive : intake — can this REQUEST become an RFC at all? (this file)
 #     2) review  : the FORMATION / MATURATION engine — mature the request into a contributor-takeable
 #                  RFC (refine the common-8, craft the exit-only). NOT a separate "direction review";
-#                  it IS the formation (the 5 過程). (review.py)
+#                  it IS the formation (the 5 processes). (review.py)
 # THE RFC PHASE'S JOB = take a raw REQUEST and make it CONTRIBUTOR-TAKEABLE. That promotion is real
 # work, not a load. It mirrors the Linux early-stage process (kernel.org process/3.Early-stage) — the
-# "5 過程" that turn a request into a proposable RFC:
+# "5 processes" that turn a request into a proposable RFC:
 #     1) Specify the problem   — what must be solved, who is affected, where the system falls short
 #     2) Early discussion      — surface objections / alternatives BEFORE implementation
 #     3) Who do you talk to    — route to the right reviewers/maintainers (the right subsystem)
@@ -17,16 +17,16 @@
 # Only after these is the RFC ready for a Contributor to TAKE and implement. (This whole front-end was
 # being IGNORED — receive was treated as a loader. It is not: it does the promotion work + the gate.)
 #
-# DECISION: these 5 過程 happen INSIDE the RFC formation — one codex-driven stage, like review's internal
+# DECISION: these 5 processes happen INSIDE the RFC formation — one codex-driven stage, like review's internal
 # 5-reviewer + Aufheben loop — NOT as 5 separate git stages/branches/commits. Git stores ONLY the result:
 # the promoted, contributor-takeable RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker. Doing
-# the 5 過程 inside the RFC (not in git) keeps the git state from exploding.
+# the 5 processes inside the RFC (not in git) keeps the git state from exploding.
 #
 # INPUT/OUTPUT field contract (grounded in REAL templates — Rust RFC 0000-template, PEP 12, Fuchsia RFC,
 # Google design doc, GitLab feature proposal, kernel submitting-patches; not abstraction):
-#   入り口 REQUEST (rough) carries the COMMON-8 through-line fields:
+#   entrance REQUEST (rough) carries the COMMON-8 through-line fields:
 #       title, problem/motivation, proposal, alternatives, intended_users, affected_area, impact, context/links
-#   出口 RFC (contributor-takeable) = the COMMON-8 (now REFINED) + the EXIT-ONLY fields the formation crafts:
+#   exit RFC (contributor-takeable) = the COMMON-8 (now REFINED) + the EXIT-ONLY fields the formation crafts:
 #       goals & non-goals, reference-level design/spec, API/interface, backwards-compat, security, privacy,
 #       testing, drawbacks, open-questions, future-possibilities, + meta (status, reviewers, resolution)
 #   Formation's job = refine the common-8 AND craft the exit-only -> a contributor-takeable RFC (or send-back).

@@ -1,16 +1,16 @@
 # review.py — this IS the RFC FORMATION / MATURATION engine. It was mis-framed (and I, via amnesia,
 # treated it) as a SEPARATE "direction review" phase. It is NOT separate. The RFC phase = receive
 # (intake of a raw REQUEST) + THIS (mature that request into a contributor-takeable RFC). The 5 roles
-# + Aufheben loop below ARE the maturation ("the 5 過程" / the vetting): they REFINE the request's
+# + Aufheben loop below ARE the maturation ("the 5 processes" / the vetting): they REFINE the request's
 # common-8 fields and CRAFT the exit-only fields, converging on a contributor-takeable RFC (buy-in)
 # or sending it back / NAK. (See receive.py top for the input/output field contract.)
 #
 # OPEN (to resolve when this is rewritten — step 2): the input should be the REQUEST (not an already
 # finished rfc.json), the output the crafted RFC; and reconcile the 5 dimensions named here
-# (need/approach/compat/scope/maintenance) with the early-stage 5 過程
+# (need/approach/compat/scope/maintenance) with the early-stage 5 processes
 # (specify problem / early discussion / who to talk to / when to post / get buy-in).
 #
-# REQUIREMENT — formation must GROUND a rough request, not just polish it (AI Org's 守備範囲):
+# REQUIREMENT — formation must GROUND a rough request, not just polish it (AI Org's responsibility):
 #   Handling a vague / sloppy / even-WRONG request and still producing the RIGHT RFC is the AI Org's job,
 #   not the user's. A request like "make a game like <kumo>" must trigger the formation to RESEARCH what
 #   is actually being asked — the real referenced product/genre, prior art, and the repo context — and
@@ -18,8 +18,8 @@
 #   current loop only REFINES the user's wording, so a wrong/off-genre request passes through as a clean
 #   but WRONG RFC (proven: a "spider labyrinth" request yielded a polished maze-arcade RFC for a game that
 #   is actually an idle RPG). The formation needs a grounding/research step (specify-the-problem + prior-art
-#   from the "過去の蓄積" research) that turns 雑 -> correct. Until that exists, GIGO: garbage request in,
-#   garbage (well-formatted) RFC out. This is the core of the deferred RFC-formation 作り込み.
+#   from the "accumulated knowledge" research) that turns rough -> correct. Until that exists, GIGO: garbage request in,
+#   garbage (well-formatted) RFC out. This is the core of the deferred RFC-formation build-out.
 #
 # ── REFERENCE: how the Linux community FORMS an RFC (grounded by research; our design may differ/evolve,
 #    but this is the model we are abstracting — keep it here so we can revise against it). The number "5"
@@ -56,7 +56,7 @@ Five independent reviewers (one LLM-backed role each), one concern apiece:
   5. MAINTENANCE — who maintains it? is the burden justified?
 
 Resolution loop (decided design):
-  - each reviewer emits its objections (指摘) on the current RFC view,
+  - each reviewer emits its objections  on the current RFC view,
   - the AUFHEBEN consolidates the five into one structured revised RFC view,
     ONCE per round, or escalates a fundamental contradiction,
   - the five reviewers then re-critique that consolidation,
