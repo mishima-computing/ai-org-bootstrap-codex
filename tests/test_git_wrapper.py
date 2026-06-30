@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 
@@ -66,6 +67,66 @@ def test_head_sha_returns_commit_sha_or_none(tmp_path):
 
     assert git_wrapper.head_sha(repo, "feature/alpha") == expected
     assert git_wrapper.head_sha(repo, "feature/missing") is None
+
+
+def test_current_default_and_merge_base(tmp_path):
+    repo = _init_repo(tmp_path)
+    base = git_wrapper.head_sha(repo, "main")
+    _branch_with_commit(repo, "feature/alpha", "alpha")
+
+    assert git_wrapper.current_branch(repo) == "main"
+    assert git_wrapper.default_branch(repo) == "main"
+    assert git_wrapper.merge_base(repo, "main", "feature/alpha") == base
+    assert git_wrapper.merge_base(repo, "main", "feature/missing") is None
+
+
+def test_create_branch_with_files_notes_and_dependency_graph(tmp_path):
+    repo = _init_repo(tmp_path)
+    git_wrapper.create_branch_with_files(
+        repo,
+        "rfc/prep",
+        "main",
+        {"rfc.json": {"title": "Prep"}},
+        commit_message="rfc: prep",
+    )
+    git_wrapper.create_branch_with_files(
+        repo,
+        "rfc/behavior",
+        "rfc/prep",
+        {"rfc.json": {"title": "Behavior"}},
+        commit_message="rfc: behavior",
+    )
+    git_wrapper.create_branch_with_files(
+        repo,
+        "rfc/docs",
+        "main",
+        {"rfc.json": {"title": "Docs"}},
+        commit_message="rfc: docs",
+    )
+
+    git_wrapper.write_semantic(
+        repo,
+        "rfc/behavior",
+        {
+            "change_kind": "behavior",
+            "subsystem": "docs",
+            "owner": "maintainer",
+            "working_state": "green",
+            "ignored": "not stored",
+        },
+    )
+
+    assert json.loads(git_wrapper.show_file(repo, "rfc/behavior", "rfc.json") or "{}") == {"title": "Behavior"}
+    assert git_wrapper.read_semantic(repo, "rfc/behavior") == {
+        "change_kind": "behavior",
+        "subsystem": "docs",
+        "owner": "maintainer",
+        "working_state": "green",
+    }
+    assert git_wrapper.dependency_graph(repo, ["rfc/prep", "rfc/behavior", "rfc/docs"]) == [
+        {"from": "rfc/prep", "to": "rfc/behavior"}
+    ]
+    assert git_wrapper.is_ancestor(repo, "rfc/prep", "rfc/docs") is False
 
 
 def _init_repo(tmp_path: Path) -> Path:

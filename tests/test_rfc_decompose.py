@@ -7,30 +7,30 @@ from pathlib import Path
 
 import pytest
 
+from ai_org import git_wrapper
 from ai_org import rfc as rfc_package
 
 
 decompose_module = importlib.import_module("ai_org.rfc.decompose")
 
 
-def test_too_big_rfc_decomposes_into_child_branches_with_dependency_graph(tmp_path, monkeypatch):
+def test_too_big_rfc_decomposes_into_topology_and_semantic_notes(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _write_rfc_branch(repo, "ai-org/rfc/big-feature", _rfc("Big Feature", "Build prep and behavior together."))
-    base_commit = _git(repo, "rev-parse", "main")
+    base_commit = git_wrapper.head_sha(repo, "main")
     prompts: list[str] = []
 
-    def handler(cmd):
-        prompt = cmd[-1]
+    def handler(prompt: str):
         prompts.append(prompt)
         if "RFC branch: ai-org/rfc/big-feature\n" in prompt:
-            return _split(False, [_child("prep-api", "Prep API", [], ["api-ready"], "prep", 1), _child(
-                "behavior-ui",
-                "Behavior UI",
-                ["api-ready"],
-                ["ui-ready"],
-                "behavior",
-                2,
-            )])
+            return _split(
+                False,
+                [
+                    _child("prep-api", "Prep API", [], ["api-ready"], "prep", 1),
+                    _child("behavior-ui", "Behavior UI", ["api-ready"], ["ui-ready"], "behavior", 2),
+                    _child("docs-help", "Docs Help", [], ["docs-ready"], "integration", 3),
+                ],
+            )
         return _split(True, [])
 
     _install_codex_fake(monkeypatch, handler)
@@ -42,30 +42,38 @@ def test_too_big_rfc_decomposes_into_child_branches_with_dependency_graph(tmp_pa
     assert [child["id"] for child in result["children"]] == [
         "big-feature-prep-api",
         "big-feature-behavior-ui",
+        "big-feature-docs-help",
     ]
     assert _git(repo, "rev-parse", "HEAD") == base_commit
 
-    prep = json.loads(_git(repo, "show", "ai-org/rfc/big-feature-prep-api:rfc.json"))
+    prep_branch = "ai-org/rfc/big-feature-prep-api"
+    behavior_branch = "ai-org/rfc/big-feature-behavior-ui"
+    docs_branch = "ai-org/rfc/big-feature-docs-help"
+    prep = json.loads(_git(repo, "show", f"{prep_branch}:rfc.json"))
     assert prep["title"] == "Prep API"
     assert set(prep) == set(decompose_module.RFC_FIELDS)
 
-    behavior_meta = json.loads(_git(repo, "show", "ai-org/rfc/big-feature-behavior-ui:rfc-metadata.json"))
-    assert behavior_meta["parent"] == "ai-org/rfc/big-feature"
-    assert behavior_meta["base_commit"] == base_commit
-    assert behavior_meta["depends_on"] == ["api-ready"]
-    assert behavior_meta["provides"] == ["ui-ready"]
+    assert git_wrapper.is_ancestor(repo, prep_branch, behavior_branch) is True
+    assert git_wrapper.is_ancestor(repo, prep_branch, docs_branch) is False
+    assert git_wrapper.is_ancestor(repo, docs_branch, prep_branch) is False
+    assert git_wrapper.is_ancestor(repo, behavior_branch, docs_branch) is False
+    assert result["dependency_graph"] == [{"from": prep_branch, "to": behavior_branch}]
+    assert git_wrapper.dependency_graph(repo, [prep_branch, behavior_branch, docs_branch]) == result["dependency_graph"]
 
-    graph = json.loads(_git(repo, "show", "ai-org/rfc/big-feature:rfc-decomposition.json"))
-    assert graph["base_commit"] == base_commit
-    assert [child["id"] for child in graph["children"]] == [
-        "big-feature-prep-api",
-        "big-feature-behavior-ui",
-    ]
-    assert graph["edges"] == [
-        {"from": "big-feature-prep-api", "to": "big-feature-behavior-ui", "via": "api-ready"}
-    ]
+    assert git_wrapper.read_semantic(repo, behavior_branch) == {
+        "change_kind": "behavior",
+        "subsystem": "ai_org.rfc",
+        "owner": "rfc phase",
+        "working_state": "The repository remains usable after this child lands.",
+    }
+    assert result["children"][1]["change_kind"] == "behavior"
+
+    for branch in ("ai-org/rfc/big-feature", prep_branch, behavior_branch, docs_branch):
+        assert git_wrapper.file_exists(repo, branch, "rfc-metadata.json") is False
+        assert git_wrapper.file_exists(repo, branch, "rfc-decomposition.json") is False
     assert "Cut by subsystem and ownership first" in prompts[0]
     assert "Every child must leave the system working" in prompts[0]
+    assert "Git ancestry is the source of truth for dependencies" in prompts[0]
 
 
 def test_right_sized_rfc_does_not_decompose(tmp_path, monkeypatch):
@@ -73,7 +81,7 @@ def test_right_sized_rfc_does_not_decompose(tmp_path, monkeypatch):
     _write_rfc_branch(repo, "ai-org/rfc/small-feature", _rfc("Small Feature", "Add one focused check."))
     calls = 0
 
-    def handler(cmd):
+    def handler(prompt: str):
         nonlocal calls
         calls += 1
         return _split(True, [])
@@ -85,15 +93,8 @@ def test_right_sized_rfc_does_not_decompose(tmp_path, monkeypatch):
     assert result["ok"] is True
     assert result["status"] == "right-sized"
     assert calls == 1
-    missing = subprocess.run(
-        ["git", "-C", str(repo), "show", "ai-org/rfc/small-feature:rfc-decomposition.json"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert missing.returncode != 0
-    assert _git(repo, "branch", "--list", "ai-org/rfc/*", "--format=%(refname:short)") == "ai-org/rfc/small-feature"
+    assert git_wrapper.file_exists(repo, "ai-org/rfc/small-feature", "rfc-decomposition.json") is False
+    assert git_wrapper.branches(repo, "ai-org/rfc/*") == ["ai-org/rfc/small-feature"]
 
 
 def test_recursion_stops_at_right_sized_child_or_depth_guard(tmp_path, monkeypatch):
@@ -101,8 +102,7 @@ def test_recursion_stops_at_right_sized_child_or_depth_guard(tmp_path, monkeypat
     _write_rfc_branch(repo, "ai-org/rfc/root", _rfc("Root", "Split a broad feature."))
     calls: list[str] = []
 
-    def handler(cmd):
-        prompt = cmd[-1]
+    def handler(prompt: str):
         if "RFC branch: ai-org/rfc/root\n" in prompt:
             calls.append("root")
             return _split(False, [_child("mixed-child", "Mixed Child", [], ["mixed-ready"], "integration", 1)])
@@ -119,19 +119,9 @@ def test_recursion_stops_at_right_sized_child_or_depth_guard(tmp_path, monkeypat
     assert result["status"] == "decomposed"
     assert calls == ["root", "child"]
     assert result["blocked_by_depth_guard"] == ["root-mixed-child"]
-    assert json.loads(_git(repo, "show", "ai-org/rfc/root-mixed-child:rfc-metadata.json"))["provides"] == [
-        "mixed-ready"
-    ]
-    child_tracking = json.loads(_git(repo, "show", "ai-org/rfc/root-mixed-child:rfc-decomposition.json"))
-    assert child_tracking["blocked_by_depth_guard"] == ["root-mixed-child"]
-    missing = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/ai-org/rfc/root-mixed-child-grandchild"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert missing.returncode != 0
+    assert git_wrapper.read_semantic(repo, "ai-org/rfc/root-mixed-child")["change_kind"] == "integration"
+    assert git_wrapper.file_exists(repo, "ai-org/rfc/root-mixed-child", "rfc-decomposition.json") is False
+    assert git_wrapper.branch_exists(repo, "ai-org/rfc/root-mixed-child-grandchild") is False
 
 
 def test_decomposition_schema_is_codex_valid():
@@ -163,11 +153,13 @@ def _init_repo(tmp_path: Path) -> Path:
 
 
 def _write_rfc_branch(repo: Path, branch: str, rfc: dict[str, object]) -> None:
-    _git(repo, "checkout", "-B", branch, "main")
-    (repo / "rfc.json").write_text(json.dumps(rfc, indent=2) + "\n", encoding="utf-8")
-    _git(repo, "add", "rfc.json")
-    _git(repo, "commit", "-m", "rfc")
-    _git(repo, "checkout", "main")
+    git_wrapper.create_branch_with_files(
+        repo,
+        branch,
+        "main",
+        {"rfc.json": rfc},
+        commit_message="rfc",
+    )
 
 
 def _rfc(title: str, problem: str) -> dict[str, object]:
@@ -217,18 +209,14 @@ def _child(
 
 
 def _install_codex_fake(monkeypatch: pytest.MonkeyPatch, handler) -> None:
-    real_run = decompose_module.subprocess.run
+    def fake_run_json(repo: Path, **kwargs):
+        assert repo.exists()
+        assert kwargs["schema"] == decompose_module.SPLIT_SCHEMA
+        assert kwargs["schema_filename"] == "rfc-split.schema.json"
+        assert kwargs["output_filename"] == "rfc-split.json"
+        return {"ok": True, "raw": json.dumps(handler(kwargs["prompt"]))}
 
-    def fake_run(cmd, *args, **kwargs):
-        if cmd and cmd[0] == "codex":
-            out_file = Path(cmd[cmd.index("-o") + 1])
-            schema = json.loads(Path(cmd[cmd.index("--output-schema") + 1]).read_text(encoding="utf-8"))
-            assert schema == decompose_module.SPLIT_SCHEMA
-            out_file.write_text(json.dumps(handler(cmd)), encoding="utf-8")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        return real_run(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(decompose_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(decompose_module.codex_exec, "run_json", fake_run_json)
 
 
 def _git(repo: Path, *args: str) -> str:

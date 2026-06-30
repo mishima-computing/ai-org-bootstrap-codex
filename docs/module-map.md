@@ -6,7 +6,7 @@ Boundaries are the 30-year Linux org abstraction: **rfc → patch → merge**, p
 ```mermaid
 flowchart LR
   subgraph shared["shared"]
-    GW["git_wrapper.py<br/>read-only git lens"]
+    GW["git_wrapper.py<br/>single git status window"]
   end
   subgraph rfc["rfc/ — request → formed RFC"]
     RREC["receive.py<br/>intake + grounding"]
@@ -25,14 +25,14 @@ flowchart LR
   end
 
   RREC --> RREV --> PIMP --> PACC --> MSUB --> MMAIN
-  GW -.read by.-> rfc & patch & merge
+  GW -.used by.-> rfc & patch & merge
 ```
 
 ## shared
 | file | loc | holds |
 |---|---|---|
 | `__init__.py` | 18 | package marker; design note (Git / Linux-community model). |
-| `git_wrapper.py` | 70 | the ONE sanctioned **read-only git lens** (git itself is the shared state; stores nothing). Public: `branches`, `branch_exists`, `log_subjects`, `has_subject`, `is_ancestor`, `head_sha`. |
+| `git_wrapper.py` | 255 | the ONE sanctioned **git gateway/status window**. Git-derivable state comes from refs/topology; git-uncapturable semantic labels live in notes. Public includes branch/ref reads, merge-base/default/current branch helpers, branch file writes, semantic note read/write, and dependency graph derivation. |
 
 ## rfc/ — turn a raw request into a formed, contributor-takeable RFC
 | file | loc | holds |
