@@ -42,6 +42,7 @@ SOURCE_EXTENSIONS = {
     "c#": (".cs",),
     "c++": (".cpp", ".cc", ".cxx", ".hpp", ".h"),
     "c": (".c", ".h"),
+    "gdscript": (".gd",),
 }
 DEFAULT_SOURCE_EXTENSIONS = (
     ".py",
@@ -58,7 +59,30 @@ DEFAULT_SOURCE_EXTENSIONS = (
     ".cpp",
     ".c",
     ".h",
+    ".gd",
 )
+EXTENSION_LANGUAGES = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript/React",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript/React",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".java": "Java",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".cs": "C#",
+    ".cpp": "C++",
+    ".cc": "C++",
+    ".cxx": "C++",
+    ".hpp": "C++",
+    ".c": "C",
+    ".h": "C/C++",
+    ".gd": "GDScript",
+}
 MAX_REPOS = 8
 MAX_FILES_PER_REPO = 3
 MAX_FILE_CHARS = 24000
@@ -263,8 +287,12 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
                     "snippet": snippet,
                     "summary": str(extracted.get("summary") or "").strip(),
                     "source_url": f"{source_url}/blob/HEAD/{path}",
-                    "lang_env_version": str(extracted.get("lang_env_version") or "").strip()
-                    or _context_lang_env_version(context),
+                    "lang_env_version": _candidate_lang_env_version(
+                        repo,
+                        path,
+                        str(extracted.get("lang_env_version") or "").strip(),
+                        context,
+                    ),
                     "pitfalls": str(extracted.get("pitfalls") or "").strip(),
                 }
             )
@@ -295,7 +323,6 @@ def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
 
 
 def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> list[dict[str, Any]]:
-    language = str(context.get("language") or "").strip()
     repos: list[dict[str, Any]] = []
     seen: set[str] = set()
     for keyword in keywords:
@@ -309,22 +336,62 @@ def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> lis
             "--json",
             "fullName,url,description,primaryLanguage,stargazersCount",
         ]
-        if language:
-            cmd.extend(["--language", language])
         raw_repos = _gh_json(cmd)
         if not isinstance(raw_repos, list):
             continue
         for repo in raw_repos:
             if not isinstance(repo, Mapping):
                 continue
-            full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
+            normalized = _normalize_search_repo(repo)
+            full_name = str(normalized.get("fullName") or "").strip()
             if not full_name or full_name.lower() in seen:
                 continue
             seen.add(full_name.lower())
-            repos.append(dict(repo))
+            repos.append(normalized)
             if len(repos) >= MAX_REPOS:
                 return repos
     return repos
+
+
+def _normalize_search_repo(repo: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(repo)
+    full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
+    if full_name:
+        normalized["fullName"] = full_name
+
+    language = _repo_primary_language(repo)
+    if language:
+        normalized["primaryLanguage"] = language
+
+    stars = _repo_stargazers_count(repo)
+    if stars is not None:
+        normalized["stargazersCount"] = stars
+    return normalized
+
+
+def _repo_primary_language(repo: Mapping[str, Any]) -> str:
+    for field in ("primaryLanguage", "language"):
+        value = repo.get(field)
+        if isinstance(value, Mapping):
+            value = value.get("name")
+        language = str(value or "").strip()
+        if language:
+            return language
+    return ""
+
+
+def _repo_stargazers_count(repo: Mapping[str, Any]) -> int | None:
+    for field in ("stargazersCount", "stars"):
+        value = repo.get(field)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _candidate_paths_for_repo(repo: str, term: str, context: Mapping[str, Any]) -> list[str]:
@@ -368,25 +435,77 @@ def _read_github_file(repo: str, path: str) -> str:
     return decoded[:MAX_FILE_CHARS]
 
 
+def _candidate_lang_env_version(
+    repo: Mapping[str, Any],
+    path: str,
+    extracted_lang_env_version: str,
+    context: Mapping[str, Any],
+) -> str:
+    actual_language = _repo_primary_language(repo) or _language_from_path(path)
+    extracted = str(extracted_lang_env_version or "").strip()
+    if actual_language and extracted:
+        if actual_language.lower() in extracted.lower():
+            return extracted
+        return f"{actual_language} source; extracted context: {extracted}"
+    if actual_language:
+        return actual_language
+    if extracted:
+        return extracted
+    return _context_lang_env_version(context)
+
+
+def _language_from_path(path: str) -> str:
+    suffix = Path(str(path or "")).suffix.lower()
+    return EXTENSION_LANGUAGES.get(suffix, "")
+
+
 def _source_extensions(context: Mapping[str, Any]) -> tuple[str, ...]:
     keys = [
         str(context.get("language") or "").strip().lower(),
         str(context.get("environment") or "").strip().lower(),
     ]
+    extensions: list[str] = []
     for key in keys:
         if key in SOURCE_EXTENSIONS:
-            return SOURCE_EXTENSIONS[key]
-    return DEFAULT_SOURCE_EXTENSIONS
+            extensions.extend(SOURCE_EXTENSIONS[key])
+    extensions.extend(DEFAULT_SOURCE_EXTENSIONS)
+    return tuple(_unique(extensions))
 
 
 def _gh_json(cmd: list[str]) -> Any:
     completed = _run_gh(cmd)
-    if completed is None or completed.returncode != 0:
+    if completed is None:
         return []
+    if completed.returncode != 0:
+        fallback_cmd = _gh_json_field_fallback(cmd, completed.stderr or "")
+        if fallback_cmd is None:
+            return []
+        completed = _run_gh(fallback_cmd)
+        if completed is None or completed.returncode != 0:
+            return []
     try:
         return json.loads(completed.stdout or "[]")
     except json.JSONDecodeError:
         return []
+
+
+def _gh_json_field_fallback(cmd: list[str], stderr: str) -> list[str] | None:
+    if "Unknown JSON field" not in stderr or "--json" not in cmd:
+        return None
+    json_index = cmd.index("--json") + 1
+    if json_index >= len(cmd):
+        return None
+    fields = [field.strip() for field in cmd[json_index].split(",") if field.strip()]
+    replacements = {
+        "primaryLanguage": "language",
+        "stars": "stargazersCount",
+    }
+    fallback_fields = [replacements.get(field, field) for field in fields]
+    if fallback_fields == fields:
+        return None
+    fallback_cmd = list(cmd)
+    fallback_cmd[json_index] = ",".join(_unique(fallback_fields))
+    return fallback_cmd
 
 
 def _run_gh(cmd: list[str]) -> subprocess.CompletedProcess[str] | None:

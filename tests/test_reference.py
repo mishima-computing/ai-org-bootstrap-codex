@@ -59,6 +59,150 @@ def test_fetch_candidates_uses_derived_repo_search_not_literal_term(monkeypatch)
     assert "Clamp damage" in candidates[0]["summary"]
 
 
+def test_search_repositories_does_not_hard_filter_context_language(monkeypatch):
+    calls = []
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        assert "--language" not in cmd
+        stdout = json.dumps(
+            [
+                {
+                    "fullName": "spongehammer/UnityTurnBasedCombatSystem",
+                    "url": "https://github.com/spongehammer/UnityTurnBasedCombatSystem",
+                    "description": "Unity turn based combat system",
+                    "primaryLanguage": {"name": "C#"},
+                    "stargazersCount": 33,
+                },
+                {
+                    "fullName": "example/idiom-learning-program",
+                    "url": "https://github.com/example/idiom-learning-program",
+                    "description": "Unrelated language exercise",
+                    "primaryLanguage": {"name": "JavaScript"},
+                    "stargazersCount": 0,
+                },
+            ]
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    repos = reference._search_repositories(["turn based combat system"], {"language": "JavaScript"})
+
+    assert calls
+    assert repos[0]["fullName"] == "spongehammer/UnityTurnBasedCombatSystem"
+    assert repos[0]["primaryLanguage"] == "C#"
+    assert repos[0]["stargazersCount"] == 33
+
+
+def test_search_repositories_retries_gh_language_field_when_primary_language_is_unsupported(monkeypatch):
+    calls = []
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        json_fields = cmd[cmd.index("--json") + 1]
+        if "primaryLanguage" in json_fields:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr='Unknown JSON field: "primaryLanguage"',
+            )
+        stdout = json.dumps(
+            [
+                {
+                    "fullName": "bitbrain/godot4_turn_based_combat_system",
+                    "url": "https://github.com/bitbrain/godot4_turn_based_combat_system",
+                    "description": "Godot 4 turn based combat system",
+                    "language": "GDScript",
+                    "stargazersCount": "21",
+                }
+            ]
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    repos = reference._search_repositories(["turn based combat system"], {"language": "JavaScript"})
+
+    assert len(calls) == 2
+    assert "primaryLanguage" in calls[0][calls[0].index("--json") + 1]
+    assert calls[1][calls[1].index("--json") + 1] == "fullName,url,description,language,stargazersCount"
+    assert "--language" not in calls[1]
+    assert repos == [
+        {
+            "fullName": "bitbrain/godot4_turn_based_combat_system",
+            "url": "https://github.com/bitbrain/godot4_turn_based_combat_system",
+            "description": "Godot 4 turn based combat system",
+            "language": "GDScript",
+            "stargazersCount": 21,
+            "primaryLanguage": "GDScript",
+        }
+    ]
+
+
+def test_search_repositories_continues_after_keyword_query_error(monkeypatch):
+    calls = []
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        if cmd[3] == "broken query":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="api error")
+        stdout = json.dumps([{"fullName": "quality/Turn-Based-Combat", "url": "https://github.com/quality/Turn-Based-Combat"}])
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    repos = reference._search_repositories(["broken query", "turn based combat system"], {"language": "JavaScript"})
+
+    assert [cmd[3] for cmd in calls] == ["broken query", "turn based combat system"]
+    assert repos[0]["fullName"] == "quality/Turn-Based-Combat"
+
+
+def test_fetch_candidates_reads_cross_language_files_and_records_actual_language(monkeypatch):
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
+    monkeypatch.setattr(
+        reference,
+        "_codex_extract_pattern",
+        lambda term, context, repo, path, content: {
+            "relevant": True,
+            "snippet": "TurnManager advances activeUnit, resolves actions, then checks victory conditions.",
+            "summary": "Separates turn order from combat action resolution.",
+            "lang_env_version": "",
+            "pitfalls": "Keep state transitions explicit when porting.",
+        },
+    )
+
+    def fake_run_gh(cmd):
+        if cmd[:3] == ["gh", "search", "repos"]:
+            assert "--language" not in cmd
+            stdout = json.dumps(
+                [
+                    {
+                        "fullName": "spongehammer/UnityTurnBasedCombatSystem",
+                        "url": "https://github.com/spongehammer/UnityTurnBasedCombatSystem",
+                        "primaryLanguage": {"name": "C#"},
+                        "stargazersCount": 33,
+                    }
+                ]
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "git/trees" in cmd[2]:
+            stdout = json.dumps({"tree": [{"type": "blob", "path": "Assets/Scripts/TurnBasedCombat.cs"}]})
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "contents" in cmd[2]:
+            encoded = base64.b64encode(b"public sealed class TurnManager { }").decode()
+            return subprocess.CompletedProcess(cmd, 0, stdout=encoded, stderr="")
+        raise AssertionError(f"unexpected gh command: {cmd}")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    candidates = reference.fetch_candidates("turn manager", {"language": "JavaScript", "version": "ES2022"})
+
+    assert candidates[0]["source_url"].endswith("/blob/HEAD/Assets/Scripts/TurnBasedCombat.cs")
+    assert candidates[0]["lang_env_version"] == "C#"
+
+
 def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
