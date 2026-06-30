@@ -9,11 +9,16 @@ OVERLAPPING content and we integrate them into a shared tree:
 Disjoint scopes (e.g. adding a new file) do NOT conflict. This mirrors Linux: conflicts surface at the
 maintainer's/Linus's integration, not at the contributor's desk.
 
-Handling (Linux "rebase and resend"): on a merge conflict, `git merge --abort` (leave NO half-merged
-state), then REJECT and send the contribution back to the Contributor to redo on the updated base.
+Handling — it's a WORKTREE matter: the merge runs in a throwaway worktree, so on conflict we just
+DISCARD the worktree. No `git merge --abort` is even needed: the merge commit is never made, the target
+branch ref (ai-org/subsystem / ai-org/mainline) is never moved, and review_and_integrate's `finally`
+force-removes the merge worktree — so the conflicted state vanishes and nothing is polluted. The stage
+then returns reject ("git merge failed").
 
-STATUS (be honest): subsystem.py / mainline.py currently do `git merge --no-ff` but do NOT yet handle
-the conflict case (abort + reject + send-back). TODO: implement that.
+STATUS: conflict is handled cleanly THIS way (PROVEN: induced a real conflict -> reject, target ref
+unchanged, zero leftover worktrees). What is NOT yet built is the "rebase and resend" LOOP: a conflicting
+contribution stays accepted-but-unmerged, so merge.pull keeps re-selecting and re-rejecting it (no damage,
+but no progress) instead of routing it back to the Contributor to rebase on the new base. TODO: that loop.
 
 Concurrency note (separate from conflicts): no self-written locks needed — git is the arbiter. A branch
 can be checked out in only ONE worktree, so concurrent merges into the same shared branch serialize
