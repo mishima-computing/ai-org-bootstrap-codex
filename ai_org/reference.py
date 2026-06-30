@@ -2,23 +2,23 @@
 
 The reference store is org-level state, not work-repo state. Entries are
 sourced from public repositories and the web, then persisted outside this repo
-as JSON files keyed by term.
+in a queryable SQLite database keyed by term.
 """
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import tempfile
 from typing import Any, Mapping
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STORE_DIR = Path("~/.ai-org/reference/")
+DEFAULT_STORE_PATH = Path("~/.ai-org/reference/reference.sqlite3")
 
 ENTRY_FIELDS = ("term", "search_keywords", "examined", "candidates", "notes")
 CANDIDATE_FIELDS = (
@@ -181,23 +181,88 @@ GENERIC_TERM_SCHEMA = {
 
 
 def lookup(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
-    """Read a stored entry and mark candidate applicability for the consuming stack."""
-    path = _entry_path(term)
-    if not path.exists():
+    """Read consumption fields for stored candidates matching the consuming stack."""
+    entry = audit(term)
+    if entry is None:
         return None
+
+    return {
+        "term": entry["term"],
+        "candidates": [
+            _consumption_candidate(candidate)
+            for candidate in entry["candidates"]
+            if _candidate_matches_context(candidate, context or {})
+        ],
+    }
+
+
+def audit(term: str) -> dict[str, Any] | None:
+    """Read the full maintenance record, including audit and provenance fields."""
+    return _read_entry(term)
+
+
+def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
+    """Search stored candidates by term, applicability, author level, or provenance keyword."""
+    filters = dict(filters or {})
+    path = _database_path()
+    if not path.exists():
+        return []
+
+    where = []
+    params: list[str] = []
+    term = str(filters.get("term") or "").strip()
+    if term:
+        where.append("lower(c.term) = lower(?)")
+        params.append(term)
+
+    author_level = str(filters.get("author_level") or "").strip()
+    if author_level:
+        where.append("lower(c.author_level) = lower(?)")
+        params.append(author_level)
+
+    search_values = [
+        str(filters.get(field) or "").strip()
+        for field in ("found_via", "keyword")
+        if str(filters.get(field) or "").strip()
+    ]
+    if search_values:
+        where.append(
+            "("
+            + " OR ".join(
+                "(lower(c.found_via) LIKE lower(?) OR lower(r.search_keywords) LIKE lower(?))"
+                for _value in search_values
+            )
+            + ")"
+        )
+        for search_value in search_values:
+            like_value = f"%{search_value}%"
+            params.extend([like_value, like_value])
+
+    sql = (
+        "SELECT c.term, c.snippet, c.summary, c.pitfalls, c.lang_env_version, "
+        "c.author_level, c.source_url, c.found_via "
+        "FROM candidates c JOIN research r ON r.term = c.term"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY lower(c.term), c.id"
 
     try:
-        entry = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+        with _connect_existing_database(path) as connection:
+            rows = connection.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return []
 
-    if not _valid_entry(entry):
-        return None
-
-    result = copy.deepcopy(entry)
-    for candidate in result["candidates"]:
-        candidate["applicability"] = _applicability(candidate.get("lang_env_version", ""), context or {})
-    return result
+    lang_env_version = str(filters.get("lang_env_version") or "").strip()
+    candidates = [_candidate_from_row(row, include_term=True) for row in rows]
+    if lang_env_version:
+        requested_tokens = _version_tokens(lang_env_version)
+        candidates = [
+            candidate
+            for candidate in candidates
+            if _lang_env_matches_filter(candidate.get("lang_env_version", ""), requested_tokens)
+        ]
+    return candidates
 
 
 def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -816,18 +881,144 @@ def _generic_prompt(term: str, context: Mapping[str, Any]) -> str:
 def _write_entry(entry: Mapping[str, Any]) -> None:
     if not _valid_entry(entry):
         raise ValueError("invalid reference entry")
-    path = _entry_path(str(entry["term"]))
+    path = _database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with _connect_database(path) as connection:
+        _ensure_schema(connection)
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO research(term, notes, search_keywords, examined)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(term) DO UPDATE SET
+                    notes = excluded.notes,
+                    search_keywords = excluded.search_keywords,
+                    examined = excluded.examined
+                """,
+                (
+                    str(entry["term"]),
+                    str(entry["notes"]),
+                    json.dumps(entry["search_keywords"], sort_keys=True),
+                    json.dumps(entry["examined"], sort_keys=True),
+                ),
+            )
+            connection.execute("DELETE FROM candidates WHERE term = ?", (str(entry["term"]),))
+            connection.executemany(
+                """
+                INSERT INTO candidates(
+                    term,
+                    snippet,
+                    summary,
+                    pitfalls,
+                    lang_env_version,
+                    author_level,
+                    source_url,
+                    found_via
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(entry["term"]),
+                        candidate["snippet"],
+                        candidate["summary"],
+                        candidate["pitfalls"],
+                        candidate["lang_env_version"],
+                        candidate["author_level"],
+                        candidate["source_url"],
+                        candidate["found_via"],
+                    )
+                    for candidate in entry["candidates"]
+                ],
+            )
 
 
-def _entry_path(term: str) -> Path:
-    return _store_dir() / f"{_slug(term)}.json"
+def _read_entry(term: str) -> dict[str, Any] | None:
+    path = _database_path()
+    if not path.exists():
+        return None
+    try:
+        with _connect_existing_database(path) as connection:
+            research = connection.execute(
+                "SELECT term, notes, search_keywords, examined FROM research WHERE lower(term) = lower(?)",
+                (str(term),),
+            ).fetchone()
+            if research is None:
+                return None
+            candidate_rows = connection.execute(
+                """
+                SELECT term, snippet, summary, pitfalls, lang_env_version, author_level, source_url, found_via
+                FROM candidates
+                WHERE lower(term) = lower(?)
+                ORDER BY id
+                """,
+                (str(term),),
+            ).fetchall()
+    except (sqlite3.Error, json.JSONDecodeError):
+        return None
+
+    try:
+        entry = {
+            "term": str(research["term"]),
+            "search_keywords": json.loads(str(research["search_keywords"] or "[]")),
+            "examined": json.loads(str(research["examined"] or "[]")),
+            "candidates": [_candidate_from_row(row) for row in candidate_rows],
+            "notes": str(research["notes"] or ""),
+        }
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not _valid_entry(entry):
+        return None
+    return entry
 
 
-def _store_dir() -> Path:
+def _connect_database(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _connect_existing_database(path: Path) -> sqlite3.Connection:
+    connection = _connect_database(path)
+    _ensure_schema(connection)
+    return connection
+
+
+def _ensure_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS research (
+            term TEXT PRIMARY KEY,
+            notes TEXT NOT NULL,
+            search_keywords TEXT NOT NULL,
+            examined TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term TEXT NOT NULL,
+            snippet TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            pitfalls TEXT NOT NULL,
+            lang_env_version TEXT NOT NULL,
+            author_level TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            found_via TEXT NOT NULL,
+            FOREIGN KEY(term) REFERENCES research(term) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reference_candidates_term ON candidates(term);
+        CREATE INDEX IF NOT EXISTS idx_reference_candidates_lang_env_version ON candidates(lang_env_version);
+        CREATE INDEX IF NOT EXISTS idx_reference_candidates_author_level ON candidates(author_level);
+        CREATE INDEX IF NOT EXISTS idx_reference_candidates_found_via ON candidates(found_via);
+        """
+    )
+
+
+def _database_path() -> Path:
     raw = os.environ.get("AI_ORG_REFERENCE_STORE")
-    store = Path(raw).expanduser() if raw else DEFAULT_STORE_DIR.expanduser()
+    store = Path(raw).expanduser() if raw else DEFAULT_STORE_PATH.expanduser()
     resolved = store.resolve()
     if _path_is_inside(resolved, REPO_ROOT) or _path_is_inside(resolved, REPO_ROOT / ".git"):
         raise ValueError("AI Org reference store must be outside the work repo and its .git directory")
@@ -842,12 +1033,43 @@ def _path_is_inside(path: Path, parent: Path) -> bool:
         return False
 
 
-def _slug(term: str) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", str(term).lower()).strip("-")
-    digest = hashlib.sha1(str(term).encode("utf-8")).hexdigest()[:8]
-    if not base:
-        base = "term"
-    return f"{base[:80].rstrip('-')}-{digest}"
+def _candidate_from_row(row: Mapping[str, Any], *, include_term: bool = False) -> dict[str, str]:
+    candidate = {
+        "snippet": str(row["snippet"] or ""),
+        "summary": str(row["summary"] or ""),
+        "source_url": str(row["source_url"] or ""),
+        "lang_env_version": str(row["lang_env_version"] or ""),
+        "author_level": str(row["author_level"] or ""),
+        "pitfalls": str(row["pitfalls"] or ""),
+        "found_via": str(row["found_via"] or ""),
+    }
+    if include_term:
+        return {"term": str(row["term"] or ""), **candidate}
+    return candidate
+
+
+def _consumption_candidate(candidate: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "snippet": str(candidate.get("snippet") or ""),
+        "summary": str(candidate.get("summary") or ""),
+        "pitfalls": str(candidate.get("pitfalls") or ""),
+        "lang_env_version": str(candidate.get("lang_env_version") or ""),
+        "author_level": str(candidate.get("author_level") or ""),
+        "source_url": str(candidate.get("source_url") or ""),
+    }
+
+
+def _candidate_matches_context(candidate: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    if not _version_tokens(_context_lang_env_version(context)):
+        return True
+    return bool(_applicability(str(candidate.get("lang_env_version") or ""), context).get("matches_context"))
+
+
+def _lang_env_matches_filter(lang_env_version: str, requested_tokens: set[str]) -> bool:
+    if not requested_tokens:
+        return True
+    candidate_tokens = _version_tokens(lang_env_version)
+    return requested_tokens.issubset(candidate_tokens) or bool(requested_tokens & candidate_tokens)
 
 
 def _valid_entry(value: Any) -> bool:

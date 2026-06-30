@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -207,7 +208,7 @@ def test_fetch_candidates_reads_cross_language_files_and_records_actual_language
 
 
 def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
     monkeypatch.setattr(
@@ -245,7 +246,7 @@ def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatc
 
 
 def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system", "rpg battle system"])
     monkeypatch.setattr(
@@ -307,13 +308,22 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
     assert candidate["found_via"] == "rpg battle system"
     assert candidate["found_via"] in entry["search_keywords"]
     assert read is not None
-    assert read["candidates"][0]["applicability"]["matches_context"] is True
-    assert reference._entry_path("hit points implementation").is_relative_to(tmp_path)
-    assert not reference._entry_path("hit points implementation").is_relative_to(reference.REPO_ROOT)
+    assert set(read) == {"term", "candidates"}
+    assert set(read["candidates"][0]) == {
+        "snippet",
+        "summary",
+        "pitfalls",
+        "lang_env_version",
+        "author_level",
+        "source_url",
+    }
+    assert "found_via" not in read["candidates"][0]
+    assert reference._database_path().is_relative_to(tmp_path)
+    assert not reference._database_path().is_relative_to(reference.REPO_ROOT)
 
 
 def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic loop")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["tree depth root"])
     monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "real edge case"})
@@ -352,7 +362,7 @@ def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path
 
 
 def test_expand_records_empty_search_keywords_when_nothing_fetched(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "use a basic verifier")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["oauth pkce verifier"])
     monkeypatch.setattr(reference, "_search_repositories", lambda keywords, context: [])
@@ -365,11 +375,12 @@ def test_expand_records_empty_search_keywords_when_nothing_fetched(monkeypatch, 
     assert entry["examined"] == []
     assert entry["notes"] == "nothing-fetched: no public repository candidates were fetched."
     assert read is not None
-    assert read["search_keywords"] == ["oauth pkce verifier"]
+    assert "search_keywords" not in read
+    assert reference.audit("PKCE verifier rotation")["search_keywords"] == ["oauth pkce verifier"]
 
 
 def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
     monkeypatch.setattr(
@@ -425,8 +436,8 @@ def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
     assert entry["notes"].startswith("baseline-sufficient")
 
 
-def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+def test_lookup_filters_by_applicability_and_returns_only_consumption_fields(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     reference._write_entry(
         {
             "term": "state update",
@@ -462,12 +473,142 @@ def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeyp
     entry = reference.lookup("state update", {"language": "React", "environment": "hooks", "version": "18"})
 
     assert entry is not None
-    assert entry["candidates"][0]["applicability"]["matches_context"] is True
-    assert entry["candidates"][1]["applicability"]["matches_context"] is False
+    assert len(entry["candidates"]) == 1
+    assert entry["candidates"][0]["snippet"] == "setState(prev => prev + 1)"
+    assert set(entry["candidates"][0]) == {
+        "snippet",
+        "summary",
+        "pitfalls",
+        "lang_env_version",
+        "author_level",
+        "source_url",
+    }
+    assert "search_keywords" not in entry
+    assert "examined" not in entry
+    assert "notes" not in entry
+    assert "found_via" not in entry["candidates"][0]
+
+
+def test_audit_returns_management_fields(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["react state update"],
+            "examined": [
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept", "found_via": "react state update"},
+            ],
+            "candidates": [
+                {
+                    "snippet": "setState(prev => prev + 1)",
+                    "summary": "Functional update.",
+                    "source_url": "https://github.com/example/react/blob/HEAD/state.jsx",
+                    "lang_env_version": "React 18 hooks",
+                    "author_level": "medium",
+                    "pitfalls": "Avoid stale closures.",
+                    "found_via": "react state update",
+                },
+            ],
+            "notes": "maintenance note",
+        }
+    )
+
+    entry = reference.audit("state update")
+
+    assert entry is not None
+    assert entry["search_keywords"] == ["react state update"]
+    assert entry["examined"][0]["outcome"] == "kept"
+    assert entry["candidates"][0]["found_via"] == "react state update"
+    assert entry["notes"] == "maintenance note"
+
+
+def test_query_filters_candidates_by_term_lang_author_and_keyword(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["react state update"],
+            "examined": [
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept", "found_via": "react state update"},
+            ],
+            "candidates": [
+                {
+                    "snippet": "setState(prev => prev + 1)",
+                    "summary": "Functional update.",
+                    "source_url": "https://github.com/example/react/blob/HEAD/state.jsx",
+                    "lang_env_version": "React 18 hooks",
+                    "author_level": "medium",
+                    "pitfalls": "Avoid stale closures.",
+                    "found_via": "react state update",
+                },
+            ],
+            "notes": "",
+        }
+    )
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["python state update"],
+            "examined": [
+                {"repo": "example/python", "language": "Python", "outcome": "kept", "found_via": "python state update"},
+            ],
+            "candidates": [
+                {
+                    "snippet": "self.value += 1",
+                    "summary": "Plain Python mutation.",
+                    "source_url": "https://github.com/example/python/blob/HEAD/state.py",
+                    "lang_env_version": "Python 3.12",
+                    "author_level": "low",
+                    "pitfalls": "Not a React pattern.",
+                    "found_via": "python state update",
+                },
+            ],
+            "notes": "",
+        }
+    )
+
+    results = reference.query(
+        {
+            "term": "state update",
+            "lang_env_version": "Python",
+            "author_level": "low",
+            "keyword": "python state",
+        }
+    )
+
+    assert len(results) == 1
+    assert results[0]["term"] == "state update"
+    assert results[0]["snippet"] == "self.value += 1"
+    assert results[0]["found_via"] == "python state update"
+
+
+def test_empty_research_rows_are_stored_and_reexpand_upserts(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "_search_repositories", lambda keywords, context: [])
+
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+
+    entry = reference.audit("PKCE verifier rotation")
+    assert entry is not None
+    assert entry["search_keywords"] == ["oauth pkce verifier"]
+    assert entry["candidates"] == []
+    assert entry["notes"] == "nothing-fetched: no public repository candidates were fetched."
+
+    with sqlite3.connect(db_path) as connection:
+        research_count = connection.execute("SELECT count(*) FROM research").fetchone()[0]
+        candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
+
+    assert research_count == 1
+    assert candidate_count == 0
+    assert reference.query({"term": "PKCE verifier rotation", "keyword": "oauth pkce verifier"}) == []
 
 
 def test_build_from_rfc_drops_generic_terms_and_expands_only_non_generic(monkeypatch, tmp_path):
-    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     expanded = []
 
     def generic(term, context):
