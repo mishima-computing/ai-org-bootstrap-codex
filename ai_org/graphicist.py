@@ -1,4 +1,16 @@
-# codex is the pipeline ENGINEER, not a blind illustrator. Reliable form comes from STRUCTURE, not freehand coordinates. Sources: (a) constructive/parametric SVG for flat/structural assets (form guaranteed by construction), (b) web image fetch (CC-licensed found images), (c) a raster image-model slot for painterly art (provision later). Naive full-regenerate visual feedback loops are DEPRECATED: proven to fail (round-1 produced no SVG); use structured QA + targeted edits instead.
+"""Isolated asset tool, not wired into the rfc, patch, or merge pipeline.
+
+Codex is the pipeline engineer, not a blind illustrator: reliable asset form
+comes from construction, proportions, segmentation, and targeted QA rather than
+freehand coordinates or full-regenerate visual loops. Public entries:
+autonomous_create self-drives request-only asset creation through web research,
+brief, generation, QA, self-critique, and optional animation; constructive_svg
+builds parametric form-by-construction SVG with painterly/cute styles, side and
+other views, face canon, and segmentation; animate creates rig.json keyframes,
+an FK runtime, and preview.html; fetch_web_image downloads Openverse/Wikimedia
+CC images without a key; render_svg renders through headless Chrome; qa runs
+model-free PNG checks; image_model is an unprovisioned raster-model slot.
+"""
 from __future__ import annotations
 
 import json

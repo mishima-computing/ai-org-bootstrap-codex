@@ -1,3 +1,4 @@
+"""Run python -m ai_org.merge by calling merge.pull."""
 from __future__ import annotations
 
 import sys

@@ -1,3 +1,4 @@
+"""Run python -m ai_org.rfc by calling rfc.pull."""
 from __future__ import annotations
 
 import sys

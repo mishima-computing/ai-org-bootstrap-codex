@@ -1,3 +1,4 @@
+"""Run python -m ai_org.patch by calling patch.pull."""
 from __future__ import annotations
 
 import sys

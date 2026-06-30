@@ -1,3 +1,7 @@
+"""RFC phase pull entry: find a groundable, reviewable item and act.
+
+Re-exports pull for the RFC review stage.
+"""
 from __future__ import annotations
 
 from ai_org import git_wrapper

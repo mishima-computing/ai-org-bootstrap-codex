@@ -1,13 +1,10 @@
-# git_wrapper.py - read-only GIT WRAPPER; the ONE sanctioned "super-module".
-# Normally we forbid super-modules (a single thing everyone is forced through), because that became a
-# state-exploding crossing layer (the deleted platform/). This module is the deliberate EXCEPTION, and only
-# because git ITSELF is already a super-module: git is the single source of truth / the super-state.
-#
-# This module stores nothing and decides nothing. It is a thin, read-only wrapper around generic git read
-# primitives. Pipeline-stage interpretation (what a marker/branch MEANS in the RFC pipeline) is NOT encoded here
-# for now; roles derive their own preconditions from these primitives.
-#
-# PROVEN: codex --sandbox cannot write .git, so all writes happen in the python stages; this module only READS.
+"""The one sanctioned read-only git lens for shared repository state.
+
+This super-module is allowed because git itself is the shared state: this
+module stores nothing, decides nothing, and exposes only generic read
+primitives. Public lens functions are branches, branch_exists, log_subjects,
+has_subject, is_ancestor, and head_sha.
+"""
 from __future__ import annotations
 
 from pathlib import Path
