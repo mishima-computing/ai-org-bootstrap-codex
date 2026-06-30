@@ -607,33 +607,45 @@ def test_empty_research_rows_are_stored_and_reexpand_upserts(monkeypatch, tmp_pa
     assert reference.query({"term": "PKCE verifier rotation", "keyword": "oauth pkce verifier"}) == []
 
 
-def test_build_from_rfc_drops_generic_terms_and_expands_only_non_generic(monkeypatch, tmp_path):
+def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    codex_calls = []
     expanded = []
 
-    def generic(term, context):
-        return {"generic": term != "OAuth PKCE", "reason": "test classifier"}
+    def codex_json(prompt, schema, output_name):
+        codex_calls.append((prompt, schema, output_name))
+        return {
+            "terms": [
+                "OAuth PKCE verifier flow",
+                "browser token exchange",
+                "OAuth PKCE verifier flow",
+            ]
+        }
 
     def expand(term, context):
         expanded.append(term)
         return {"term": term, "candidates": [], "notes": "expanded"}
 
-    monkeypatch.setattr(reference, "_codex_generic_term", generic)
+    monkeypatch.setattr(reference, "_codex_json", codex_json)
     monkeypatch.setattr(reference, "expand", expand)
 
     result = reference.build_from_rfc(
         {
             "title": "Add OAuth PKCE",
             "proposal": "Implement OAuth PKCE verifier flow.",
-            "context": "This feature improves login.",
+            "context": "This feature improves login. Avoid expanding generic words like members towns castles.",
         },
         {"language": "TypeScript", "environment": "browser", "version": "ES2022"},
     )
 
-    assert expanded == ["OAuth PKCE"]
-    assert result["expanded"] == ["OAuth PKCE"]
-    assert set(result["terms"]) == {"OAuth PKCE"}
-    assert "Add OAuth" in result["dropped_generic"]
+    assert len(codex_calls) == 1
+    assert codex_calls[0][1] == reference.REFERENCE_TERMS_SCHEMA
+    assert codex_calls[0][2] == "reference-terms.json"
+    assert expanded == ["OAuth PKCE verifier flow", "browser token exchange"]
+    assert result["expanded"] == ["OAuth PKCE verifier flow", "browser token exchange"]
+    assert set(result["terms"]) == {"OAuth PKCE verifier flow", "browser token exchange"}
+    assert "feature" not in expanded
+    assert "members towns castles" not in expanded
 
 
 def test_reference_store_rejects_work_repo_paths(monkeypatch):
@@ -651,7 +663,7 @@ def test_reference_schemas_are_codex_valid():
         reference.DELTA_SCHEMA,
         reference.DISTILL_SCHEMA,
         reference.AUTHOR_LEVEL_SCHEMA,
-        reference.GENERIC_TERM_SCHEMA,
+        reference.REFERENCE_TERMS_SCHEMA,
     ]:
         serialized = json.dumps(schema)
         assert "allOf" not in serialized

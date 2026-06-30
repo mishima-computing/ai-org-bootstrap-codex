@@ -169,15 +169,19 @@ AUTHOR_LEVEL_SCHEMA = {
     },
 }
 
-GENERIC_TERM_SCHEMA = {
+REFERENCE_TERMS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["generic", "reason"],
+    "required": ["terms"],
     "properties": {
-        "generic": {"type": "boolean"},
-        "reason": {"type": "string"},
+        "terms": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
     },
 }
+
+MAX_REFERENCE_TERMS = 30
 
 
 def lookup(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
@@ -343,15 +347,15 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
 
 
 def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Build reference entries for non-generic terms found in an RFC-shaped view."""
+    """Build reference entries for implementation-bearing terms found in an RFC-shaped view."""
     context = dict(context or {})
     text = _rfc_text(rfc_view)
     built: dict[str, Any] = {}
     expanded: list[str] = []
     hits: list[str] = []
-    dropped: list[str] = []
 
-    for term in _non_overlapping_terms(text, context):
+    terms = _extract_reference_terms(text, context)
+    for term in terms:
         existing = lookup(term, context)
         if existing is None:
             built[term] = expand(term, context)
@@ -360,15 +364,11 @@ def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | Non
             built[term] = existing
             hits.append(term)
 
-    for term in _candidate_terms(text):
-        if term not in built:
-            dropped.append(term)
-
     return {
         "terms": built,
         "expanded": expanded,
         "hits": hits,
-        "dropped_generic": _unique(dropped),
+        "dropped_generic": [],
     }
 
 
@@ -730,15 +730,13 @@ def _codex_author_level(term: str, context: Mapping[str, Any], candidate: Mappin
     return {"author_level": "unknown", "reason": "invalid author-level judgment"}
 
 
-def _codex_generic_term(term: str, context: Mapping[str, Any]) -> dict[str, Any]:
+def _extract_reference_terms(text: str, context: Mapping[str, Any]) -> list[str]:
     result = _codex_json(
-        _generic_prompt(term, context),
-        GENERIC_TERM_SCHEMA,
-        "generic-term.json",
+        _reference_terms_prompt(text, context),
+        REFERENCE_TERMS_SCHEMA,
+        "reference-terms.json",
     )
-    if isinstance(result.get("generic"), bool) and isinstance(result.get("reason"), str):
-        return result
-    return {"generic": True, "reason": "invalid generic-term judgment"}
+    return _clean_reference_terms(result.get("terms"))
 
 
 def _codex_json(prompt: str, schema: Mapping[str, Any], output_name: str) -> dict[str, Any]:
@@ -866,15 +864,19 @@ def _author_prompt(term: str, context: Mapping[str, Any], candidate: Mapping[str
     )
 
 
-def _generic_prompt(term: str, context: Mapping[str, Any]) -> str:
+def _reference_terms_prompt(text: str, context: Mapping[str, Any]) -> str:
     return (
-        "Classify this RFC word or phrase. Is it a generic/common word that should be dropped from an "
-        "implementation reference search, or is it a domain term, mechanism, API, protocol, proper noun, "
-        "library name, algorithm, file format, framework concept, or other useful implementation term?\n"
-        f"Term: {term}\n"
+        "Extract the implementation-bearing reference terms from this RFC text for an implementation "
+        "knowledge lookup. Return only meaningful terms worth researching: concrete implementation "
+        "concepts, mechanics, systems, algorithms, protocols, APIs, data formats, framework concepts, "
+        "library names, and named domain entities. Exclude generic/common words, filler phrases, "
+        "non-implementation prose, feature-benefit language, and accidental adjacent-word n-grams. "
+        "Prefer precise multi-word terms such as command-based turn battle system, EXP and gold leveling, "
+        "save/load system, random encounter system, shop and inn economy, tilemap overworld traversal, "
+        "or boss gate progression. Return at most 30 terms, ordered by implementation importance.\n"
         f"Consuming stack context: {_json_for_prompt(context)}\n"
-        "Return generic=true for common verbs, filler, ordinary product words, and broad words without "
-        "implementation-specific meaning. Return only schema JSON."
+        f"RFC text:\n{text}\n"
+        "Return only schema JSON."
     )
 
 
@@ -1310,39 +1312,18 @@ def _rfc_text(value: Any) -> str:
     return str(value or "")
 
 
-def _non_overlapping_terms(text: str, context: Mapping[str, Any]) -> list[str]:
-    tokens = _token_spans(text)
-    accepted: list[tuple[int, int, str]] = []
-    for start, end, term in _candidate_term_spans(tokens):
-        if any(not (end <= used_start or start >= used_end) for used_start, used_end, _used in accepted):
+def _clean_reference_terms(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    terms = []
+    for value in values:
+        if not isinstance(value, str):
             continue
-        judgment = _codex_generic_term(term, context)
-        if judgment.get("generic") is False:
-            accepted.append((start, end, term))
-    return [term for _start, _end, term in sorted(accepted)]
-
-
-def _candidate_terms(text: str) -> list[str]:
-    return [term for _start, _end, term in _candidate_term_spans(_token_spans(text))]
-
-
-def _token_spans(text: str) -> list[tuple[int, int, str]]:
-    return [(match.start(), match.end(), match.group(0)) for match in re.finditer(r"[A-Za-z][A-Za-z0-9_.+#-]*", text)]
-
-
-def _candidate_term_spans(tokens: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
-    candidates: list[tuple[int, int, str]] = []
-    seen: set[str] = set()
-    for width in (3, 2, 1):
-        for index in range(0, len(tokens) - width + 1):
-            selected = tokens[index : index + width]
-            term = " ".join(token for _start, _end, token in selected).strip()
-            key = term.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append((selected[0][0], selected[-1][1], term))
-    return candidates
+        term = re.sub(r"\s+", " ", value).strip(" \t\r\n\"'`.,:;()[]{}")
+        if not term or not term.isascii() or not re.search(r"[A-Za-z]", term):
+            continue
+        terms.append(term)
+    return _unique(terms)[:MAX_REFERENCE_TERMS]
 
 
 def _snippet_from_gh_item(item: Mapping[str, Any]) -> str:
