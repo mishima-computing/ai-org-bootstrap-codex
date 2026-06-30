@@ -7,6 +7,7 @@ in a queryable SQLite database keyed by term.
 from __future__ import annotations
 
 import copy
+import concurrent.futures
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from typing import Any, Mapping
 
 
@@ -182,6 +184,10 @@ REFERENCE_TERMS_SCHEMA = {
 }
 
 MAX_REFERENCE_TERMS = 30
+REFERENCE_MAX_PARALLEL = 6
+REFERENCE_SQLITE_BUSY_TIMEOUT_MS = 30000
+
+_REFERENCE_DB_WRITE_LOCK = threading.Lock()
 
 
 def lookup(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
@@ -353,23 +359,73 @@ def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | Non
     built: dict[str, Any] = {}
     expanded: list[str] = []
     hits: list[str] = []
+    failed: dict[str, str] = {}
 
     terms = _extract_reference_terms(text, context)
+    outcomes: dict[str, dict[str, Any]] = {}
+    parallelism = _reference_parallelism(len(terms))
+    if parallelism <= 1:
+        for term in terms:
+            outcomes[term] = _build_rfc_term(term, context)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+            futures = {executor.submit(_build_rfc_term, term, context): term for term in terms}
+            for future in concurrent.futures.as_completed(futures):
+                term = futures[future]
+                try:
+                    outcomes[term] = future.result()
+                except Exception as exc:
+                    outcomes[term] = {"status": "failed", "error": _format_term_error(exc)}
+
     for term in terms:
-        existing = lookup(term, context)
-        if existing is None:
-            built[term] = expand(term, context)
+        outcome = outcomes.get(term, {"status": "failed", "error": "term worker did not return"})
+        if outcome["status"] == "expanded":
+            built[term] = outcome["entry"]
             expanded.append(term)
-        else:
-            built[term] = existing
+        elif outcome["status"] == "hit":
+            built[term] = outcome["entry"]
             hits.append(term)
+        else:
+            failed[term] = str(outcome.get("error") or "unknown error")
 
     return {
         "terms": built,
         "expanded": expanded,
         "hits": hits,
+        "failed": failed,
         "dropped_generic": [],
     }
+
+
+def _build_rfc_term(term: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        existing = lookup(term, context)
+        if existing is not None:
+            return {"status": "hit", "entry": existing}
+        return {"status": "expanded", "entry": expand(term, context)}
+    except Exception as exc:
+        return {"status": "failed", "error": _format_term_error(exc)}
+
+
+def _reference_parallelism(term_count: int) -> int:
+    if term_count <= 1:
+        return 1
+    raw = os.environ.get("AI_ORG_REFERENCE_PARALLEL")
+    if raw is None:
+        requested = REFERENCE_MAX_PARALLEL
+    else:
+        try:
+            requested = int(raw)
+        except ValueError:
+            requested = REFERENCE_MAX_PARALLEL
+    return max(1, min(term_count, requested))
+
+
+def _format_term_error(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
 
 
 def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -885,54 +941,55 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
         raise ValueError("invalid reference entry")
     path = _database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _connect_database(path) as connection:
-        _ensure_schema(connection)
-        with connection:
-            connection.execute(
-                """
-                INSERT INTO research(term, notes, search_keywords, examined)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(term) DO UPDATE SET
-                    notes = excluded.notes,
-                    search_keywords = excluded.search_keywords,
-                    examined = excluded.examined
-                """,
-                (
-                    str(entry["term"]),
-                    str(entry["notes"]),
-                    json.dumps(entry["search_keywords"], sort_keys=True),
-                    json.dumps(entry["examined"], sort_keys=True),
-                ),
-            )
-            connection.execute("DELETE FROM candidates WHERE term = ?", (str(entry["term"]),))
-            connection.executemany(
-                """
-                INSERT INTO candidates(
-                    term,
-                    snippet,
-                    summary,
-                    pitfalls,
-                    lang_env_version,
-                    author_level,
-                    source_url,
-                    found_via
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
+    with _REFERENCE_DB_WRITE_LOCK:
+        with _connect_database(path) as connection:
+            _ensure_schema(connection)
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO research(term, notes, search_keywords, examined)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(term) DO UPDATE SET
+                        notes = excluded.notes,
+                        search_keywords = excluded.search_keywords,
+                        examined = excluded.examined
+                    """,
                     (
                         str(entry["term"]),
-                        candidate["snippet"],
-                        candidate["summary"],
-                        candidate["pitfalls"],
-                        candidate["lang_env_version"],
-                        candidate["author_level"],
-                        candidate["source_url"],
-                        candidate["found_via"],
+                        str(entry["notes"]),
+                        json.dumps(entry["search_keywords"], sort_keys=True),
+                        json.dumps(entry["examined"], sort_keys=True),
+                    ),
+                )
+                connection.execute("DELETE FROM candidates WHERE term = ?", (str(entry["term"]),))
+                connection.executemany(
+                    """
+                    INSERT INTO candidates(
+                        term,
+                        snippet,
+                        summary,
+                        pitfalls,
+                        lang_env_version,
+                        author_level,
+                        source_url,
+                        found_via
                     )
-                    for candidate in entry["candidates"]
-                ],
-            )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            str(entry["term"]),
+                            candidate["snippet"],
+                            candidate["summary"],
+                            candidate["pitfalls"],
+                            candidate["lang_env_version"],
+                            candidate["author_level"],
+                            candidate["source_url"],
+                            candidate["found_via"],
+                        )
+                        for candidate in entry["candidates"]
+                    ],
+                )
 
 
 def _read_entry(term: str) -> dict[str, Any] | None:
@@ -975,8 +1032,10 @@ def _read_entry(term: str) -> dict[str, Any] | None:
 
 
 def _connect_database(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=REFERENCE_SQLITE_BUSY_TIMEOUT_MS / 1000)
     connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout = {REFERENCE_SQLITE_BUSY_TIMEOUT_MS}")
+    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 

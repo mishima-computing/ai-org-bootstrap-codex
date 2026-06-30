@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import ast
 import base64
+import concurrent.futures
 import json
 import sqlite3
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -641,11 +644,117 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
     assert len(codex_calls) == 1
     assert codex_calls[0][1] == reference.REFERENCE_TERMS_SCHEMA
     assert codex_calls[0][2] == "reference-terms.json"
-    assert expanded == ["OAuth PKCE verifier flow", "browser token exchange"]
+    assert set(expanded) == {"OAuth PKCE verifier flow", "browser token exchange"}
     assert result["expanded"] == ["OAuth PKCE verifier flow", "browser token exchange"]
     assert set(result["terms"]) == {"OAuth PKCE verifier flow", "browser token exchange"}
     assert "feature" not in expanded
     assert "members towns castles" not in expanded
+
+
+def test_build_from_rfc_uses_bounded_pool_and_isolates_term_failures(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "3")
+    monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: ["alpha term", "bad term", "gamma term"])
+    monkeypatch.setattr(reference, "lookup", lambda term, context: None)
+
+    max_workers = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class RecordingExecutor(real_executor):
+        def __init__(self, *args, **kwargs):
+            max_workers.append(kwargs.get("max_workers"))
+            super().__init__(*args, **kwargs)
+
+    active = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    def expand(term, context):
+        nonlocal active, max_active
+        with active_lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)
+            if term == "bad term":
+                raise RuntimeError("network failed")
+            return {"term": term, "candidates": [], "notes": "expanded"}
+        finally:
+            with active_lock:
+                active -= 1
+
+    monkeypatch.setattr(reference.concurrent.futures, "ThreadPoolExecutor", RecordingExecutor)
+    monkeypatch.setattr(reference, "expand", expand)
+
+    result = reference.build_from_rfc({"proposal": "alpha beta gamma"}, {"language": "Python"})
+
+    assert max_workers == [3]
+    assert max_active > 1
+    assert result["expanded"] == ["alpha term", "gamma term"]
+    assert result["hits"] == []
+    assert set(result["terms"]) == {"alpha term", "gamma term"}
+    assert result["failed"] == {"bad term": "RuntimeError: network failed"}
+
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "8")
+    assert reference._reference_parallelism(10) == 8
+
+
+def test_build_from_rfc_parallel_expand_writes_all_sqlite_rows(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    terms = ["alpha cache", "beta queue", "gamma lock", "delta retry"]
+
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "4")
+    monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: terms)
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: f"basic {term}")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: [f"{term} implementation"])
+    monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "real delta"})
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, reason: {
+            "snippet": f"def {term.replace(' ', '_')}(): pass",
+            "summary": f"Useful implementation detail for {term}.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": f"Handle the {term} edge case.",
+        },
+    )
+    monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "high", "reason": "clear"})
+
+    def fetch_candidates(term, context):
+        time.sleep(0.02)
+        return [
+            {
+                "snippet": f"raw {term}",
+                "summary": f"Raw summary for {term}.",
+                "source_url": f"https://github.com/example/{term.replace(' ', '-')}/blob/HEAD/main.py",
+                "lang_env_version": "Python 3.12",
+                "author_level": "unknown",
+                "pitfalls": f"Raw pitfall for {term}.",
+                "found_via": f"{term} implementation",
+                "_reference_repo": f"example/{term.replace(' ', '-')}",
+                "_reference_language": "Python",
+                "_reference_found_via": f"{term} implementation",
+            }
+        ]
+
+    monkeypatch.setattr(reference, "fetch_candidates", fetch_candidates)
+
+    result = reference.build_from_rfc({"proposal": "Build several implementation details."}, {"language": "Python"})
+
+    assert result["expanded"] == terms
+    assert result["failed"] == {}
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        research_rows = connection.execute("SELECT term, search_keywords FROM research ORDER BY term").fetchall()
+        candidate_rows = connection.execute("SELECT term, snippet, found_via FROM candidates ORDER BY term").fetchall()
+
+    assert journal_mode == "wal"
+    assert [row["term"] for row in research_rows] == sorted(terms)
+    assert [row["term"] for row in candidate_rows] == sorted(terms)
+    assert all(json.loads(row["search_keywords"]) == [f"{row['term']} implementation"] for row in research_rows)
+    assert all(row["snippet"].startswith("def ") for row in candidate_rows)
 
 
 def test_reference_store_rejects_work_repo_paths(monkeypatch):
