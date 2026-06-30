@@ -79,6 +79,12 @@ original, clean Flash/Animate-era vector-cartoon craft: flat, deliberate, appeal
 - **Construction**: closed vector shapes, flat fills, and consistent strokes with rounded joins/caps. Use `<defs>` +
   `<use>` for repeated parts such as eyes, highlights, limbs, and paired details. Group semantic parts (`head`,
   `face`, `body`, `arms`, `legs`). Keep the shape count economical: roughly 12-40 deliberate shapes.
+- **Subject fidelity**: first identify the subject's defining features, including exact counts where they matter. A
+  spider needs exactly 8 legs, cephalothorax/abdomen segmentation, an eye cluster, and chelicerae; a cat needs pointed
+  ears, whiskers, and a tail. Those identity features are mandatory and must stay readable in the silhouette. Apply
+  cuteness by stylizing them: round them, enlarge the eyes, soften joints, or thicken limbs. Do not remove or genericize
+  defining features, and spend the economical shape budget on those features before optional charm details. The result
+  must be unmistakably the subject and cute; if forced to choose, keep identity readable.
 - **Shape language**: pick one dominant family. Round/bean shapes are the default for cute/friendly appeal;
   rounded-square shapes feel sturdy; teardrops feel energetic or magical. Use sharp angles only as tiny rounded
   accents. The silhouette must stay readable at about 64px.
@@ -90,7 +96,8 @@ original, clean Flash/Animate-era vector-cartoon craft: flat, deliberate, appeal
 - **Palette**: one dominant color, one accent or hair color, one small complementary pop, and a dark hue-shifted
   outline color, never pure black. Keep colors saturated but harmonious. Use flat cel shadows only: 0-2 shapes,
   10-20% darker than the base. Avoid gradients except for a subtle iris gradient when useful. Do not use painterly
-  texture, noisy overlays, or heavy filters.
+  texture, noisy overlays, or heavy filters. Cute is not strictly mutually exclusive with detail: keep the modest detail
+  required for the subject's signature parts.
 - **Face focus**: the face is the focal zone. Keep it balanced and symmetric, and use the face canon for ratio-driven
   placement whenever the asset has facial features.
 

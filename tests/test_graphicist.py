@@ -92,6 +92,9 @@ def test_constructive_svg_accepts_cute_style(monkeypatch, tmp_path):
     assert out_path.read_text(encoding="utf-8") == known_svg
     assert "CUTE / APPEAL CANON (Flash-era clean vector)" in captured["prompt"]
     assert "closed vector shapes with flat fills" in captured["prompt"]
+    assert "SUBJECT FIDELITY" in captured["prompt"]
+    assert "defining / identifying features" in captured["prompt"]
+    assert "EXACTLY 8 legs" in captured["prompt"]
     assert "Procedural texture (feTurbulence)" not in captured["prompt"]
     assert "Cut-in shadow SHAPE" not in captured["prompt"]
 
