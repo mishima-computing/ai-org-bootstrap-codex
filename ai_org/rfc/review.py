@@ -10,6 +10,17 @@
 # (need/approach/compat/scope/maintenance) with the early-stage 5 過程
 # (specify problem / early discussion / who to talk to / when to post / get buy-in).
 #
+# REQUIREMENT — formation must GROUND a rough request, not just polish it (AI Org's 守備範囲):
+#   Handling a vague / sloppy / even-WRONG request and still producing the RIGHT RFC is the AI Org's job,
+#   not the user's. A request like "make a game like <kumo>" must trigger the formation to RESEARCH what
+#   is actually being asked — the real referenced product/genre, prior art, and the repo context — and
+#   correct the specification (e.g. "kumo" is an auto-battle party dungeon RPG, NOT a maze arcade). The
+#   current loop only REFINES the user's wording, so a wrong/off-genre request passes through as a clean
+#   but WRONG RFC (proven: a "spider labyrinth" request yielded a polished maze-arcade RFC for a game that
+#   is actually an idle RPG). The formation needs a grounding/research step (specify-the-problem + prior-art
+#   from the "過去の蓄積" research) that turns 雑 -> correct. Until that exists, GIGO: garbage request in,
+#   garbage (well-formatted) RFC out. This is the core of the deferred RFC-formation 作り込み.
+#
 # ── REFERENCE: how the Linux community FORMS an RFC (grounded by research; our design may differ/evolve,
 #    but this is the model we are abstracting — keep it here so we can revise against it). The number "5"
 #    is NOT absolute: it is one doc's enumeration; the real process varies and has no global fixed rule.
