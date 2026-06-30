@@ -6,6 +6,21 @@ The patch stage contains two parts with DISTINCT actors:
 
 The implement<->acceptance revise loop is INTERNAL: acceptance fail -> the
 Contributor re-implements -> re-check, bounded by cap.
+
+UNRESOLVED — rebase & resend (deliberately deferred; recorded here so it isn't forgotten):
+  When a contribution conflicts at merge (the subsystem/mainline moved under it), TWO things are mixed and
+  must be kept SEPARATE per our core rule "only the Contributor fixes code; everyone else judges":
+    - JUDGMENT  (conflict detected -> send it back; and whether the rebased result is sound): git detects the
+      conflict mechanically; deciding to send back is the maintainer's call; SUSPECTING the resolution (a
+      rebase compiles + passes tests yet is semantically wrong) is an adversarial-review call = LINON's role
+      (not yet placed in this build).
+    - FIXING    (actually rebasing onto the moved base and resolving the overlap): this is the CONTRIBUTOR's
+      job and belongs HERE — re-do the contribution against the CURRENT subsystem tip (reuse make/implement
+      with base = the moved target), bounded by a cap.
+  STATUS: not built. Today a conflicting contribution is cleanly rejected (merge worktree discarded, ref
+  untouched — see merge/__init__) but is then re-selected + re-rejected by merge.pull with no progress.
+  TODO: on conflict, mark the contribution stale and have the Contributor rebase-and-resend (fix), with the
+  judgment of the result kept separate (maintainer / Linon).
 """
 from __future__ import annotations
 
