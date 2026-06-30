@@ -11,6 +11,7 @@ from ai_org.rfc import review
 
 RFC_ID = "manual-rfc"
 RFC_BRANCH = f"ai-org/rfc/{RFC_ID}"
+ORIGINAL_GROUND_REQUEST = review._ground_request
 
 
 def _rfc_view() -> dict[str, object]:
@@ -36,6 +37,19 @@ def _revised_rfc(suffix: str = "") -> dict[str, object]:
         "affected_area": "ai_org.rfc",
         "impact": f"Review state stays schema-backed{suffix}.",
         "context": f"Keep all codex calls read-only and schema-backed{suffix}.",
+    }
+
+
+def _grounded_rfc() -> dict[str, object]:
+    return {
+        "title": "Auto-Battle Party Dungeon RPG",
+        "problem": "A rough request for a game like kumo needs the correct auto-battle dungeon RPG grounding.",
+        "proposal": "Build an auto-battle party dungeon RPG loop with party setup, dungeon runs, loot, and progression.",
+        "alternatives": ["Build a maze arcade game, but that is the wrong genre for the reference."],
+        "intended_users": "Players who want idle party-building dungeon RPG play.",
+        "affected_area": "game",
+        "impact": "The RFC targets the correct genre and mechanics before implementation starts.",
+        "context": "Grounding corrected kumo from a maze arcade assumption to an auto-battle dungeon RPG reference.",
     }
 
 
@@ -87,7 +101,18 @@ def _schema_kind(output_schema: str | Path) -> str:
         return "reviewer"
     if schema == review.AUFHEBEN_SCHEMA:
         return "aufheben"
+    if schema == review.GROUNDING_SCHEMA:
+        return "grounding"
     raise AssertionError(f"unexpected schema: {schema}")
+
+
+@pytest.fixture(autouse=True)
+def _identity_grounding(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        review,
+        "_ground_request",
+        lambda repo, rfc_view: review.GroundingResult(rfc_view, ""),
+    )
 
 
 def _install_codex_fake(monkeypatch: pytest.MonkeyPatch, handler):
@@ -184,6 +209,71 @@ def test_aufheben_proceed_revised_rfc_feeds_next_review_round(tmp_path, monkeypa
                 assert value in prompt
     assert result.history[0]["aufheben"]["verdict"] == "proceed"
     assert result.history[0]["aufheben"]["situation_read"]
+
+
+def test_grounded_request_feeds_review_loop_and_direction_ok_commit(tmp_path, monkeypatch):
+    _init_repo(
+        tmp_path,
+        {
+            **_rfc_view(),
+            "title": "Game Like Kumo",
+            "problem": "Make a maze arcade game like kumo.",
+            "proposal": "Build a spider labyrinth.",
+        },
+    )
+    grounded = _grounded_rfc()
+    notes = "Found kumo is an auto-battle party dungeon RPG; corrected wrong maze-arcade framing."
+    reviewer_prompts = []
+
+    def fake_ground_request(repo, rfc_view):
+        assert repo == tmp_path
+        assert rfc_view["title"] == "Game Like Kumo"
+        return review.GroundingResult(grounded, notes)
+
+    def handler(repo, prompt, output_schema):
+        assert _schema_kind(output_schema) == "reviewer"
+        reviewer_prompts.append(prompt)
+        return json.dumps({"has_objection": False, "detail": "Grounded RFC is coherent."}), 0
+
+    monkeypatch.setattr(review, "_ground_request", fake_ground_request)
+    _install_codex_fake(monkeypatch, handler)
+
+    result = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert result.status == "direction-ok"
+    assert result.final_view == grounded
+    assert result.grounding_notes == notes
+    assert json.loads(_git(tmp_path, "show", f"{RFC_BRANCH}:rfc.json").stdout) == grounded
+    assert "auto-battle party dungeon RPG" in _latest_commit_message(tmp_path)
+    assert len(reviewer_prompts) == len(review.DIMENSIONS)
+    for prompt in reviewer_prompts:
+        assert "Auto-Battle Party Dungeon RPG" in prompt
+        assert "spider labyrinth" not in prompt
+
+
+def test_ground_request_uses_read_only_web_search_and_schema(tmp_path, monkeypatch):
+    grounded = _grounded_rfc()
+    notes = "Grounded with web research."
+
+    def fake_run(cmd, *args, **kwargs):
+        assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
+        assert cmd[cmd.index("-C") + 1] == str(tmp_path)
+        assert cmd[cmd.index("--enable") + 1] == "web_search"
+        assert _schema_kind(cmd[cmd.index("--output-schema") + 1]) == "grounding"
+        out_file = Path(cmd[cmd.index("-o") + 1])
+        out_file.write_text(
+            json.dumps({"grounded_rfc": grounded, "grounding_notes": notes}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(review, "_ground_request", ORIGINAL_GROUND_REQUEST)
+    monkeypatch.setattr(review.subprocess, "run", fake_run)
+
+    result = review._ground_request(tmp_path, _rfc_view())
+
+    assert result.rfc_view == grounded
+    assert result.grounding_notes == notes
 
 
 def test_aufheben_escalate_naks_immediately(tmp_path, monkeypatch):
@@ -343,8 +433,14 @@ def test_reviewers_use_read_only_sandbox_and_output_schema(tmp_path, monkeypatch
     assert "Revised Manual RFC current" in calls[0]["prompt"]
 
 
-def test_aufheben_schema_uses_common_8_and_codex_valid_required_properties():
-    schema = review.AUFHEBEN_SCHEMA
+@pytest.mark.parametrize(
+    ("schema_name", "schema"),
+    [
+        ("aufheben", review.AUFHEBEN_SCHEMA),
+        ("grounding", review.GROUNDING_SCHEMA),
+    ],
+)
+def test_rfc_schemas_use_common_8_and_codex_valid_required_properties(schema_name, schema):
     serialized = json.dumps(schema)
     assert "allOf" not in serialized
     assert "anyOf" not in serialized
@@ -352,11 +448,12 @@ def test_aufheben_schema_uses_common_8_and_codex_valid_required_properties():
     assert schema["additionalProperties"] is False
     assert sorted(schema["required"]) == sorted(schema["properties"])
 
-    revised_rfc = schema["properties"]["revised_rfc"]
-    assert revised_rfc["additionalProperties"] is False
-    assert tuple(revised_rfc["required"]) == review.RFC_VIEW_FIELDS
-    assert sorted(revised_rfc["required"]) == sorted(revised_rfc["properties"])
-    assert revised_rfc["properties"]["alternatives"]["type"] == "array"
+    rfc_key = "revised_rfc" if schema_name == "aufheben" else "grounded_rfc"
+    schema_rfc = schema["properties"][rfc_key]
+    assert schema_rfc["additionalProperties"] is False
+    assert tuple(schema_rfc["required"]) == review.RFC_VIEW_FIELDS
+    assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
+    assert schema_rfc["properties"]["alternatives"]["type"] == "array"
 
 
 def test_missing_rfc_on_rfc_branch_fail_closed_nak(tmp_path):

@@ -157,6 +157,31 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
     },
 }
 
+GROUNDING_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["grounded_rfc", "grounding_notes"],
+    "properties": {
+        "grounded_rfc": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(RFC_VIEW_FIELDS),
+            "properties": {
+                "title": {"type": "string"},
+                "problem": {"type": "string"},
+                "proposal": {"type": "string"},
+                "alternatives": {"type": "array", "items": {"type": "string"}},
+                "intended_users": {"type": "string"},
+                "affected_area": {"type": "string"},
+                "impact": {"type": "string"},
+                "context": {"type": "string"},
+            },
+        },
+        "grounding_notes": {"type": "string", "maxLength": 2000},
+    },
+}
+
 
 @dataclass
 class Objection:
@@ -182,6 +207,13 @@ class ReviewResult:
     unresolved: list = field(default_factory=list)   # Objection list still open at the end (NAK)
     history: list = field(default_factory=list)       # per-round objections, for the record
     escalation_reason: str = ""
+    grounding_notes: str = ""
+
+
+@dataclass
+class GroundingResult:
+    rfc_view: dict[str, Any]
+    grounding_notes: str = ""
 
 
 def _review_one(
@@ -271,6 +303,90 @@ def _format_rfc(label: str, view: dict[str, Any]) -> str:
     )
 
 
+def _ground_request(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
+    """Research and correct a rough RFC before maturation review.
+
+    Fail closed: any Codex, schema, or parsing failure returns the original common-8 view.
+    """
+    prompt = (
+        "You are the RFC formation grounding step for AI Org.\n"
+        "Your job is to turn a rough, vague, or even wrong request into the right well-grounded RFC view "
+        "before reviewer maturation begins.\n\n"
+        "Use web search when the request names or implies a real product, game, genre, paper, standard, "
+        "company, library, tool, or other external reference. Determine what the reference actually is, "
+        "including genre, core mechanics, conventions, and prior art. Correct misconceptions in the request. "
+        "Also inspect the target repository read-only to identify existing code, patterns, constraints, "
+        "and affected areas. Do not modify files.\n\n"
+        "Return a grounded common-8 RFC view that preserves useful user intent while correcting false "
+        "assumptions, wrong genre/scope, and missing context. grounding_notes must briefly state what you "
+        "found, what you corrected, and cite web references when used.\n\n"
+        + _format_rfc("Current rfc.json common-8", _rfc_to_view(rfc_view))
+        + "\nReturn only JSON matching the provided schema."
+    )
+    temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-rfc-grounding-"))
+    schema_file = temp_dir / "rfc-grounding.schema.json"
+    out_file = temp_dir / "grounded-rfc.json"
+    try:
+        schema_file.write_text(json.dumps(GROUNDING_SCHEMA, indent=2), encoding="utf-8")
+        cmd = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "-C",
+            str(repo),
+            "-o",
+            str(out_file),
+            "--enable",
+            "web_search",
+            "--output-schema",
+            str(schema_file),
+            prompt,
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return _grounding_fail_closed(rfc_view, f"Grounding failed: {exc}")
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or (
+                "no output file" if not out_file.exists() else "Codex grounding did not complete successfully."
+            )
+            return _grounding_fail_closed(rfc_view, f"Grounding failed: {detail}")
+        if not out_file.exists():
+            return _grounding_fail_closed(rfc_view, "Grounding failed: no output file")
+        return _parse_grounding_result(out_file.read_text(encoding="utf-8"), rfc_view)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> GroundingResult:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid JSON: {raw}")
+
+    if not isinstance(parsed, dict):
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned non-object JSON: {raw}")
+
+    grounded_rfc = parsed.get("grounded_rfc")
+    grounding_notes = parsed.get("grounding_notes")
+    if not _is_rfc_view(grounded_rfc):
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid grounded_rfc: {raw}")
+    if not isinstance(grounding_notes, str) or len(grounding_notes) > 2000:
+        return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid grounding_notes: {raw}")
+    return GroundingResult(_rfc_to_view(grounded_rfc), grounding_notes)
+
+
+def _grounding_fail_closed(rfc_view: dict[str, Any], reason: str) -> GroundingResult:
+    return GroundingResult(_rfc_to_view(rfc_view), reason[:2000])
+
+
 def _aufheben_consolidate(
     rfc_view: dict[str, Any],
     objections: list[Objection],
@@ -286,11 +402,11 @@ def _aufheben_consolidate(
         "You are the Aufheben. Synthesize the reviewers' objections into ONE revised, coherent RFC direction "
         "that resolves them without losing intent. If the objections form a FUNDAMENTAL, unresolvable "
         "contradiction, escalate instead.\n\n"
-        "Synthesis technique (止揚 / Aufhebung): do NOT collapse a tension onto one side. When two objections "
+        "Synthesis technique (Aufhebung): do NOT collapse a tension onto one side. When two objections "
         "pull against each other, hold them as an ANTONYMOUS COMPOUND — a single paired concept that keeps "
         "both poles — and sublate (preserve both, raise to a higher resolution). The ti-yong tradition names "
-        "exactly such tension-holding pairs: 體用 (essence-function) separates inner tests from outer proxies; "
-        "文質 (form-substance) holds an audit-vs-theater tension. Use such a pair to resolve a "
+        "exactly such tension-holding pairs: essence-function separates inner tests from outer proxies; "
+        "form-substance holds an audit-vs-theater tension. Use such a pair to resolve a "
         "criteria-vs-proxy / audit-vs-theater tension — only when it changes a reviewable criterion, not as "
         "ornament. (Pointers: Muller ti-yong; SEP 'Aufhebung'.)\n\n"
         + _format_rfc("RFC", _rfc_to_view(rfc_view))
@@ -420,6 +536,7 @@ def _write_direction_ok(
     rfc_path: str,
     final_view: dict[str, Any],
     rounds: int,
+    grounding_notes: str = "",
 ) -> None:
     branch = _rfc_branch(rfc_id_or_branch)
     _checkout(repo, branch)
@@ -427,8 +544,11 @@ def _write_direction_ok(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(final_view, indent=2) + "\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", rfc_path], check=True)
+    message = f"rfc: direction-ok ({rounds} rounds)"
+    if grounding_notes:
+        message = f"{message}\n\ngrounding: {grounding_notes}"
     subprocess.run(
-        ["git", "-C", str(repo), "commit", "--allow-empty", "-m", f"rfc: direction-ok ({rounds} rounds)"],
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-m", message],
         check=True,
     )
 
@@ -450,8 +570,8 @@ def _write_nak(repo: str | Path, rfc_id_or_branch: str, rounds: int, unresolved_
     )
 
 
-# PROVEN end-to-end against real codex (2026-06-29): git read (rfc.json@RFC branch) -> 5 reviewers + Aufheben (real
-# substantive verdicts) -> git write (commit "rfc: direction-ok|nak" lands in the repo's git log).
+# PROVEN end-to-end against real codex (2026-06-29): git read (rfc.json@RFC branch) -> grounding -> 5 reviewers
+# + Aufheben (real substantive verdicts) -> git write (commit "rfc: direction-ok|nak" lands in the repo's git log).
 def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc.json") -> ReviewResult:
     """Loop up to CAP rounds: 5 reviewers -> (if objections) aufheben consolidates -> 5 re-critique.
 
@@ -478,6 +598,9 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
             result.escalation_reason = f"{read_error}; failed to commit NAK: {exc}"
         return result
 
+    grounding = _ground_request(repo, rfc_view)
+    rfc_view = grounding.rfc_view
+
     current_view: dict[str, Any] | None = None
     history: list = []
     for rounds in range(1, CAP + 1):
@@ -488,9 +611,10 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
         if not unresolved:                                   # converged -> direction OK
             resolved = [o.dimension for o in objections]
             final_view = current_view or rfc_view
-            _write_direction_ok(repo, rfc_id_or_branch, rfc_path, final_view, rounds)
+            _write_direction_ok(repo, rfc_id_or_branch, rfc_path, final_view, rounds, grounding.grounding_notes)
             return ReviewResult("direction-ok", rounds, final_view,
-                                resolved=resolved, unresolved=[], history=history)
+                                resolved=resolved, unresolved=[], history=history,
+                                grounding_notes=grounding.grounding_notes)
         decision = _aufheben_consolidate(rfc_view, objections, repo, current_view)  # revise, then re-critique
         round_history["aufheben"] = {
             "verdict": decision.verdict,
@@ -508,13 +632,15 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
                 unresolved=unresolved,
                 history=history,
                 escalation_reason=decision.escalation_reason,
+                grounding_notes=grounding.grounding_notes,
             )
         current_view = decision.revised_rfc
         if rounds == CAP:                                    # cap reached, still open -> NAK
             resolved = [o.dimension for o in objections if not o.has_objection]
             _write_nak(repo, rfc_id_or_branch, rounds, [o.dimension for o in unresolved])
             return ReviewResult("nak", rounds, current_view or "",
-                                resolved=resolved, unresolved=unresolved, history=history)
+                                resolved=resolved, unresolved=unresolved, history=history,
+                                grounding_notes=grounding.grounding_notes)
 
 
 def _checkout(repo: str | Path, branch: str) -> None:
