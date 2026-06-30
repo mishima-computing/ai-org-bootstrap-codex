@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
@@ -40,9 +39,9 @@ def run(
         return rfc
 
     rfc_data = rfc["rfc"]
-    slug = _slug(rfc_data["title"])
+    rfc_id = _rfc_id(rfc_id_or_branch)
     suffix = "" if attempt == 1 else f"-a{attempt}"
-    branch_name = branch or f"ai-org/contrib/{slug}{suffix}"
+    branch_name = branch or f"ai-org/contrib/{rfc_id}{suffix}"
     if _branch_exists(repo_path, branch_name):
         return _failure(f"branch already exists: {branch_name}", branch=branch_name)
 
@@ -115,7 +114,17 @@ def run(
         if not status.stdout.strip():
             return _failure("codex produced no edits", branch=branch_name)
 
-        add = _git_run(worktree, "add", "-A")
+        add = _git_run(
+            worktree,
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude)__pycache__",
+            ":(exclude)**/__pycache__",
+            ":(exclude)*.pyc",
+            ":(exclude)**/*.pyc",
+        )
         if add.returncode != 0:
             return _failure(
                 "git add failed",
@@ -181,9 +190,8 @@ def _prompt(rfc: dict[str, Any]) -> str:
     )
 
 
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9._/-]+", "-", value.strip().lower()).strip("-/")
-    return slug[:80] or "patch"
+def _rfc_id(rfc_id_or_branch: str) -> str:
+    return _rfc_branch(rfc_id_or_branch).removeprefix("ai-org/rfc/")
 
 
 def _branch_exists(repo: Path, branch: str) -> bool:

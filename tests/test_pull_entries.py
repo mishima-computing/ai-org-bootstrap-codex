@@ -56,6 +56,30 @@ def test_patch_pull_implements_one_direction_ok_rfc_without_contribution(tmp_pat
     assert calls == [(repo, "ready")]
 
 
+def test_patch_pull_does_not_reselect_rfc_after_make_creates_matching_contribution_branch(
+    tmp_path, monkeypatch
+):
+    repo = _init_repo(tmp_path)
+    rfc_id = "stable-rfc-id"
+    _commit_on_branch(repo, f"ai-org/rfc/{rfc_id}", "rfc: direction-ok")
+    calls = []
+
+    def fake_make(repo_arg, selected_rfc_id):
+        calls.append((repo_arg, selected_rfc_id))
+        branch = f"ai-org/contrib/{selected_rfc_id}"
+        _git(repo_arg, "branch", branch, "main")
+        return {"ok": True, "branch": branch}
+
+    monkeypatch.setattr(patch, "make", fake_make)
+
+    result = patch.pull(repo)
+
+    assert result == {"ok": True, "branch": f"ai-org/contrib/{rfc_id}"}
+    assert result["branch"] == "ai-org/contrib/stable-rfc-id"
+    assert patch.pull(repo) is None
+    assert calls == [(repo, rfc_id)]
+
+
 def test_patch_pull_returns_none_when_no_rfc_needs_contribution(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _commit_on_branch(repo, "ai-org/rfc/no-direction", "propose rfc")
