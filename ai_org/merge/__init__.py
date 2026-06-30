@@ -19,3 +19,28 @@ Concurrency note (separate from conflicts): no self-written locks needed — git
 can be checked out in only ONE worktree, so concurrent merges into the same shared branch serialize
 naturally; just handle git's "already checked out" / "branch exists" failures gracefully (back off/retry).
 """
+from __future__ import annotations
+
+from ai_org import git_wrapper
+from ai_org.merge import mainline, subsystem
+
+
+CONTRIB_PREFIX = "ai-org/contrib/"
+SUBSYSTEM_BRANCH = "ai-org/subsystem"
+MAINLINE_BRANCH = "ai-org/mainline"
+
+
+def pull(repo):
+    """Integrate one accepted contribution or one subsystem tree, if pending."""
+    for branch in sorted(git_wrapper.branches(repo, f"{CONTRIB_PREFIX}*")):
+        if not git_wrapper.has_subject(repo, branch, "acceptance: reachable"):
+            continue
+        if git_wrapper.is_ancestor(repo, branch, SUBSYSTEM_BRANCH):
+            continue
+        return subsystem.review_and_integrate(repo, branch)
+
+    if git_wrapper.branch_exists(repo, SUBSYSTEM_BRANCH) and not git_wrapper.is_ancestor(
+        repo, SUBSYSTEM_BRANCH, MAINLINE_BRANCH
+    ):
+        return mainline.review_and_integrate(repo)
+    return None
