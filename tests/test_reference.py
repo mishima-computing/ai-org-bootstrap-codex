@@ -206,6 +206,7 @@ def test_fetch_candidates_reads_cross_language_files_and_records_actual_language
 def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
     monkeypatch.setattr(
         reference,
         "fetch_candidates",
@@ -228,12 +229,21 @@ def test_expand_drops_baseline_equivalent_candidates_with_honest_note(monkeypatc
     entry = reference.expand("hit points implementation", {"language": "Python", "version": "3.12"})
 
     assert entry["candidates"] == []
+    assert entry["search_keywords"] == ["turn based combat system"]
+    assert entry["examined"] == [
+        {
+            "repo": "example/simple",
+            "language": "Python 3.12",
+            "outcome": "rejected-baseline-equivalent",
+        }
+    ]
     assert entry["notes"] == "baseline-sufficient-nothing-added: baseline already sufficient; nothing valuable to add."
 
 
 def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage; if hp <= 0: dead = True")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system", "rpg battle system"])
     monkeypatch.setattr(
         reference,
         "fetch_candidates",
@@ -275,6 +285,8 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
     read = reference.lookup("hit points implementation", {"language": "Python", "version": "3.12"})
 
     assert len(entry["candidates"]) == 1
+    assert entry["search_keywords"] == ["turn based combat system", "rpg battle system"]
+    assert entry["examined"] == [{"repo": "example/rigorous", "language": "Python 3.12 turn-based RPG", "outcome": "kept"}]
     candidate = entry["candidates"][0]
     assert "beating the baseline" in candidate["summary"]
     assert "Do not trigger KO" in candidate["pitfalls"]
@@ -289,6 +301,7 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
 def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic loop")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["tree depth root"])
     monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "real edge case"})
     monkeypatch.setattr(
         reference,
@@ -319,7 +332,81 @@ def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path
 
     assert len(entry["candidates"]) == 1
     assert entry["candidates"][0]["author_level"] == "low"
+    assert entry["search_keywords"] == ["tree depth root"]
     assert entry["notes"].startswith("low-level-only:")
+
+
+def test_expand_records_empty_search_keywords_when_nothing_fetched(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "_search_repositories", lambda keywords, context: [])
+
+    entry = reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    read = reference.lookup("PKCE verifier rotation", {"language": "TypeScript"})
+
+    assert entry["candidates"] == []
+    assert entry["search_keywords"] == ["oauth pkce verifier"]
+    assert entry["examined"] == []
+    assert entry["notes"] == "nothing-fetched: no public repository candidates were fetched."
+    assert read is not None
+    assert read["search_keywords"] == ["oauth pkce verifier"]
+
+
+def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "store"))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
+    monkeypatch.setattr(
+        reference,
+        "_codex_extract_pattern",
+        lambda term, context, repo, path, content: {
+            "relevant": True,
+            "snippet": "health = health - damage",
+            "summary": "Subtracts damage from health.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": "No special edge cases.",
+        },
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_delta_inclusion",
+        lambda term, context, baseline, candidate: {"keep": False, "reason": "baseline-equivalent"},
+    )
+
+    def fake_run_gh(cmd):
+        if cmd[:3] == ["gh", "search", "repos"]:
+            stdout = json.dumps(
+                [
+                    {
+                        "fullName": "example/simple",
+                        "url": "https://github.com/example/simple",
+                        "primaryLanguage": {"name": "Python"},
+                    }
+                ]
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "git/trees" in cmd[2]:
+            stdout = json.dumps({"tree": [{"type": "blob", "path": "combat.py"}]})
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        if cmd[:2] == ["gh", "api"] and "contents" in cmd[2]:
+            encoded = base64.b64encode(b"def apply_damage(health, damage): return health - damage").decode()
+            return subprocess.CompletedProcess(cmd, 0, stdout=encoded, stderr="")
+        raise AssertionError(f"unexpected gh command: {cmd}")
+
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    entry = reference.expand("hit points implementation", {"language": "Python", "version": "3.12"})
+
+    assert entry["search_keywords"] == ["turn based combat system"]
+    assert entry["examined"] == [
+        {
+            "repo": "example/simple",
+            "language": "Python",
+            "outcome": "rejected-baseline-equivalent",
+        }
+    ]
+    assert entry["notes"].startswith("baseline-sufficient")
 
 
 def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeypatch, tmp_path):
@@ -327,6 +414,11 @@ def test_lookup_marks_applicability_from_lang_env_version_not_timestamps(monkeyp
     reference._write_entry(
         {
             "term": "state update",
+            "search_keywords": ["react state update"],
+            "examined": [
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept"},
+                {"repo": "example/python", "language": "Python", "outcome": "kept"},
+            ],
             "candidates": [
                 {
                     "snippet": "setState(prev => prev + 1)",
