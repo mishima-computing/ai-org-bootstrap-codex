@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from pathlib import Path
+import threading
+import time
 
 from ai_org.rfc import receive as receive_module
 
@@ -413,6 +416,89 @@ def test_prior_art_reference_hit_does_not_expand(monkeypatch):
     assert facets[0]["design"][0]["summary"] == "stored design summary"
 
 
+def test_prior_art_researches_missing_concepts_concurrently(monkeypatch):
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "3")
+    concepts = ["alpha pattern", "beta pattern", "gamma pattern"]
+    max_workers = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class RecordingExecutor(real_executor):
+        def __init__(self, *args, **kwargs):
+            max_workers.append(kwargs.get("max_workers"))
+            super().__init__(*args, **kwargs)
+
+    active = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    monkeypatch.setattr(
+        receive_module.reference,
+        "lookup",
+        lambda term, reference_context, kind=None: {"term": term, "candidates": []},
+    )
+
+    def fake_expand(term, reference_context):
+        nonlocal active, max_active
+        with active_lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)
+            return {
+                "term": term,
+                "candidates": [
+                    _reference_candidate("design", f"{term} design summary"),
+                    _reference_candidate("implementation", f"{term} implementation summary"),
+                ],
+            }
+        finally:
+            with active_lock:
+                active -= 1
+
+    monkeypatch.setattr(receive_module.concurrent.futures, "ThreadPoolExecutor", RecordingExecutor)
+    monkeypatch.setattr(receive_module.reference, "expand", fake_expand)
+
+    facets = receive_module._read_prior_art_reference_facets(concepts, {})
+
+    assert max_workers == [3, 3]
+    assert max_active > 1
+    assert [facet["term"] for facet in facets] == concepts
+    assert [facet["status"] for facet in facets] == ["researched", "researched", "researched"]
+    assert [facet["design"][0]["summary"] for facet in facets] == [
+        "alpha pattern design summary",
+        "beta pattern design summary",
+        "gamma pattern design summary",
+    ]
+
+
+def test_prior_art_missing_concept_failure_does_not_abort_others(monkeypatch):
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "3")
+    concepts = ["alpha pattern", "bad pattern", "gamma pattern"]
+
+    monkeypatch.setattr(
+        receive_module.reference,
+        "lookup",
+        lambda term, reference_context, kind=None: {"term": term, "candidates": []},
+    )
+
+    def fake_expand(term, reference_context):
+        if term == "bad pattern":
+            raise RuntimeError("research failed")
+        return {"term": term, "candidates": [_reference_candidate("design", f"{term} design summary")]}
+
+    monkeypatch.setattr(receive_module.reference, "expand", fake_expand)
+
+    facets = receive_module._read_prior_art_reference_facets(concepts, {})
+
+    assert [facet["term"] for facet in facets] == concepts
+    assert facets[0]["status"] == "researched"
+    assert facets[0]["design"][0]["summary"] == "alpha pattern design summary"
+    assert facets[1]["status"] == "failed"
+    assert facets[1]["error"] == "RuntimeError: research failed"
+    assert facets[2]["status"] == "researched"
+    assert facets[2]["design"][0]["summary"] == "gamma pattern design summary"
+
+
 def test_prior_art_allows_none_only_when_expand_produces_no_facets(monkeypatch, tmp_path):
     expand_calls = []
 
@@ -458,7 +544,8 @@ def test_prior_art_reference_expansion_is_capped(monkeypatch):
 
     facets = receive_module._read_prior_art_reference_facets(concepts, {})
 
-    assert expand_calls == concepts[: receive_module.MAX_PRIOR_ART_REFERENCE_EXPANSIONS]
+    assert set(expand_calls) == set(concepts[: receive_module.MAX_PRIOR_ART_REFERENCE_EXPANSIONS])
+    assert len(expand_calls) == receive_module.MAX_PRIOR_ART_REFERENCE_EXPANSIONS
     assert [facet["status"] for facet in facets[-2:]] == ["not_researched_cap", "not_researched_cap"]
 
 

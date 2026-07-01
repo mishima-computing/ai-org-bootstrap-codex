@@ -76,6 +76,7 @@
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import dataclass, field
 import json
 import logging
@@ -2281,50 +2282,150 @@ def _read_prior_art_reference_facets(
     context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     reference_context = _reference_stack_context(context)
-    facets: list[dict[str, Any]] = []
+    facets_by_index: dict[int, dict[str, Any]] = {}
     already_present: list[str] = []
+    missing_indexes: list[int] = []
     researched: list[str] = []
     empty_after_research: list[str] = []
     skipped_after_cap: list[str] = []
-    expansion_count = 0
-    for term in concepts:
-        term_facets = _lookup_prior_art_reference_facets(term, reference_context)
+    failed: dict[str, str] = {}
+
+    initial = _lookup_prior_art_reference_facets_for_concepts(concepts, reference_context)
+    for index, term in enumerate(concepts):
+        term_facets = initial.get(index)
+        if term_facets is None:
+            term_facets = _failed_prior_art_reference_facets(term, "lookup worker did not return")
+        if term_facets.get("status") == "failed":
+            facets_by_index[index] = term_facets
+            failed[term] = str(term_facets.get("error") or "unknown error")
+            continue
         if term_facets["design"] or term_facets["implementation"]:
             term_facets["status"] = "retrieved"
             already_present.append(term)
-            facets.append(term_facets)
+            facets_by_index[index] = term_facets
             continue
+        missing_indexes.append(index)
 
-        if expansion_count >= MAX_PRIOR_ART_REFERENCE_EXPANSIONS:
-            term_facets["status"] = "not_researched_cap"
-            skipped_after_cap.append(term)
-            facets.append(term_facets)
-            continue
+    research_indexes = missing_indexes[:MAX_PRIOR_ART_REFERENCE_EXPANSIONS]
+    for index in missing_indexes[MAX_PRIOR_ART_REFERENCE_EXPANSIONS:]:
+        term = concepts[index]
+        term_facets = initial.get(index) or {"term": term, "design": [], "implementation": []}
+        term_facets["status"] = "not_researched_cap"
+        skipped_after_cap.append(term)
+        facets_by_index[index] = term_facets
 
-        expanded = reference.expand(term, reference_context)
-        expansion_count += 1
-        term_facets = _lookup_prior_art_reference_facets(term, reference_context)
-        if not term_facets["design"]:
-            term_facets["design"] = _trim_expanded_reference_candidates(expanded, "design")
-        if not term_facets["implementation"]:
-            term_facets["implementation"] = _trim_expanded_reference_candidates(expanded, "implementation")
-        if term_facets["design"] or term_facets["implementation"]:
+    researched_facets = _research_prior_art_reference_facets_for_concepts(
+        [(index, concepts[index]) for index in research_indexes],
+        reference_context,
+    )
+    for index in research_indexes:
+        term = concepts[index]
+        term_facets = researched_facets.get(index)
+        if term_facets is None:
+            term_facets = _failed_prior_art_reference_facets(term, "research worker did not return")
+        if term_facets.get("status") == "failed":
+            failed[term] = str(term_facets.get("error") or "unknown error")
+        elif term_facets["design"] or term_facets["implementation"]:
             term_facets["status"] = "researched"
             researched.append(term)
         else:
             term_facets["status"] = "not_found"
             empty_after_research.append(term)
-        facets.append(term_facets)
+        facets_by_index[index] = term_facets
+
+    facets = [facets_by_index[index] for index in range(len(concepts))]
     LOGGER.info(
         "RFC prior-art Reference facets: already_present=%s researched=%s empty_after_research=%s "
-        "skipped_after_cap=%s expansion_cap=%s",
+        "skipped_after_cap=%s failed=%s expansion_cap=%s",
         already_present,
         researched,
         empty_after_research,
         skipped_after_cap,
+        failed,
         MAX_PRIOR_ART_REFERENCE_EXPANSIONS,
     )
     return facets
+
+
+def _lookup_prior_art_reference_facets_for_concepts(
+    concepts: list[str],
+    reference_context: Mapping[str, Any],
+) -> dict[int, dict[str, Any]]:
+    parallelism = reference._reference_parallelism(len(concepts))
+    if parallelism <= 1:
+        return {
+            index: _lookup_prior_art_reference_facets_safely(term, reference_context)
+            for index, term in enumerate(concepts)
+        }
+
+    outcomes: dict[int, dict[str, Any]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+        futures = {
+            executor.submit(_lookup_prior_art_reference_facets_safely, term, reference_context): index
+            for index, term in enumerate(concepts)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            outcomes[futures[future]] = future.result()
+    return outcomes
+
+
+def _research_prior_art_reference_facets_for_concepts(
+    indexed_concepts: list[tuple[int, str]],
+    reference_context: Mapping[str, Any],
+) -> dict[int, dict[str, Any]]:
+    parallelism = reference._reference_parallelism(len(indexed_concepts))
+    if parallelism <= 1:
+        return {
+            index: _research_prior_art_reference_facets_safely(term, reference_context)
+            for index, term in indexed_concepts
+        }
+
+    outcomes: dict[int, dict[str, Any]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+        futures = {
+            executor.submit(_research_prior_art_reference_facets_safely, term, reference_context): index
+            for index, term in indexed_concepts
+        }
+        for future in concurrent.futures.as_completed(futures):
+            outcomes[futures[future]] = future.result()
+    return outcomes
+
+
+def _lookup_prior_art_reference_facets_safely(
+    term: str,
+    reference_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        return _lookup_prior_art_reference_facets(term, reference_context)
+    except Exception as exc:
+        return _failed_prior_art_reference_facets(term, _format_prior_art_reference_error(exc))
+
+
+def _research_prior_art_reference_facets_safely(
+    term: str,
+    reference_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        expanded = reference.expand(term, reference_context)
+        term_facets = _lookup_prior_art_reference_facets(term, reference_context)
+        if not term_facets["design"]:
+            term_facets["design"] = _trim_expanded_reference_candidates(expanded, "design")
+        if not term_facets["implementation"]:
+            term_facets["implementation"] = _trim_expanded_reference_candidates(expanded, "implementation")
+        return term_facets
+    except Exception as exc:
+        return _failed_prior_art_reference_facets(term, _format_prior_art_reference_error(exc))
+
+
+def _failed_prior_art_reference_facets(term: str, error: str) -> dict[str, Any]:
+    return {"term": term, "design": [], "implementation": [], "status": "failed", "error": error}
+
+
+def _format_prior_art_reference_error(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
 
 
 def _reference_stack_context(context: Mapping[str, Any] | None) -> dict[str, str]:
