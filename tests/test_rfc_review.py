@@ -15,28 +15,47 @@ RFC_BRANCH = f"ai-org/rfc/{RFC_ID}"
 
 def _rfc_view() -> dict[str, object]:
     return {
-        "title": "Manual RFC",
-        "problem": "The workflow needs real RFC review.",
-        "proposal": "Run five dimension reviewers and consolidate objections.",
-        "alternatives": ["Keep loading RFCs directly."],
-        "intended_users": "Contributors taking RFC work.",
-        "affected_area": "ai_org.rfc",
-        "impact": "RFC direction converges before patch work starts.",
-        "context": "Keep the target repo read-only during review.",
+        "raw_request": "Run real RFC review.",
+        "working_title": "Manual RFC",
+        "request_type": "feature",
+        "problem_or_motivation": "The workflow needs real RFC review.",
+        "intended_users_or_jobs": "Contributors taking RFC work.",
+        "desired_outcomes_success": "RFC direction converges before patch work starts.",
+        "affected_area_platform": "ai_org.rfc",
+        "tech_stack": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": "repo-native Python modules",
+            "language": "Python",
+            "platform": "CLI",
+            "rationale": "Use the repository's existing Python modules.",
+            "provenance": "requester_specified",
+        },
+        "background_facts": "The target repo is read-only during review.",
+        "constraints_assumptions": [],
+        "references": [],
+        "grounding_provenance": "Test fixture grounding.",
+        "open_questions": [],
+        "non_goals_out_of_scope": [],
+        "proposal_hint": "Run five dimension reviewers and consolidate objections.",
+        "alternatives_considered": ["Keep loading RFCs directly."],
     }
 
 
 def _revised_rfc(suffix: str = "") -> dict[str, object]:
-    return {
-        "title": f"Revised Manual RFC{suffix}",
-        "problem": f"The RFC review workflow needs structured convergence{suffix}.",
-        "proposal": f"Run five reviewers, then synthesize into a revised RFC{suffix}.",
-        "alternatives": [f"Skip consolidation and accept reviewer drift{suffix}."],
-        "intended_users": f"Contributors and maintainers{suffix}.",
-        "affected_area": "ai_org.rfc",
-        "impact": f"Review state stays schema-backed{suffix}.",
-        "context": f"Keep all codex calls read-only and schema-backed{suffix}.",
-    }
+    revised = _rfc_view()
+    revised.update(
+        {
+            "working_title": f"Revised Manual RFC{suffix}",
+            "problem_or_motivation": f"The RFC review workflow needs structured convergence{suffix}.",
+            "intended_users_or_jobs": f"Contributors and maintainers{suffix}.",
+            "desired_outcomes_success": f"Review state stays schema-backed{suffix}.",
+            "background_facts": f"Keep all codex calls read-only and schema-backed{suffix}.",
+            "proposal_hint": f"Run five reviewers, then synthesize into a revised RFC{suffix}.",
+            "alternatives_considered": [f"Skip consolidation and accept reviewer drift{suffix}."],
+        }
+    )
+    return revised
 
 
 def _aufheben_response(verdict: str, revised_rfc: dict[str, object], **extra) -> str:
@@ -178,8 +197,11 @@ def test_aufheben_proceed_revised_rfc_feeds_next_review_round(tmp_path, monkeypa
     for prompt in second_round_prompts:
         assert "Current structured revised RFC to re-critique" in prompt
         for field, value in revised.items():
-            if field == "alternatives":
-                assert value[0] in prompt
+            if isinstance(value, list):
+                for item in value:
+                    assert item in prompt
+            elif isinstance(value, dict):
+                assert json.dumps(value, sort_keys=True, ensure_ascii=True) in prompt
             else:
                 assert value in prompt
     assert result.history[0]["aufheben"]["verdict"] == "proceed"
@@ -343,7 +365,7 @@ def test_reviewers_use_read_only_sandbox_and_output_schema(tmp_path, monkeypatch
     assert "Revised Manual RFC current" in calls[0]["prompt"]
 
 
-def test_rfc_schemas_use_common_8_and_codex_valid_required_properties():
+def test_rfc_schemas_use_registry_and_codex_valid_required_properties():
     schema = review.AUFHEBEN_SCHEMA
     serialized = json.dumps(schema)
     assert "allOf" not in serialized
@@ -356,7 +378,10 @@ def test_rfc_schemas_use_common_8_and_codex_valid_required_properties():
     assert schema_rfc["additionalProperties"] is False
     assert tuple(schema_rfc["required"]) == review.RFC_VIEW_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
-    assert schema_rfc["properties"]["alternatives"]["type"] == "array"
+    assert schema_rfc["properties"]["tech_stack"]["type"] == "object"
+    assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
+        "content consumed downstream as product requirement nouns"
+    )
 
 
 def test_missing_rfc_on_rfc_branch_fail_closed_nak(tmp_path):

@@ -10,6 +10,35 @@ RFC_ID = "add-feature-file"
 RFC_BRANCH = f"ai-org/rfc/{RFC_ID}"
 
 
+def _rfc_view(title: str = "Add Feature File") -> dict[str, object]:
+    return {
+        "raw_request": f"{title}: create feature.txt with the implemented marker.",
+        "working_title": title,
+        "request_type": "feature",
+        "problem_or_motivation": "The repo lacks a feature marker.",
+        "intended_users_or_jobs": "Repository contributors need a visible implemented marker.",
+        "desired_outcomes_success": "A marker file appears on the contribution branch.",
+        "affected_area_platform": "feature.txt",
+        "tech_stack": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": "repo-native files",
+            "language": "text",
+            "platform": "repository",
+            "rationale": "Use the existing repository file layout.",
+            "provenance": "requester_specified",
+        },
+        "background_facts": "Keep the change focused.",
+        "constraints_assumptions": [],
+        "references": [],
+        "grounding_provenance": "Test fixture grounding.",
+        "open_questions": [],
+        "non_goals_out_of_scope": [],
+        "proposal_hint": "Create feature.txt with the implemented marker.",
+        "alternatives_considered": ["Leave the repo without a feature marker."],
+    }
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -35,16 +64,7 @@ def _repo(tmp_path: Path, rfc_id: str = RFC_ID, title: str = "Add Feature File")
     _git(repo, "checkout", "-B", rfc_branch, "main")
     (repo / "rfc.json").write_text(
         json.dumps(
-            {
-                "title": title,
-                "problem": "The repo lacks a feature marker.",
-                "proposal": "Create feature.txt with the implemented marker.",
-                "alternatives": ["Leave the repo without a feature marker."],
-                "intended_users": "Repository contributors.",
-                "affected_area": "feature.txt",
-                "impact": "A marker file appears on the contribution branch.",
-                "context": "Keep the change focused.",
-            }
+            _rfc_view(title)
         ),
         encoding="utf-8",
     )
@@ -82,9 +102,9 @@ def test_run_reads_rfc_branch_lets_codex_edit_worktree_and_commits_branch(tmp_pa
     assert len(codex_calls) == 1
     assert codex_calls[0][:6] == ["codex", "exec", "--sandbox", "workspace-write", "-C", codex_calls[0][5]]
     assert codex_calls[0][6] == "-o"
-    assert "title:\nAdd Feature File" in codex_calls[0][-1]
-    assert "proposal:\nCreate feature.txt with the implemented marker." in codex_calls[0][-1]
-    assert "alternatives:\n- Leave the repo without a feature marker." in codex_calls[0][-1]
+    assert "working_title:\nAdd Feature File" in codex_calls[0][-1]
+    assert "proposal_hint:\nCreate feature.txt with the implemented marker." in codex_calls[0][-1]
+    assert "alternatives_considered:\n- Leave the repo without a feature marker." in codex_calls[0][-1]
 
 
 def test_run_uses_stable_rfc_id_for_contribution_branch_not_refined_title(tmp_path, monkeypatch):
@@ -143,6 +163,13 @@ def test_run_excludes_pycache_and_pyc_files_from_commit(tmp_path, monkeypatch):
     assert "pkg/__pycache__/mod.cpython-312.pyc" not in tree_files
     assert "root.pyc" not in tree_files
     assert not any(path.endswith(".pyc") or "__pycache__/" in path for path in tree_files)
+
+
+def test_patch_handoff_check_accepts_registry_and_rejects_missing_required_field():
+    rfc = _rfc_view()
+    assert implement._is_common_8(rfc) is True
+    rfc.pop("grounding_provenance")
+    assert implement._is_common_8(rfc) is False
 
 
 def test_run_fail_closed_when_rfc_missing_on_rfc_branch(tmp_path):

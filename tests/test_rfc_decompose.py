@@ -50,8 +50,9 @@ def test_too_big_rfc_decomposes_into_topology_and_semantic_notes(tmp_path, monke
     behavior_branch = "ai-org/rfc/big-feature-behavior-ui"
     docs_branch = "ai-org/rfc/big-feature-docs-help"
     prep = json.loads(_git(repo, "show", f"{prep_branch}:rfc.json"))
-    assert prep["title"] == "Prep API"
+    assert prep["working_title"] == "Prep API"
     assert set(prep) == set(decompose_module.RFC_FIELDS)
+    assert prep["tech_stack"]["framework"] == "repo-native Python modules"
 
     assert git_wrapper.is_ancestor(repo, prep_branch, behavior_branch) is True
     assert git_wrapper.is_ancestor(repo, prep_branch, docs_branch) is False
@@ -164,14 +165,30 @@ def _write_rfc_branch(repo: Path, branch: str, rfc: dict[str, object]) -> None:
 
 def _rfc(title: str, problem: str) -> dict[str, object]:
     return {
-        "title": title,
-        "problem": problem,
-        "proposal": f"Implement {title}.",
-        "alternatives": ["Keep the current behavior."],
-        "intended_users": "Contributors.",
-        "affected_area": "ai_org.rfc",
-        "impact": "The RFC phase can hand off clearer work.",
-        "context": "Test RFC.",
+        "raw_request": f"{title}: {problem}",
+        "working_title": title,
+        "request_type": "feature",
+        "problem_or_motivation": problem,
+        "intended_users_or_jobs": "Contributors need right-sized RFC work.",
+        "desired_outcomes_success": f"{title} can be implemented as a coherent child RFC.",
+        "affected_area_platform": "ai_org.rfc",
+        "tech_stack": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": "repo-native Python modules",
+            "language": "Python",
+            "platform": "CLI",
+            "rationale": "Use the repository's existing Python modules.",
+            "provenance": "requester_specified",
+        },
+        "background_facts": "Test RFC.",
+        "constraints_assumptions": [],
+        "references": [],
+        "grounding_provenance": "Test fixture grounding.",
+        "open_questions": [],
+        "non_goals_out_of_scope": [],
+        "proposal_hint": f"Implement {title}.",
+        "alternatives_considered": ["Keep the current behavior."],
     }
 
 
@@ -193,6 +210,15 @@ def _child(
     order: int,
 ) -> dict[str, object]:
     data = _rfc(title, f"{title} is needed as a coherent child RFC.")
+    data["tech_stack"] = {
+        "build_strategy": "framework_based",
+        "engine": "",
+        "framework": "",
+        "language": "",
+        "platform": "",
+        "rationale": "Inherit the parent stack unless this child overrides it.",
+        "provenance": "unspecified",
+    }
     data.update(
         {
             "id": child_id,

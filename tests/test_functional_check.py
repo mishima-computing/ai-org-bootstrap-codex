@@ -27,14 +27,30 @@ def _repo(tmp_path: Path) -> Path:
     (repo / "rfc.json").write_text(
         json.dumps(
             {
-                "title": "Playable feature",
-                "problem": "A real user needs to reach the feature.",
-                "proposal": "Expose the feature through app.py.",
-                "alternatives": ["Leave app.py without a reachable feature."],
-                "intended_users": "Application users.",
-                "affected_area": "app.py",
-                "impact": "Users can reach the feature.",
-                "context": "Acceptance checks reachability.",
+                "raw_request": "Expose the playable feature through app.py.",
+                "working_title": "Playable feature",
+                "request_type": "feature",
+                "problem_or_motivation": "A real user needs to reach the feature.",
+                "intended_users_or_jobs": "Application users need reachable behavior.",
+                "desired_outcomes_success": "Users can reach the feature.",
+                "affected_area_platform": "app.py",
+                "tech_stack": {
+                    "build_strategy": "framework_based",
+                    "engine": "",
+                    "framework": "repo-native Python files",
+                    "language": "Python",
+                    "platform": "CLI",
+                    "rationale": "Use the repository's existing Python file layout.",
+                    "provenance": "requester_specified",
+                },
+                "background_facts": "Acceptance checks reachability.",
+                "constraints_assumptions": [],
+                "references": [],
+                "grounding_provenance": "Test fixture grounding.",
+                "open_questions": [],
+                "non_goals_out_of_scope": [],
+                "proposal_hint": "Expose the feature through app.py.",
+                "alternatives_considered": ["Leave app.py without a reachable feature."],
             }
         )
         + "\n",

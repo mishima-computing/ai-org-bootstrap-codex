@@ -185,6 +185,52 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     ]
 
 
+def test_tech_stack_provenance_controls_candidate_generation(monkeypatch, tmp_path):
+    rfc = _rfc_view()
+    rfc["tech_stack"] = {
+        **rfc["tech_stack"],
+        "rationale": "The requester specified the repository-native Python stack.",
+        "provenance": "requester_specified",
+    }
+    calls = []
+
+    monkeypatch.setattr(receive_module, "_normalize_problem", lambda *args, **kwargs: _normalized_problem())
+    monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", lambda *args, **kwargs: {"processed_terms": []})
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
+    monkeypatch.setattr(
+        receive_module,
+        "_generate_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("requester stack should skip candidates")),
+    )
+    monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
+    monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: {"risks": []})
+
+    def fake_select(candidates, evaluations, constraints, context=None, accumulated_approach=None):
+        calls.append((candidates, evaluations))
+        return _decision()
+
+    monkeypatch.setattr(receive_module, "_select_approach", fake_select)
+
+    result = receive_module.form_technical_approach(rfc, tmp_path)
+
+    assert result["ok"] is True
+    assert "provided_approach" in result["steps"]
+    assert calls == []
+
+
+def test_unspecified_tech_stack_is_ai_deliberated_after_generated_selection(monkeypatch, tmp_path):
+    rfc = _rfc_view()
+    _patch_successful_approach_steps(monkeypatch)
+
+    result = receive_module.form_technical_approach(rfc, tmp_path, skip_reference_build=True, reference_terms=[])
+
+    assert result["ok"] is True
+    assert rfc["tech_stack"]["provenance"] == "ai_deliberated"
+    assert rfc["tech_stack"]["rationale"]
+
+
 def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypatch, tmp_path):
     _patch_successful_approach_steps(monkeypatch)
     ticks = iter(float(value) for value in range(100))
@@ -965,14 +1011,30 @@ def _assert_codex_valid_object_schema(schema: dict[str, object]) -> None:
 
 def _rfc_view() -> dict[str, object]:
     return {
-        "title": "Playable Battle Slice",
-        "problem": "Players need a first battle loop.",
-        "proposal": "Add a small battle loop with a named enemy and spell.",
-        "alternatives": ["Defer combat."],
-        "intended_users": "Players and game contributors.",
-        "affected_area": "gameplay",
-        "impact": "The first playable slice can be verified.",
-        "context": "Technical Approach formation.",
+        "raw_request": "Add a playable battle slice.",
+        "working_title": "Playable Battle Slice",
+        "request_type": "game_app",
+        "problem_or_motivation": "Players need a first battle loop.",
+        "intended_users_or_jobs": "Players and game contributors need a verifiable combat job.",
+        "desired_outcomes_success": "A named enemy can be defeated with a named spell and progress is recorded.",
+        "affected_area_platform": "gameplay",
+        "tech_stack": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": "repo-native game modules",
+            "language": "Python",
+            "platform": "CLI",
+            "rationale": "No stack was specified; candidate generation should choose a stack.",
+            "provenance": "unspecified",
+        },
+        "background_facts": "The first playable slice centers on a Slime and Spark spell.",
+        "constraints_assumptions": ["Keep the battle loop small enough for automated tests."],
+        "references": [],
+        "grounding_provenance": "Test fixture grounding.",
+        "open_questions": [],
+        "non_goals_out_of_scope": ["Do not add a full campaign."],
+        "proposal_hint": "Add a small battle loop with a named enemy and spell.",
+        "alternatives_considered": ["Defer combat."],
     }
 
 

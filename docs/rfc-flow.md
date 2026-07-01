@@ -2,18 +2,18 @@
 
 The RFC phase has two isolated responsibilities:
 
-- `receive.py` turns a raw common-8 request into a grounded RFC branch, or sends it back with a proposed interpretation and assumptions to confirm or correct.
+- `receive.py` accepts a raw request with only `raw_request` required, grounds it into the research-derived RFC field registry, or sends it back with a proposed interpretation and assumptions to confirm or correct.
 - `review.py` debates the direction of an already-formed `rfc.json` and commits `direction-ok` or `nak`.
 
 ```mermaid
 flowchart TD
-  REQ["REQUEST (common-8)<br/>title, problem, proposal, alternatives,<br/>intended_users, affected_area, impact, context"]
-  REQ -->|"intake(): receive() validates title + problem"| V{valid?}
+  REQ["REQUEST<br/>raw_request required"]
+  REQ -->|"intake(): receive() validates raw_request"| V{valid?}
   V -->|no| REJ["status: rejected<br/>error"]
   V -->|yes| GROUND["_ground_request in receive.py<br/>read-only codex + web_search<br/>research subject, genre, prior art, and repo"]
   GROUND --> S{confident?}
   S -->|no| CONFIRM["status: needs_confirmation<br/>proposed_rfc + assumptions<br/>confirm/correct<br/>questions[] only for uninferable gaps<br/>no RFC branch"]
-  S -->|yes| PROD["produce_rfc(): write grounded rfc.json<br/>on ai-org/rfc/&lt;id&gt;"]
+  S -->|yes| PROD["produce_rfc(): write grounded registry rfc.json<br/>on ai-org/rfc/&lt;id&gt;"]
 
   PROD --> RUN["run_rfc_review(repo, id)"]
   RUN --> READ["git read: rfc.json @ ai-org/rfc/&lt;id&gt;"]
@@ -47,6 +47,8 @@ flowchart TD
 
 - `intake(request, repo)` is the public entrance for raw requests. It returns `status: promoted`, `status: needs_confirmation`, or `status: rejected`.
 - Grounding belongs to intake because it forms the RFC. It may correct a wrong request, such as a mistaken genre reference, before a branch exists.
+- The RFC handoff shape is the in-code field registry: `raw_request`, `working_title`, `request_type`, `problem_or_motivation`, `intended_users_or_jobs`, `desired_outcomes_success`, `affected_area_platform`, `tech_stack`, `background_facts`, `constraints_assumptions`, `references`, `grounding_provenance`, `open_questions`, `non_goals_out_of_scope`, `proposal_hint`, and `alternatives_considered`.
+- Each registry field carries `role`, `belongs`, `must_not`, `owner`, and `required_at`. The `must_not` text is the anti-dumping gate: research audit trail belongs in `grounding_provenance`, bounded domain facts belong in `background_facts`, external pointers belong in `references`, and `context` is no longer an RFC intake field.
 - If grounding cannot confidently identify the intended subject or scope, intake still returns its best grounded guess as `proposed_rfc`, lists the `assumptions` behind that guess, and asks the requester to confirm or correct it. `questions` are only for gaps that research genuinely could not infer.
 - `review.py` assumes `rfc.json` is already grounded. It only runs the five-reviewer and Aufheben direction debate.
 - Codex output schemas remain codex-valid: no `allOf`, `anyOf`, or `oneOf`; `additionalProperties` is false; `required` lists every property.

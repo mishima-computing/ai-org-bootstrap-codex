@@ -19,9 +19,11 @@
 # the 5 processes inside the RFC (not in git) keeps the git state from exploding.
 #
 # Input/output field contract:
-#   entrance REQUEST (rough) carries the common-8 through-line fields:
-#       title, problem/motivation, proposal, alternatives, intended_users, affected_area, impact, context/links
-#   grounded RFC view = the common-8 after research, correction, and repository-context enrichment.
+#   entrance REQUEST (rough) requires only raw_request.
+#   grounded RFC view = the research-derived field registry after correction and repository-context enrichment.
+#   context was replaced by background_facts, references, and grounding_provenance. Every registry field carries
+#   role/belongs/must_not/owner/required_at descriptions; must_not is the anti-dumping boundary that keeps
+#   research prose out of requirement-bearing fields.
 #
 # Shape (to match the other stages): validate the request -> codex grounds it -> git-write the
 # promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
@@ -39,7 +41,7 @@
 #
 # produce_rfc now executes the flow after confident grounding: it synchronously builds DESIGN Reference facets,
 # starts IMPLEMENTATION Reference research in the background, forms the Technical Approach with the exact design
-# terms from the build, and commits that approach as technical-approach.json beside the common-8 rfc.json. Review
+# terms from the build, and commits that approach as technical-approach.json beside the registry-shaped rfc.json. Review
 # therefore receives a promoted RFC that already carries its Technical Approach.
 #
 # WHY DESIGN ② PRECEDES ③ (do not reorder): ③'s prior-art map READS the Reference. If design ② has not
@@ -123,34 +125,35 @@ from typing import Any, Mapping
 
 import ai_org.reference as reference
 import ai_org.rfc.codex_exec as codex_exec
+from ai_org.rfc.field_registry import (
+    ENTRANCE_REQUIRED_FIELDS,
+    FIELD_REGISTRY,
+    OPTIONAL_FIELDS,
+    RFC_HANDOFF_REQUIRED_FIELDS,
+    RFC_VIEW_FIELDS,
+    STRING_ARRAY_FIELDS,
+    STRING_FIELDS,
+    TECH_STACK_FIELDS,
+    entrance_defaults,
+    rfc_view_schema,
+    validate_tech_stack,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
-COMMON_8_FIELDS = (
-    "title",
-    "problem",
-    "proposal",
-    "alternatives",
-    "intended_users",
-    "affected_area",
-    "impact",
-    "context",
-)
-
-REQUIRED_FIELDS = ("title", "problem")
-OPTIONAL_FIELDS = ("proposal", "alternatives", "intended_users", "affected_area", "impact", "context")
-OPTIONAL_STRING_FIELDS = ("proposal", "intended_users", "affected_area", "impact", "context")
-OPTIONAL_LIST_FIELDS = ("alternatives",)
+COMMON_8_FIELDS = RFC_VIEW_FIELDS
+REQUIRED_FIELDS = ENTRANCE_REQUIRED_FIELDS
+OPTIONAL_STRING_FIELDS = STRING_FIELDS
+OPTIONAL_LIST_FIELDS = STRING_ARRAY_FIELDS
 
 REQUEST_SCHEMA: dict[str, Any] = {
-    "recognized_fields": list(COMMON_8_FIELDS),
+    "recognized_fields": list(RFC_VIEW_FIELDS),
+    "field_registry": {entry.name: entry.description for entry in FIELD_REGISTRY},
     "required": list(REQUIRED_FIELDS),
     "optional": list(OPTIONAL_FIELDS),
     "additional_properties": True,
 }
-
-RFC_VIEW_FIELDS = COMMON_8_FIELDS
 
 GROUNDING_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -159,21 +162,7 @@ GROUNDING_SCHEMA: dict[str, Any] = {
     "required": ["confident", "proposed_rfc", "assumptions", "questions", "grounding_notes"],
     "properties": {
         "confident": {"type": "boolean"},
-        "proposed_rfc": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": list(RFC_VIEW_FIELDS),
-            "properties": {
-                "title": {"type": "string"},
-                "problem": {"type": "string"},
-                "proposal": {"type": "string"},
-                "alternatives": {"type": "array", "items": {"type": "string"}},
-                "intended_users": {"type": "string"},
-                "affected_area": {"type": "string"},
-                "impact": {"type": "string"},
-                "context": {"type": "string"},
-            },
-        },
+        "proposed_rfc": rfc_view_schema(),
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "questions": {"type": "array", "items": {"type": "string"}},
         "grounding_notes": {"type": "string", "maxLength": 2000},
@@ -899,13 +888,22 @@ def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     else:
         raise TypeError("receive(source) expects a dict or a path to a JSON file.")
 
+    if "raw_request" not in data:
+        raw_request = _raw_request_from_legacy_entrance(data)
+        if raw_request:
+            data["raw_request"] = raw_request
+
     for field in REQUIRED_FIELDS:
         _required_string_field(data, field)
 
     for field in OPTIONAL_STRING_FIELDS:
-        _optional_string_field(data, field)
+        if field in data:
+            _optional_string_field(data, field)
     for field in OPTIONAL_LIST_FIELDS:
-        _optional_list_field(data, field)
+        if field in data:
+            _optional_list_field(data, field)
+    if "tech_stack" in data and not validate_tech_stack(data["tech_stack"], require_choice=False):
+        raise ValueError("Request field 'tech_stack' must contain the structured tech stack sub-tags.")
 
     return data
 
@@ -920,8 +918,8 @@ def intake(source: str | Path | Mapping[str, Any], repo: str | Path, rfc_path: s
 
 
 def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path: str = "rfc.json") -> dict[str, Any]:
-    """Ground and write a validated COMMON-8 request to git as ai-org/rfc/<id>:rfc.json."""
-    raw_rfc = _common_8(validated_request)
+    """Ground and write a validated registry request to git as ai-org/rfc/<id>:rfc.json."""
+    raw_rfc = _entrance_request(validated_request)
     repo_path = Path(repo).resolve()
     grounding = _ground_with_contract(repo_path, raw_rfc)
     if not grounding.confident:
@@ -958,7 +956,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
             "grounding_notes": grounding.grounding_notes,
         }
 
-    rfc_id = _slug(rfc["title"])
+    rfc_id = _slug(rfc["working_title"])
     branch = f"ai-org/rfc/{rfc_id}"
     base = _default_branch(repo_path)
     written = _write_rfc_branch(
@@ -968,7 +966,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
         rfc,
         rfc_path=rfc_path,
         extra_files={"technical-approach.json": approach["technical_approach"]},
-        commit_message=f"rfc: receive {rfc['title']}",
+        commit_message=f"rfc: receive {rfc['working_title']}",
     )
     return {
         "ok": True,
@@ -984,7 +982,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
 def _normalize_problem(rfc_view: dict[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Form step 1 of the documented 10-step Technical Approach procedure."""
     if not _is_rfc_view(rfc_view):
-        return _normalized_problem_error("normalize_problem requires a grounded common-8 RFC view")
+        return _normalized_problem_error("normalize_problem requires a grounded registry RFC view")
 
     repo = _repo_from_context(context)
     feedback: list[str] = []
@@ -1025,7 +1023,7 @@ def _extract_constraints(
     """Form step 2 of the documented 10-step Technical Approach procedure."""
     # Step 2 of 10: attach constraints to the accumulated approach before approach generation.
     if not _is_rfc_view(rfc_view):
-        return _constraints_error("extract_constraints requires a grounded common-8 RFC view")
+        return _constraints_error("extract_constraints requires a grounded registry RFC view")
 
     repo_path = Path(repo).resolve()
     accumulated_approach = _constraints_approach_context(approach)
@@ -1076,7 +1074,7 @@ def _build_prior_art_map(
     """Form step 3 of the documented 10-step Technical Approach procedure."""
     # Step 3 of 10: attach prior art to the accumulated approach before candidate generation.
     if not _is_rfc_view(rfc_view):
-        return _prior_art_error("build_prior_art_map requires a grounded common-8 RFC view")
+        return _prior_art_error("build_prior_art_map requires a grounded registry RFC view")
 
     repo_path = Path(repo).resolve()
     accumulated_approach = _prior_art_approach_context(approach)
@@ -1338,7 +1336,7 @@ def _implementation_strategy(
     if not all(isinstance(value, Mapping) for value in (chosen, prior_art_map, constraints)):
         return _implementation_strategy_error("implementation_strategy requires outputs from steps 2, 3, and 6")
     if not _is_rfc_view(rfc_view):
-        return _implementation_strategy_error("implementation_strategy requires a grounded common-8 RFC view")
+        return _implementation_strategy_error("implementation_strategy requires a grounded registry RFC view")
 
     repo_path = Path(repo).resolve()
     feedback: list[str] = []
@@ -1496,14 +1494,17 @@ def form_technical_approach(
     if not _is_rfc_view(rfc_view):
         return {
             "ok": False,
-            "error": "form_technical_approach requires a grounded common-8 RFC view",
+            "error": "form_technical_approach requires a grounded registry RFC view",
             "failed_step": "input",
         }
 
     repo_path = Path(repo).resolve()
     approach_context = _technical_approach_context(context, repo_path)
+    effective_provided_approach = provided_approach
+    if effective_provided_approach is None:
+        effective_provided_approach = _provided_approach_from_tech_stack(rfc_view)
     steps: dict[str, Any] = {}
-    step_order = _technical_approach_step_order(provided_approach)
+    step_order = _technical_approach_step_order(effective_provided_approach)
     steps_completed: list[dict[str, Any]] = []
 
     def start_step() -> float:
@@ -1560,7 +1561,7 @@ def form_technical_approach(
     partial_tree["problem"]["prior_art"] = _prior_art_tree_nodes(prior_art)
     mark_step_completed("build_prior_art_map", started_at, partial_tree)
 
-    if provided_approach is None:
+    if effective_provided_approach is None:
         started_at = start_step()
         candidates = _generate_candidates(
             normalized,
@@ -1610,16 +1611,17 @@ def form_technical_approach(
         )
         mark_step_completed("select_approach", started_at, partial_tree)
         source = "generated"
+        _fill_ai_deliberated_tech_stack(rfc_view, selected)
     else:
         started_at = start_step()
-        steps["provided_approach"] = _json_safe(provided_approach)
+        steps["provided_approach"] = _json_safe(effective_provided_approach)
         candidates = None
         evaluations = None
-        selected = _provided_approach_selection(provided_approach)
+        selected = _provided_approach_selection(effective_provided_approach)
         steps["select_approach"] = selected
         partial_tree["problem"]["question"] = _partial_question_tree(
             selected=selected,
-            provided_approach=provided_approach,
+            provided_approach=effective_provided_approach,
         )
         mark_step_completed("select_approach", started_at, partial_tree)
         source = "requester_provided_refined"
@@ -1643,7 +1645,7 @@ def form_technical_approach(
         evaluations=evaluations,
         selected=selected,
         implementation=implementation,
-        provided_approach=provided_approach,
+        provided_approach=effective_provided_approach,
     )
     mark_step_completed("implementation_strategy", started_at, partial_tree)
 
@@ -1665,7 +1667,7 @@ def form_technical_approach(
         selected=selected,
         implementation=implementation,
         patch_plan=patch_plan,
-        provided_approach=provided_approach,
+        provided_approach=effective_provided_approach,
     )
     mark_step_completed("right_size_patch_plan", started_at, partial_tree)
 
@@ -1699,7 +1701,7 @@ def form_technical_approach(
         patch_plan,
         risks,
         [],
-        provided_approach=provided_approach,
+        provided_approach=effective_provided_approach,
     )
     mark_step_completed("surface_risks", started_at, partial_tree)
 
@@ -1716,7 +1718,7 @@ def form_technical_approach(
             patch_plan,
             risks,
             source,
-            provided_approach=provided_approach,
+            provided_approach=effective_provided_approach,
             rfc_view=rfc_view,
         ),
         "steps": steps,
@@ -1809,6 +1811,7 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
             + "\n\n"
         )
 
+    registry_text = _field_registry_prompt()
     return (
         "You are the RFC intake grounding step for AI Org.\n"
         "Your job is to turn a rough, vague, or even wrong request into the right well-grounded RFC view "
@@ -1844,17 +1847,33 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "outdated incarnation when the latest sensible target is available.\n\n"
         "Always do the research and commit to the most-likely interpretation as proposed_rfc, even when the "
         "request is ambiguous or under-specified. Do not send back blank open questions instead of grounding. "
-        "If you are confident, set confident=true and make proposed_rfc the grounded common-8 RFC view that "
-        "should be promoted. If you are not fully confident, set confident=false and still return the best-guess "
-        "grounded common-8 proposed_rfc for requester confirmation: this is what I think you mean, right? "
+        "If you are confident, set confident=true and make proposed_rfc the grounded registry-shaped RFC view "
+        "that should be promoted. If you are not fully confident, set confident=false and still return the "
+        "best-guess grounded registry-shaped proposed_rfc for requester confirmation: this is what I think you "
+        "mean, right? "
         "List the specific inferences you made in assumptions, each phrased so the requester can confirm or "
         "correct it, such as 'I assumed X because <research>'. Reserve questions only for gaps that research "
         "genuinely cannot resolve after you have inferred the most likely interpretation; questions is usually "
         "empty. grounding_notes must briefly state what you researched, what you corrected, and cite web "
         "references when used.\n\n"
-        + _format_rfc("Current request common-8", _rfc_to_view(rfc_view))
+        "Fill proposed_rfc from this registry. Each field's must_not is an anti-dumping gate: content matching "
+        "must_not belongs elsewhere or nowhere. Research prose and audit trail go in grounding_provenance, not "
+        "requirement fields; bounded domain facts go in background_facts; requester solution ideas go in "
+        "proposal_hint; genuine blockers go in open_questions.\n\n"
+        f"{registry_text}\n"
+        + _format_rfc("Current request registry view", _rfc_to_view(rfc_view))
         + "\nReturn only JSON matching the provided schema."
     )
+
+
+def _field_registry_prompt() -> str:
+    lines = ["Field registry:"]
+    for entry in FIELD_REGISTRY:
+        lines.append(
+            f"- {entry.name}: role={entry.role}; belongs={entry.belongs}; must_not={entry.must_not}; "
+            f"owner={entry.owner}; required_at={entry.required_at}"
+        )
+    return "\n".join(lines)
 
 
 def _normalize_problem_prompt(
@@ -1873,7 +1892,7 @@ def _normalize_problem_prompt(
         )
     return (
         "You are forming step 1 of AI Org's 10-step Technical Approach procedure: normalize the problem.\n"
-        "Use the grounded common-8 RFC view and repository context only to restate the problem clearly. "
+        "Use the grounded registry RFC view and repository context only to restate the problem clearly. "
         "Do not propose an implementation approach, alternatives, patch plan, reviewer decision, or later "
         "Technical Approach steps.\n\n"
         "Write English only. Distill problem and current_inadequacy; do not copy any RFC field verbatim. "
@@ -1888,7 +1907,7 @@ def _normalize_problem_prompt(
         "name the end state that proves success; evidence must state what is observed or measured; method "
         "must be automated_test, manual_check, or metric; check must be the concrete verification performed.\n"
         "- non_goals: explicit boundaries that should remain out of scope for this RFC.\n\n"
-        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -1934,7 +1953,7 @@ def _extract_constraints_prompt(
         )
     return (
         "You are forming step 2 of AI Org's 10-step Technical Approach procedure: extract constraints.\n"
-        "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
+        "Inspect the repository read-only as needed from the configured repo root. Use the grounded rfc field registry "
         "RFC view, accumulated approach document, repository architecture, and supplied context to identify "
         "constraints only. Do not propose candidate approaches, select an approach, create a patch plan, or "
         "perform later Technical Approach steps.\n\n"
@@ -1965,7 +1984,7 @@ def _extract_constraints_prompt(
         "- delivery scope, non-goals, rollout boundaries, and documentation expectations.\n\n"
         "Return an empty list when no defensible items exist for a category; do not invent unsupported "
         "constraints.\n\n"
-        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nRepository root:\n{repo}\n"
@@ -1999,7 +2018,7 @@ def _prior_art_map_prompt(
         )
     return (
         "You are forming step 3 of AI Org's 10-step Technical Approach procedure: build a prior-art map.\n"
-        "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
+        "Inspect the repository read-only as needed from the configured repo root. Use the grounded rfc field registry "
         "RFC view, accumulated approach document, Reference design facets, Reference implementation facets, "
         "and repository context to synthesize 3 to 6 prior-art patterns. Do not generate candidate approaches, "
         "select an approach, create a patch plan, or perform later Technical Approach steps.\n\n"
@@ -2027,7 +2046,7 @@ def _prior_art_map_prompt(
         "- disposition: nested object with choice and why. choice must be adopt, adapt, or reject for this RFC.\n"
         "- traces_to: approach elements this pattern addresses, such as normalized_problem.success_criteria[0] "
         "or constraints.hard_constraints[0].\n\n"
-        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
         + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         + f"\nAccumulated approach so far:\n{approach_text}\n"
@@ -2068,6 +2087,9 @@ def _generate_candidate_prompt(
         "Use the accumulated approach tree containing the root goals, constraints, and prior-art ancestors, "
         "plus read-only repository inspection from the configured repo root. Do not select a winner, evaluate candidates, write an implementation strategy, "
         "create a patch plan, or perform later Technical Approach steps. Do not modify files.\n\n"
+        "If rfc.tech_stack.provenance is unspecified, engine/framework/platform selection is a first-class "
+        "candidate axis: compare available engines, frameworks, platform targets, and a from-scratch option "
+        "only when justified against those available options. Do not use from_scratch as a silent default.\n\n"
         f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates.\n\n"
         "For each candidate:\n"
         "- id: stable lowercase identifier using letters, numbers, underscores, or hyphens.\n"
@@ -2218,7 +2240,7 @@ def _implementation_strategy_prompt(
     return (
         "You are forming step 7 of AI Org's Technical Approach derivation tree: implementation strategy.\n"
         "Use the accumulated approach tree containing the root goals, constraints, prior-art, candidates, "
-        "evaluations, and selected decision, the grounded common-8 RFC view, and read-only repository inspection from the configured repo root. "
+        "evaluations, and selected decision, the grounded registry RFC view, and read-only repository inspection from the configured repo root. "
         "You may inspect module structure and tests to make the strategy concrete. Do not modify files.\n\n"
         "Expand only the chosen approach into an implementation strategy. Do not generate or re-evaluate "
         "alternatives, create a patch slice plan, surface risks and open questions, emit the final Technical "
@@ -2227,7 +2249,7 @@ def _implementation_strategy_prompt(
         "- systems: each system has system_name, behavior_in_game, named_content with entities and "
         "content_items, and key_modules. Tie named content and system behavior to specific root goals where natural.\n"
         "- persistence: saved_fields that must survive reload or handoff; name the field or state explicitly and align it with any success criterion that requires durable state.\n\n"
-        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
         + f"\nChosen approach:\n{chosen_text}\n"
         + f"\nPrior-art map:\n{prior_art_text}\n"
@@ -2348,7 +2370,7 @@ def _prior_art_key_concepts(
         _extend_concepts(concepts, context_values.get(field))
 
     extraction_text = (
-        _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + "\nAccumulated approach:\n"
         + json.dumps(approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     )
@@ -2356,8 +2378,8 @@ def _prior_art_key_concepts(
     _extend_concepts(concepts, extracted)
 
     if not concepts:
-        _add_concept(concepts, rfc_view.get("title", ""))
-        _add_concept(concepts, rfc_view.get("affected_area", ""))
+        _add_concept(concepts, rfc_view.get("working_title", ""))
+        _add_concept(concepts, rfc_view.get("affected_area_platform", ""))
         _extend_concepts(concepts, _explicit_terms(_rfc_text(rfc_view)))
         if approach:
             _extend_concepts(concepts, _explicit_terms(json.dumps(approach, sort_keys=True, default=str)))
@@ -3615,6 +3637,43 @@ def _technical_approach_step_order(provided_approach: Any | None) -> list[str]:
     ]
 
 
+def _provided_approach_from_tech_stack(rfc_view: Mapping[str, Any]) -> dict[str, Any] | None:
+    tech_stack = rfc_view.get("tech_stack")
+    if not isinstance(tech_stack, Mapping):
+        return None
+    if tech_stack.get("provenance") != "requester_specified":
+        return None
+    return {
+        "source": "tech_stack",
+        "tech_stack": {field: tech_stack.get(field, "") for field in TECH_STACK_FIELDS},
+        "boundary": "Requester specified this stack; approach formation must depend on it and must not generate alternative engine/framework/platform candidates.",
+    }
+
+
+def _fill_ai_deliberated_tech_stack(rfc_view: dict[str, Any], selected: Mapping[str, Any]) -> None:
+    tech_stack = rfc_view.get("tech_stack")
+    if not isinstance(tech_stack, dict) or tech_stack.get("provenance") != "unspecified":
+        return
+    rationale = _selected_approach_rationale(selected)
+    tech_stack["provenance"] = "ai_deliberated"
+    tech_stack["rationale"] = (
+        rationale
+        or "No stack was specified by the requester; approach formation selected the build stack after comparing available engine/framework/platform candidates."
+    )
+
+
+def _selected_approach_rationale(selected: Mapping[str, Any]) -> str:
+    rationale = selected.get("rationale")
+    if not isinstance(rationale, Mapping):
+        return ""
+    parts: list[str] = []
+    for key in ("because", "under_constraints", "accepting_tradeoffs"):
+        value = rationale.get(key)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if str(item).strip())
+    return " ".join(parts)[:1000]
+
+
 def _next_technical_approach_step(step_order: list[str], completed_step: str) -> str | None:
     try:
         completed_index = step_order.index(completed_step)
@@ -4178,9 +4237,9 @@ def _run_grounding_verifier(
         "C4 latest_default: unless the request explicitly asked for retro, old, classic, vintage, or a specific past "
         "version/year, the RFC targets the latest/current version, conventions, and best practices of the named thing.\n"
         "Be strict. Return false for any check that is semantically violated, even if wording tries to hide it.\n\n"
-        + _format_rfc("Original request common-8", _rfc_to_view(request))
+        + _format_rfc("Original request registry view", _rfc_to_view(request))
         + "\n"
-        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\ngrounding_notes: {grounding_result.grounding_notes}\n"
         + "\nReturn only JSON matching the provided schema."
     )
@@ -4246,9 +4305,11 @@ def _grounding_text(rfc_view: dict[str, Any], grounding_result: GroundingResult)
     for field in RFC_VIEW_FIELDS:
         value = rfc_view[field]
         if isinstance(value, list):
-            parts.extend(value)
+            parts.extend(str(item) for item in value)
+        elif isinstance(value, dict):
+            parts.append(json.dumps(value, sort_keys=True, ensure_ascii=True))
         else:
-            parts.append(value)
+            parts.append(str(value))
     parts.append(grounding_result.grounding_notes)
     return f" {' '.join(parts).lower()} "
 
@@ -4285,7 +4346,7 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _grounding_fail_closed(rfc_view: dict[str, Any], reason: str) -> GroundingResult:
-    assumption = "I assumed the current common-8 request is the closest available interpretation because grounding failed before it could produce a researched proposal."
+    assumption = "I assumed the current registry-shaped request is the closest available interpretation because grounding failed before it could produce a researched proposal."
     question = "Can you confirm or correct the proposed RFC interpretation?"
     return GroundingResult(_rfc_to_view(rfc_view), reason[:2000], False, [assumption], [question])
 
@@ -4310,25 +4371,56 @@ def _optional_list_field(data: dict[str, Any], field: str) -> None:
         raise ValueError(f"Request field {field!r} must contain only strings.")
 
 
-def _common_8(data: Mapping[str, Any]) -> dict[str, Any]:
-    rfc = {field: data[field] for field in COMMON_8_FIELDS}
-    for field in REQUIRED_FIELDS + OPTIONAL_STRING_FIELDS:
-        if not isinstance(rfc[field], str):
-            raise ValueError(f"Request field {field!r} must be a string.")
-    alternatives = rfc["alternatives"]
-    if not isinstance(alternatives, list) or not all(isinstance(item, str) for item in alternatives):
-        raise ValueError("Request field 'alternatives' must be a list of strings.")
+def _raw_request_from_legacy_entrance(data: Mapping[str, Any]) -> str:
+    pieces = []
+    for field in ("title", "problem", "proposal"):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            pieces.append(value.strip())
+    return "\n".join(pieces)
+
+
+def _entrance_request(data: Mapping[str, Any]) -> dict[str, Any]:
+    rfc = entrance_defaults(data)
+    _required_string_field(rfc, "raw_request")
     return rfc
 
 
+def _registry_rfc(data: Mapping[str, Any]) -> dict[str, Any]:
+    if set(data) != set(RFC_VIEW_FIELDS):
+        missing = sorted(set(RFC_VIEW_FIELDS) - set(data))
+        extra = sorted(set(data) - set(RFC_VIEW_FIELDS))
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("extra " + ", ".join(extra))
+        suffix = ": " + "; ".join(detail) if detail else ""
+        raise ValueError(f"RFC handoff must contain exactly the registry fields{suffix}.")
+    for field in STRING_FIELDS:
+        if not isinstance(data[field], str):
+            raise ValueError(f"RFC field {field!r} must be a string.")
+    for field in STRING_ARRAY_FIELDS:
+        value = data[field]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"RFC field {field!r} must be a list of strings.")
+    if not validate_tech_stack(data["tech_stack"]):
+        raise ValueError("RFC field 'tech_stack' must contain valid structured sub-tags.")
+    for field in RFC_HANDOFF_REQUIRED_FIELDS:
+        value = data[field]
+        if isinstance(value, str) and not value.strip():
+            raise ValueError(f"RFC handoff field {field!r} is required and must be non-empty.")
+    return {field: data[field] for field in RFC_VIEW_FIELDS}
+
+
 def _is_rfc_view(value: object) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == set(RFC_VIEW_FIELDS)
-        and all(isinstance(value[field], str) for field in RFC_VIEW_FIELDS if field != "alternatives")
-        and isinstance(value["alternatives"], list)
-        and all(isinstance(item, str) for item in value["alternatives"])
-    )
+    if not isinstance(value, dict):
+        return False
+    try:
+        _registry_rfc(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _rfc_to_view(rfc_view: dict[str, Any]) -> dict[str, Any]:
@@ -4336,17 +4428,17 @@ def _rfc_to_view(rfc_view: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_rfc(label: str, view: dict[str, Any]) -> str:
-    return (
-        f"{label}:\n"
-        f"title: {view['title']}\n"
-        f"problem: {view['problem']}\n"
-        f"proposal: {view['proposal']}\n"
-        f"alternatives: {_format_alternatives(view['alternatives'])}\n"
-        f"intended_users: {view['intended_users']}\n"
-        f"affected_area: {view['affected_area']}\n"
-        f"impact: {view['impact']}\n"
-        f"context: {view['context']}\n"
-    )
+    lines = [f"{label}:"]
+    for field in RFC_VIEW_FIELDS:
+        value = view[field]
+        if isinstance(value, list):
+            rendered = _format_alternatives(value)
+        elif isinstance(value, dict):
+            rendered = json.dumps(value, sort_keys=True, ensure_ascii=True)
+        else:
+            rendered = str(value)
+        lines.append(f"{field}: {rendered}")
+    return "\n".join(lines) + "\n"
 
 
 def _format_alternatives(value: Any) -> str:
@@ -4370,7 +4462,7 @@ def _write_rfc_branch(
     extra_files: Mapping[str, Any] | None = None,
     commit_message: str | None = None,
 ) -> dict[str, str]:
-    rfc_view = _common_8(rfc)
+    rfc_view = _registry_rfc(rfc)
     original = _current_branch(repo)
     try:
         _git(repo, "checkout", "-B", branch, base)
@@ -4384,7 +4476,7 @@ def _write_rfc_branch(
             extra_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             add_paths.append(rel_path)
         _git(repo, "add", *add_paths)
-        _git(repo, "commit", "--allow-empty", "-m", commit_message or f"rfc: write {rfc_view['title']}")
+        _git(repo, "commit", "--allow-empty", "-m", commit_message or f"rfc: write {rfc_view['working_title']}")
         commit = _git(repo, "rev-parse", "HEAD").strip()
         return {"branch": branch, "commit": commit}
     finally:

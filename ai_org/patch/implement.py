@@ -11,17 +11,9 @@ import subprocess
 import tempfile
 from typing import Any
 
+from ai_org.rfc.field_registry import RFC_VIEW_FIELDS, STRING_ARRAY_FIELDS, STRING_FIELDS, validate_tech_stack
 
-RFC_FIELDS = (
-    "title",
-    "problem",
-    "proposal",
-    "alternatives",
-    "intended_users",
-    "affected_area",
-    "impact",
-    "context",
-)
+RFC_FIELDS = RFC_VIEW_FIELDS
 
 
 def run(
@@ -133,7 +125,7 @@ def run(
                 stdout=add.stdout,
             )
 
-        commit = _git_run(worktree, "commit", "-m", f"patch: {rfc_data['title']}")
+        commit = _git_run(worktree, "commit", "-m", f"patch: {rfc_data['working_title']}")
         if commit.returncode != 0:
             return _failure(
                 "git commit failed",
@@ -170,24 +162,13 @@ def _read_rfc_from_git(repo: Path, rfc_id_or_branch: str, rfc_path: str) -> dict
         return _failure(f"{rfc_path} at {rfc_branch} is not parseable JSON: {exc}")
 
     if not _is_common_8(data):
-        return _failure(f"{rfc_path} at {rfc_branch} must contain exactly the COMMON-8 fields")
+        return _failure(f"{rfc_path} at {rfc_branch} must contain exactly the RFC field registry fields")
 
     return {"ok": True, "rfc": {field: data[field] for field in RFC_FIELDS}}
 
 
 def _prompt(rfc: dict[str, Any]) -> str:
-    return (
-        "Implement the RFC in this repository.\n"
-        "Edit the working tree only. Do not commit.\n\n"
-        f"title:\n{rfc['title']}\n\n"
-        f"problem:\n{rfc['problem']}\n\n"
-        f"proposal:\n{rfc['proposal']}\n\n"
-        f"alternatives:\n{_format_alternatives(rfc['alternatives'])}\n\n"
-        f"intended_users:\n{rfc['intended_users']}\n\n"
-        f"affected_area:\n{rfc['affected_area']}\n\n"
-        f"impact:\n{rfc['impact']}\n\n"
-        f"context:\n{rfc['context']}\n"
-    )
+    return "Implement the RFC in this repository.\nEdit the working tree only. Do not commit.\n\n" + _format_rfc(rfc)
 
 
 def _rfc_id(rfc_id_or_branch: str) -> str:
@@ -211,10 +192,27 @@ def _is_common_8(value: object) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == set(RFC_FIELDS)
-        and all(isinstance(value[field], str) for field in RFC_FIELDS if field != "alternatives")
-        and isinstance(value["alternatives"], list)
-        and all(isinstance(item, str) for item in value["alternatives"])
+        and all(isinstance(value[field], str) for field in STRING_FIELDS)
+        and all(
+            isinstance(value[field], list) and all(isinstance(item, str) for item in value[field])
+            for field in STRING_ARRAY_FIELDS
+        )
+        and validate_tech_stack(value.get("tech_stack"))
     )
+
+
+def _format_rfc(rfc: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for field in RFC_FIELDS:
+        value = rfc[field]
+        if isinstance(value, list):
+            rendered = _format_alternatives(value)
+        elif isinstance(value, dict):
+            rendered = json.dumps(value, sort_keys=True, ensure_ascii=True)
+        else:
+            rendered = str(value)
+        lines.append(f"{field}:\n{rendered}")
+    return "\n\n".join(lines) + "\n"
 
 
 def _format_alternatives(value: Any) -> str:

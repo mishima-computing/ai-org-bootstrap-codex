@@ -39,7 +39,8 @@ flowchart LR
 |---|---|---|
 | `__init__.py` | 19 | rfc phase **pull** entry (re-exports `pull`). |
 | `__main__.py` | 15 | `python -m ai_org.rfc` → `pull`. |
-| `receive.py` | 388 | **intake + grounding**. Public: `receive` (validate common-8: title+problem required), `intake` (validate → `_ground_request` web-research/correct → `promoted` \| `needs_confirmation` \| `rejected`), `produce_rfc` (write grounded `rfc.json` to `ai-org/rfc/<id>`). Key helper: `_ground_request`. |
+| `field_registry.py` | 273 | **research-derived RFC field registry**. Single source of truth for RFC handoff fields, per-field `role`/`belongs`/`must_not`/`owner`/`required_at`, JSON schema generation, and `tech_stack` validation. |
+| `receive.py` | 4522 | **intake + grounding**. Public: `receive` (validate entrance: only `raw_request` required), `intake` (validate → `_ground_request` web-research/correct → `promoted` \| `needs_confirmation` \| `rejected`), `produce_rfc` (write grounded registry-shaped `rfc.json` to `ai-org/rfc/<id>`). Key helper: `_ground_request`. |
 | `review.py` | 484 | **direction debate** of an already-formed RFC. Public: `run_rfc_review` (5 reviewers NEED/APPROACH/COMPAT/SCOPE/MAINTENANCE + Aufheben loop, CAP=5 → `direction-ok` \| `nak`). Helpers: `_review_one`, `_aufheben_consolidate`. |
 
 ## patch/ — produce an implemented AND accepted contribution branch

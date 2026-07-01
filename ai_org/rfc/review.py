@@ -55,6 +55,16 @@ import tempfile
 from typing import Any
 from dataclasses import dataclass, field
 
+from ai_org.rfc.field_registry import (
+    FIELD_REGISTRY,
+    RFC_VIEW_FIELDS,
+    STRING_ARRAY_FIELDS,
+    STRING_FIELDS,
+    empty_value,
+    rfc_view_schema,
+    validate_tech_stack,
+)
+
 
 # --- the five review dimensions -------------------------------------------------------------
 @dataclass
@@ -91,17 +101,6 @@ OBJECTION_SCHEMA: dict[str, Any] = {
     },
 }
 
-RFC_VIEW_FIELDS = (
-    "title",
-    "problem",
-    "proposal",
-    "alternatives",
-    "intended_users",
-    "affected_area",
-    "impact",
-    "context",
-)
-
 AUFHEBEN_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -109,21 +108,7 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "revised_rfc", "situation_read", "escalation_reason"],
     "properties": {
         "verdict": {"enum": ["proceed", "escalate"]},
-        "revised_rfc": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": list(RFC_VIEW_FIELDS),
-            "properties": {
-                "title": {"type": "string"},
-                "problem": {"type": "string"},
-                "proposal": {"type": "string"},
-                "alternatives": {"type": "array", "items": {"type": "string"}},
-                "intended_users": {"type": "string"},
-                "affected_area": {"type": "string"},
-                "impact": {"type": "string"},
-                "context": {"type": "string"},
-            },
-        },
+        "revised_rfc": rfc_view_schema(),
         "situation_read": {"type": "string", "maxLength": 1000},
         "escalation_reason": {"type": "string"},
     },
@@ -229,17 +214,17 @@ def _rfc_to_view(rfc_view: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_rfc(label: str, view: dict[str, Any]) -> str:
-    return (
-        f"{label}:\n"
-        f"title: {view['title']}\n"
-        f"problem: {view['problem']}\n"
-        f"proposal: {view['proposal']}\n"
-        f"alternatives: {_format_alternatives(view['alternatives'])}\n"
-        f"intended_users: {view['intended_users']}\n"
-        f"affected_area: {view['affected_area']}\n"
-        f"impact: {view['impact']}\n"
-        f"context: {view['context']}\n"
-    )
+    lines = [f"{label}:"]
+    for field in RFC_VIEW_FIELDS:
+        value = view[field]
+        if isinstance(value, list):
+            rendered = _format_alternatives(value)
+        elif isinstance(value, dict):
+            rendered = json.dumps(value, sort_keys=True, ensure_ascii=True)
+        else:
+            rendered = str(value)
+        lines.append(f"{field}: {rendered}")
+    return "\n".join(lines) + "\n"
 
 
 def _aufheben_consolidate(
@@ -336,16 +321,19 @@ def _is_rfc_view(value: object) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == set(RFC_VIEW_FIELDS)
-        and all(isinstance(value[field], str) for field in RFC_VIEW_FIELDS if field != "alternatives")
-        and isinstance(value["alternatives"], list)
-        and all(isinstance(item, str) for item in value["alternatives"])
+        and all(isinstance(value[field], str) for field in STRING_FIELDS)
+        and all(
+            isinstance(value[field], list) and all(isinstance(item, str) for item in value[field])
+            for field in STRING_ARRAY_FIELDS
+        )
+        and validate_tech_stack(value.get("tech_stack"))
     )
 
 
 def _aufheben_fail_closed(reason: str) -> AufhebenDecision:
     return AufhebenDecision(
         verdict="escalate",
-        revised_rfc={field: ([] if field == "alternatives" else "") for field in RFC_VIEW_FIELDS},
+        revised_rfc={entry.name: empty_value(entry) for entry in FIELD_REGISTRY},
         situation_read=reason[:1000],
         escalation_reason=reason,
     )
@@ -381,7 +369,7 @@ def _read_rfc_from_git(repo: str | Path, rfc_id_or_branch: str, rfc_path: str) -
     except json.JSONDecodeError as exc:
         return None, f"{branch}:{rfc_path} is invalid JSON: {exc}"
     if not _is_rfc_view(parsed):
-        return None, f"{branch}:{rfc_path} must contain exactly the COMMON-8 fields"
+        return None, f"{branch}:{rfc_path} must contain exactly the RFC field registry fields"
     return _rfc_to_view(parsed), ""
 
 

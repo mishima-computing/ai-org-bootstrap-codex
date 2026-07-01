@@ -8,24 +8,15 @@ from typing import Any, Mapping
 
 from ai_org import git_wrapper
 import ai_org.rfc.codex_exec as codex_exec
-from ai_org.rfc.receive import COMMON_8_FIELDS
-from ai_org.rfc.receive import _is_rfc_view
-from ai_org.rfc.receive import _rfc_to_view
+from ai_org.rfc.field_registry import RFC_VIEW_FIELDS, STRING_ARRAY_FIELDS, STRING_FIELDS, rfc_view_schema, validate_tech_stack
 
 
-RFC_FIELDS = COMMON_8_FIELDS
+RFC_FIELDS = RFC_VIEW_FIELDS
 DEFAULT_MAX_DEPTH = 2
 
 CHILD_FIELDS = (
     "id",
-    "title",
-    "problem",
-    "proposal",
-    "alternatives",
-    "intended_users",
-    "affected_area",
-    "impact",
-    "context",
+    *RFC_FIELDS,
     "depends_on",
     "provides",
     "subsystem",
@@ -54,14 +45,7 @@ SPLIT_SCHEMA: dict[str, Any] = {
                 "required": list(CHILD_FIELDS),
                 "properties": {
                     "id": {"type": "string"},
-                    "title": {"type": "string"},
-                    "problem": {"type": "string"},
-                    "proposal": {"type": "string"},
-                    "alternatives": {"type": "array", "items": {"type": "string"}},
-                    "intended_users": {"type": "string"},
-                    "affected_area": {"type": "string"},
-                    "impact": {"type": "string"},
-                    "context": {"type": "string"},
+                    **rfc_view_schema()["properties"],
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                     "provides": {"type": "array", "items": {"type": "string"}},
                     "subsystem": {"type": "string"},
@@ -130,7 +114,7 @@ def _decompose_branch(
             "blocked_by_depth_guard": [_rfc_id(branch)],
         }
 
-    children = _normalize_children(_rfc_id(branch), result["children"])
+    children = _normalize_children(_rfc_id(branch), result["children"], rfc["rfc"])
     if not children:
         return {
             "ok": False,
@@ -159,7 +143,7 @@ def _decompose_branch(
             bases[0],
             {rfc_path: _rfc_view(child)},
             extra_parents=bases[1:],
-            commit_message=f"rfc: decompose child {child['title']}",
+            commit_message=f"rfc: decompose child {child['working_title']}",
         )
         git_wrapper.write_semantic(repo, child_branch, _semantic_labels(child))
         node = _node_payload(repo, child, child_branch, written["commit"])
@@ -266,12 +250,15 @@ def _parse_split(raw: str, branch: str) -> dict[str, Any]:
 def _child_error(value: object) -> str:
     if not isinstance(value, dict) or set(value) != set(CHILD_FIELDS):
         return "Codex decomposition returned child with invalid fields"
-    if not all(isinstance(value[field], str) for field in RFC_FIELDS if field != "alternatives"):
+    if not all(isinstance(value[field], str) for field in STRING_FIELDS):
         return "Codex decomposition returned child with invalid RFC string fields"
     if not isinstance(value["id"], str):
         return "Codex decomposition returned child with invalid id"
-    if not isinstance(value["alternatives"], list) or not all(isinstance(item, str) for item in value["alternatives"]):
-        return "Codex decomposition returned child with invalid alternatives"
+    for field in STRING_ARRAY_FIELDS:
+        if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
+            return f"Codex decomposition returned child with invalid {field}"
+    if not validate_tech_stack(value["tech_stack"]):
+        return "Codex decomposition returned child with invalid tech_stack"
     for field in ("depends_on", "provides"):
         if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
             return f"Codex decomposition returned child with invalid {field}"
@@ -282,15 +269,21 @@ def _child_error(value: object) -> str:
     return ""
 
 
-def _normalize_children(parent_id: str, children: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_children(
+    parent_id: str,
+    children: list[dict[str, Any]],
+    parent_rfc: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     used: set[str] = set()
     for child in sorted(children, key=lambda item: item["order"]):
         copy = dict(child)
-        local_id = _slug(copy["id"] or copy["title"])
+        local_id = _slug(copy["id"] or copy["working_title"])
         prefix = _slug(parent_id)
         base = local_id if local_id.startswith(prefix + "-") else _slug(f"{prefix}-{local_id}")
         copy["id"] = _unique_id(base, used)
+        if isinstance(copy.get("tech_stack"), dict) and copy["tech_stack"].get("provenance") == "unspecified":
+            copy["tech_stack"] = dict(parent_rfc["tech_stack"])
         normalized.append(copy)
     return normalized
 
@@ -416,7 +409,7 @@ def _node_payload(repo: Path, child: dict[str, Any], branch: str, commit: str) -
     return {
         "id": child["id"],
         "branch": branch,
-        "title": child["title"],
+        "title": child["working_title"],
         "commit": commit,
         **git_wrapper.read_semantic(repo, branch),
     }
@@ -446,8 +439,25 @@ def _read_rfc(repo: Path, branch: str, rfc_path: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         return {"ok": False, "error": f"{rfc_path} at {branch} is not parseable JSON: {exc}"}
     if not _is_rfc_view(parsed):
-        return {"ok": False, "error": f"{rfc_path} at {branch} must contain exactly the COMMON-8 fields"}
+        return {"ok": False, "error": f"{rfc_path} at {branch} must contain exactly the RFC field registry fields"}
     return {"ok": True, "rfc": _rfc_to_view(parsed)}
+
+
+def _is_rfc_view(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(RFC_FIELDS)
+        and all(isinstance(value[field], str) for field in STRING_FIELDS)
+        and all(
+            isinstance(value[field], list) and all(isinstance(item, str) for item in value[field])
+            for field in STRING_ARRAY_FIELDS
+        )
+        and validate_tech_stack(value.get("tech_stack"))
+    )
+
+
+def _rfc_to_view(rfc_view: dict[str, Any]) -> dict[str, Any]:
+    return {field: rfc_view[field] for field in RFC_FIELDS}
 
 
 def _rfc_view(child: Mapping[str, Any]) -> dict[str, Any]:
@@ -455,16 +465,17 @@ def _rfc_view(child: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _format_rfc(rfc: dict[str, Any]) -> str:
-    return (
-        f"title: {rfc['title']}\n"
-        f"problem: {rfc['problem']}\n"
-        f"proposal: {rfc['proposal']}\n"
-        f"alternatives: {_format_alternatives(rfc['alternatives'])}\n"
-        f"intended_users: {rfc['intended_users']}\n"
-        f"affected_area: {rfc['affected_area']}\n"
-        f"impact: {rfc['impact']}\n"
-        f"context: {rfc['context']}\n"
-    )
+    lines: list[str] = []
+    for field in RFC_FIELDS:
+        value = rfc[field]
+        if isinstance(value, list):
+            rendered = _format_alternatives(value)
+        elif isinstance(value, dict):
+            rendered = json.dumps(value, sort_keys=True, ensure_ascii=True)
+        else:
+            rendered = str(value)
+        lines.append(f"{field}: {rendered}")
+    return "\n".join(lines) + "\n"
 
 
 def _format_alternatives(value: Any) -> str:

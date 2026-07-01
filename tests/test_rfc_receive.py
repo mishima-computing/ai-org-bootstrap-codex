@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_org.patch.implement import _is_common_8 as _implement_is_common_8
+from ai_org.patch.implement import _is_common_8 as _implement_is_registry_rfc
 from ai_org.rfc import receive as receive_module
 from ai_org.rfc.receive import (
     COMMON_8_FIELDS,
@@ -20,34 +20,21 @@ from ai_org.rfc.receive import (
 )
 
 
-def test_receive_validates_full_common_8_request_from_dict():
+def test_receive_validates_raw_request_only_from_dict():
     request = {
-        "title": "Manual intake",
-        "problem": "Requests need a real entrance form.",
-        "proposal": "Validate common-8 data before RFC formation.",
-        "alternatives": ["Keep loading RFCs directly."],
-        "intended_users": "Contributors opening a request.",
-        "affected_area": "ai_org.rfc",
-        "impact": "RFC formation starts from request data.",
-        "context": "See the receive gate comments.",
+        "raw_request": "Make Dragon Quest.",
     }
 
     assert receive(request) == request
     assert tuple(REQUEST_SCHEMA["recognized_fields"]) == COMMON_8_FIELDS
-    assert REQUEST_SCHEMA["required"] == ["title", "problem"]
+    assert REQUEST_SCHEMA["required"] == ["raw_request"]
+    assert "grounding_provenance" in REQUEST_SCHEMA["field_registry"]
 
 
 def test_receive_validates_request_from_json_file(tmp_path):
     path = tmp_path / "request.json"
     request = {
-        "title": "JSON intake",
-        "problem": "The raw request is stored on disk.",
-        "proposal": "Load JSON into a validated request dict.",
-        "alternatives": [],
-        "intended_users": "Request authors.",
-        "affected_area": "receive",
-        "impact": "Callers get plain data.",
-        "context": "request.json",
+        "raw_request": "Load JSON into a validated request dict.",
     }
     path.write_text(
         json.dumps(request),
@@ -60,28 +47,37 @@ def test_receive_validates_request_from_json_file(tmp_path):
 @pytest.mark.parametrize(
     ("request_data", "missing_field"),
     [
-        ({"problem": "A title is required."}, "title"),
-        ({"title": "No problem"}, "problem"),
-        ({"title": "", "problem": "A title is required."}, "title"),
-        ({"title": "No problem", "problem": "   "}, "problem"),
+        ({}, "raw_request"),
+        ({"raw_request": ""}, "raw_request"),
+        ({"raw_request": "   "}, "raw_request"),
     ],
 )
-def test_receive_missing_title_or_problem_raises_clear_error(request_data, missing_field):
+def test_receive_missing_raw_request_raises_clear_error(request_data, missing_field):
     with pytest.raises(ValueError, match=f"{missing_field!r} is required"):
         receive(request_data)
 
 
-def test_receive_defaults_optional_fields_sanely():
-    assert receive({"title": "Minimal", "problem": "Required fields only."}) == {
+def test_receive_accepts_legacy_one_line_request_as_raw_request():
+    assert receive({"title": "Minimal"}) == {
         "title": "Minimal",
-        "problem": "Required fields only.",
-        "proposal": "",
-        "alternatives": [],
-        "intended_users": "",
-        "affected_area": "",
-        "impact": "",
-        "context": "",
+        "raw_request": "Minimal",
     }
+
+
+def test_rfc_handoff_requires_full_registry_shape():
+    complete = _rfc_view("Complete Handoff")
+    assert receive_module._is_rfc_view(complete) is True
+
+    missing = dict(complete)
+    missing.pop("grounding_provenance")
+    assert receive_module._is_rfc_view(missing) is False
+
+
+def test_tech_stack_structured_field_validates():
+    rfc = _rfc_view("Structured Stack")
+    assert receive_module._is_rfc_view(rfc) is True
+    rfc["tech_stack"] = {**rfc["tech_stack"], "build_strategy": "invalid"}
+    assert receive_module._is_rfc_view(rfc) is False
 
 
 def test_receive_preserves_extra_keys():
@@ -98,25 +94,23 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     repo = _init_repo(tmp_path)
     request = receive(
         {
-            "title": "Manual Intake",
-            "problem": "Requests need a real entrance form.",
-            "proposal": "Commit the validated COMMON-8 as rfc.json.",
-            "alternatives": ["Keep loading RFCs directly."],
-            "intended_users": "Contributors opening a request.",
-            "affected_area": "ai_org.rfc",
-            "impact": "RFC formation starts from request data.",
-            "context": "request.json",
+            "raw_request": "Manual Intake: commit the validated registry RFC as rfc.json.",
             "custom_priority": "high",
         }
     )
+    grounded = _rfc_view(
+        "Manual Intake",
+        raw_request=request["raw_request"],
+        proposal_hint="Commit the validated registry RFC as rfc.json.",
+    )
 
-    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(rfc, "identity"))
+    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(grounded, "identity"))
     approach_tree = _approach_tree()
     calls = []
 
     def fake_build_from_rfc(rfc_view, context=None, **kwargs):
         calls.append("build_from_rfc")
-        assert rfc_view == {field: request[field] for field in COMMON_8_FIELDS}
+        assert rfc_view == grounded
         assert kwargs == {"kinds": ("design",)}
         assert context["repo"] == repo.resolve()
         assert context["repo_root"] == repo.resolve()
@@ -158,8 +152,8 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
     assert _git(repo, "show", "main:README.md") == "base"
     produced = json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:rfc.json"))
-    assert produced == {field: request[field] for field in COMMON_8_FIELDS}
-    assert _implement_is_common_8(produced)
+    assert produced == grounded
+    assert _implement_is_registry_rfc(produced)
     assert "custom_priority" not in produced
     assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:technical-approach.json")) == approach_tree
     assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
@@ -169,21 +163,21 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
     repo = _init_repo(tmp_path)
     request = receive(
         {
-            "title": "Game Like Kumo",
-            "problem": "Make a maze arcade game like kumo.",
-            "proposal": "Build a spider labyrinth.",
+            "raw_request": "Make a maze arcade game like kumo. Build a spider labyrinth.",
         }
     )
-    grounded = {
-        "title": "Auto-Battle Party Dungeon RPG",
-        "problem": "A rough request for a game like kumo needs the correct auto-battle dungeon RPG grounding.",
-        "proposal": "Build an auto-battle party dungeon RPG loop with party setup, dungeon runs, loot, and progression.",
-        "alternatives": ["Build a maze arcade game, but that is the wrong genre for the reference."],
-        "intended_users": "Players who want idle party-building dungeon RPG play.",
-        "affected_area": "game",
-        "impact": "The RFC targets the correct genre and mechanics before implementation starts.",
-        "context": "Grounding corrected kumo from a maze arcade assumption to an auto-battle dungeon RPG reference.",
-    }
+    grounded = _rfc_view(
+        "Auto-Battle Party Dungeon RPG",
+        raw_request=request["raw_request"],
+        problem_or_motivation="A rough request for a game like kumo needs the correct auto-battle dungeon RPG grounding.",
+        intended_users_or_jobs="Players who want idle party-building dungeon RPG play.",
+        desired_outcomes_success="The game has party setup, dungeon runs, loot, and progression.",
+        affected_area_platform="game",
+        background_facts="Kumo is treated here as an auto-battle party dungeon RPG reference.",
+        grounding_provenance="Grounding corrected kumo from a maze arcade assumption to an auto-battle dungeon RPG reference.",
+        proposal_hint="Build an auto-battle party dungeon RPG loop with party setup, dungeon runs, loot, and progression.",
+        alternatives_considered=["Build a maze arcade game, but that is the wrong genre for the reference."],
+    )
     notes = "Found kumo is an auto-battle party dungeon RPG; corrected wrong maze-arcade framing."
 
     calls = []
@@ -234,20 +228,21 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
     repo = _init_repo(tmp_path)
     request = receive(
         {
-            "title": "Rough Game",
-            "problem": "Make it like that thing we discussed.",
+            "raw_request": "Make it like that thing we discussed.",
         }
     )
-    proposed_rfc = {
-        "title": "Conversation-Inferred Dungeon Automation Game",
-        "problem": "The requester likely wants the previously discussed automation game, but the exact reference is not fully recoverable from the request alone.",
-        "proposal": "Build a small dungeon automation loop with party setup, automated runs, rewards, and progression.",
-        "alternatives": ["Wait for a named reference before shaping the RFC."],
-        "intended_users": "Players who want a lightweight automated dungeon progression game.",
-        "affected_area": "game",
-        "impact": "The RFC gives the requester a concrete interpretation to confirm or correct before branch creation.",
-        "context": "Grounding inferred a likely game request from the available wording and repository game context.",
-    }
+    proposed_rfc = _rfc_view(
+        "Conversation-Inferred Dungeon Automation Game",
+        raw_request=request["raw_request"],
+        problem_or_motivation="The requester likely wants the previously discussed automation game, but the exact reference is not fully recoverable from the request alone.",
+        intended_users_or_jobs="Players who want a lightweight automated dungeon progression game.",
+        desired_outcomes_success="The requester can confirm or correct a concrete dungeon automation interpretation.",
+        affected_area_platform="game",
+        background_facts="The available wording points at a dungeon automation loop.",
+        grounding_provenance="Grounding inferred a likely game request from the available wording and repository game context.",
+        proposal_hint="Build a small dungeon automation loop with party setup, automated runs, rewards, and progression.",
+        alternatives_considered=["Wait for a named reference before shaping the RFC."],
+    )
     assumptions = [
         "I assumed 'that thing we discussed' refers to a dungeon automation game because the repository context points at game work and the request asks for a rough game.",
         "I assumed the first RFC should cover core loop and progression rather than art polish because the problem does not name a visual style.",
@@ -312,12 +307,11 @@ def test_produce_rfc_approach_failure_does_not_promote_hollow_rfc(tmp_path, monk
     repo = _init_repo(tmp_path)
     request = receive(
         {
-            "title": "Manual Intake",
-            "problem": "Requests need a real entrance form.",
-            "proposal": "Commit the validated COMMON-8 as rfc.json.",
+            "raw_request": "Manual Intake: commit the validated registry RFC as rfc.json.",
         }
     )
-    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(rfc, "identity"))
+    grounded = _rfc_view("Manual Intake", raw_request=request["raw_request"])
+    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(grounded, "identity"))
     monkeypatch.setattr(
         receive_module.reference,
         "build_from_rfc",
@@ -346,7 +340,7 @@ def test_produce_rfc_approach_failure_does_not_promote_hollow_rfc(tmp_path, monk
         "status": "needs_work",
         "error": "Could not select a coherent approach.",
         "failed_step": "select_approach",
-        "proposed_rfc": {field: request[field] for field in COMMON_8_FIELDS},
+        "proposed_rfc": grounded,
         "grounding_notes": "identity",
     }
     missing_branch = subprocess.run(
@@ -364,21 +358,20 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     repo = _init_repo(tmp_path)
     request = receive(
         {
-            "title": "Make Dragon Quest",
-            "problem": "Make Dragon Quest.",
-            "proposal": "Build Dragon Quest.",
+            "raw_request": "Make Dragon Quest. Build Dragon Quest.",
         }
     )
-    bad_grounding = {
-        "title": "Generic Dragon Quest-Style Retro RPG Demo",
-        "problem": "Build a generic RPG inspired by the 1986 Famicom Dragon Quest instead of the current Dragon Quest experience.",
-        "proposal": "Build a one town MVP prototype with a 10-minute vertical slice and short demo scope.",
-        "alternatives": ["Avoid trademark, copyright, IP, legal, licensing, and material usage risk."],
-        "intended_users": "Players seeking a generic classic RPG.",
-        "affected_area": "game",
-        "impact": "This shrinks the named request into a dated demo.",
-        "context": "Grounding chose retro Famicom constraints without a retro request.",
-    }
+    bad_grounding = _rfc_view(
+        "Generic Dragon Quest-Style Retro RPG Demo",
+        raw_request=request["raw_request"],
+        problem_or_motivation="Build a generic RPG inspired by the 1986 Famicom Dragon Quest instead of the current Dragon Quest experience.",
+        intended_users_or_jobs="Players seeking a generic classic RPG.",
+        desired_outcomes_success="A one town MVP prototype with a 10-minute vertical slice and short demo scope.",
+        affected_area_platform="game",
+        background_facts="This shrinks the named request into a dated demo.",
+        grounding_provenance="Grounding chose retro Famicom constraints without a retro request.",
+        alternatives_considered=["Avoid trademark, copyright, IP, legal, licensing, and material usage risk."],
+    )
     grounding_prompts = []
     verifier_calls = 0
 
@@ -421,7 +414,7 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     assert "branch" not in result
 
 
-def test_grounding_and_verifier_schemas_are_codex_valid_common_8():
+def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     for schema in (GROUNDING_SCHEMA, GROUNDING_VERDICT_SCHEMA):
         serialized = json.dumps(schema)
         assert "allOf" not in serialized
@@ -434,6 +427,10 @@ def test_grounding_and_verifier_schemas_are_codex_valid_common_8():
     assert schema_rfc["additionalProperties"] is False
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
+    assert schema_rfc["properties"]["tech_stack"]["required"] == list(receive_module.TECH_STACK_FIELDS)
+    assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
+        "content consumed downstream as product requirement nouns"
+    )
 
 
 def _init_repo(tmp_path: Path) -> Path:
@@ -447,6 +444,47 @@ def _init_repo(tmp_path: Path) -> Path:
     _git(repo, "commit", "-m", "base")
     _git(repo, "branch", "-M", "main")
     return repo
+
+
+def _rfc_view(
+    working_title: str,
+    *,
+    raw_request: str | None = None,
+    problem_or_motivation: str = "Requests need a grounded entrance form.",
+    intended_users_or_jobs: str = "Contributors opening a request.",
+    desired_outcomes_success: str = "RFC formation starts from grounded registry data.",
+    affected_area_platform: str = "ai_org.rfc",
+    background_facts: str = "The request targets the RFC receive flow.",
+    grounding_provenance: str = "Test fixture grounding.",
+    proposal_hint: str = "Commit the validated registry RFC as rfc.json.",
+    alternatives_considered: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "raw_request": raw_request or working_title,
+        "working_title": working_title,
+        "request_type": "feature",
+        "problem_or_motivation": problem_or_motivation,
+        "intended_users_or_jobs": intended_users_or_jobs,
+        "desired_outcomes_success": desired_outcomes_success,
+        "affected_area_platform": affected_area_platform,
+        "tech_stack": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": "repo-native Python modules",
+            "language": "Python",
+            "platform": "CLI",
+            "rationale": "Use the repository's existing Python modules.",
+            "provenance": "requester_specified",
+        },
+        "background_facts": background_facts,
+        "constraints_assumptions": [],
+        "references": [],
+        "grounding_provenance": grounding_provenance,
+        "open_questions": [],
+        "non_goals_out_of_scope": [],
+        "proposal_hint": proposal_hint,
+        "alternatives_considered": alternatives_considered or [],
+    }
 
 
 def _git(repo: Path, *args: str) -> str:
