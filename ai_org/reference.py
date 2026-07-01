@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any, Mapping
 
 
@@ -186,8 +187,23 @@ REFERENCE_TERMS_SCHEMA = {
 MAX_REFERENCE_TERMS = 30
 REFERENCE_MAX_PARALLEL = 6
 REFERENCE_SQLITE_BUSY_TIMEOUT_MS = 30000
+GH_SEARCH_WINDOW_SECONDS = 60.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        requested = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return requested if requested > 0 else default
+
+
+GH_SEARCH_PER_MIN = _env_int("AI_ORG_GH_SEARCH_PER_MIN", 28)
+GH_SEARCH_RETRY_BACKOFF_SECONDS = 2.0
 
 _REFERENCE_DB_WRITE_LOCK = threading.Lock()
+_GH_SEARCH_LOCK = threading.Lock()
+_GH_SEARCH_TIMESTAMPS: list[float] = []
 
 
 def lookup(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
@@ -528,7 +544,7 @@ def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> lis
             "--json",
             "fullName,url,description,primaryLanguage,stargazersCount",
         ]
-        raw_repos = _gh_json(cmd)
+        raw_repos = _gh_search_json(cmd)
         if not isinstance(raw_repos, list):
             continue
         for repo in raw_repos:
@@ -666,20 +682,85 @@ def _source_extensions(context: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _gh_json(cmd: list[str]) -> Any:
-    completed = _run_gh(cmd)
+    result, _retryable = _gh_json_once(cmd, rate_limit_search=False)
+    return result
+
+
+def _gh_search_json(cmd: list[str]) -> Any:
+    for attempt in range(2):
+        result, retryable = _gh_json_once(cmd, rate_limit_search=True)
+        if retryable and attempt == 0:
+            time.sleep(GH_SEARCH_RETRY_BACKOFF_SECONDS)
+            continue
+        return result
+    return []
+
+
+def _gh_json_once(cmd: list[str], *, rate_limit_search: bool) -> tuple[Any, bool]:
+    completed = _run_gh_limited(cmd, rate_limit_search=rate_limit_search)
     if completed is None:
-        return []
+        return [], False
     if completed.returncode != 0:
+        if _is_gh_search_rate_limit(completed):
+            return [], True
         fallback_cmd = _gh_json_field_fallback(cmd, completed.stderr or "")
         if fallback_cmd is None:
-            return []
-        completed = _run_gh(fallback_cmd)
+            return [], False
+        completed = _run_gh_limited(fallback_cmd, rate_limit_search=rate_limit_search)
         if completed is None or completed.returncode != 0:
-            return []
+            retryable = completed is not None and _is_gh_search_rate_limit(completed)
+            return [], retryable
     try:
-        return json.loads(completed.stdout or "[]")
+        return json.loads(completed.stdout or "[]"), False
     except json.JSONDecodeError:
-        return []
+        return [], False
+
+
+def _run_gh_limited(cmd: list[str], *, rate_limit_search: bool) -> subprocess.CompletedProcess[str] | None:
+    if rate_limit_search and _is_gh_search_command(cmd):
+        _acquire_gh_search_slot()
+    return _run_gh(cmd)
+
+
+def _is_gh_search_command(cmd: list[str]) -> bool:
+    return len(cmd) >= 3 and cmd[0] == "gh" and cmd[1] == "search" and cmd[2] in {"repos", "code"}
+
+
+def _acquire_gh_search_slot() -> None:
+    while True:
+        with _GH_SEARCH_LOCK:
+            now = time.monotonic()
+            cutoff = now - GH_SEARCH_WINDOW_SECONDS
+            while _GH_SEARCH_TIMESTAMPS and _GH_SEARCH_TIMESTAMPS[0] <= cutoff:
+                _GH_SEARCH_TIMESTAMPS.pop(0)
+
+            limit = _env_int("AI_ORG_GH_SEARCH_PER_MIN", GH_SEARCH_PER_MIN)
+            if len(_GH_SEARCH_TIMESTAMPS) < limit:
+                _GH_SEARCH_TIMESTAMPS.append(now)
+                return
+
+            sleep_for = _GH_SEARCH_TIMESTAMPS[0] + GH_SEARCH_WINDOW_SECONDS - now
+
+        time.sleep(max(sleep_for, 0.001))
+
+
+def _is_gh_search_rate_limit(completed: subprocess.CompletedProcess[str]) -> bool:
+    args = completed.args if isinstance(completed.args, list) else []
+    if not _is_gh_search_command(args):
+        return False
+    text = f"{completed.stderr or ''}\n{completed.stdout or ''}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "rate limit",
+            "secondary rate",
+            "too many requests",
+            "http 403",
+            "http 429",
+            "abuse detection",
+            "api rate limit exceeded",
+        )
+    )
 
 
 def _gh_json_field_fallback(cmd: list[str], stderr: str) -> list[str] | None:

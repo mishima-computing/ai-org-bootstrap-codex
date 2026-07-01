@@ -165,6 +165,92 @@ def test_search_repositories_continues_after_keyword_query_error(monkeypatch):
     assert repos[0]["fullName"] == "quality/Turn-Based-Combat"
 
 
+def test_github_search_rate_limiter_enforces_shared_rolling_window(monkeypatch):
+    now = 0.0
+    calls = []
+    sleeps = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def fake_run_gh(cmd):
+        calls.append((now, cmd))
+        stdout = json.dumps([{"fullName": f"example/repo-{len(calls)}"}])
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.delenv("AI_ORG_GH_SEARCH_PER_MIN", raising=False)
+    monkeypatch.setattr(reference, "_GH_SEARCH_TIMESTAMPS", [])
+    monkeypatch.setattr(reference.time, "monotonic", monotonic)
+    monkeypatch.setattr(reference.time, "sleep", sleep)
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    for index in range(reference.GH_SEARCH_PER_MIN + 1):
+        reference._gh_search_json(["gh", "search", "repos", f"query-{index}", "--limit", "1", "--json", "fullName"])
+
+    call_times = [called_at for called_at, _cmd in calls]
+    assert len(calls) == reference.GH_SEARCH_PER_MIN + 1
+    assert call_times[: reference.GH_SEARCH_PER_MIN] == [0.0] * reference.GH_SEARCH_PER_MIN
+    assert call_times[reference.GH_SEARCH_PER_MIN] >= reference.GH_SEARCH_WINDOW_SECONDS
+    assert sleeps == [reference.GH_SEARCH_WINDOW_SECONDS]
+    for window_start in call_times:
+        in_window = [
+            called_at
+            for called_at in call_times
+            if window_start <= called_at < window_start + reference.GH_SEARCH_WINDOW_SECONDS
+        ]
+        assert len(in_window) <= reference.GH_SEARCH_PER_MIN
+
+
+def test_search_repositories_backs_off_and_retries_rate_limited_search_once(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="HTTP 403: rate limit exceeded")
+        stdout = json.dumps([{"fullName": "quality/Turn-Based-Combat", "url": "https://github.com/quality/Turn-Based-Combat"}])
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(reference, "_GH_SEARCH_TIMESTAMPS", [])
+    monkeypatch.setattr(reference.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    repos = reference._search_repositories(["turn based combat system"], {"language": "JavaScript"})
+
+    assert len(calls) == 2
+    assert sleeps == [reference.GH_SEARCH_RETRY_BACKOFF_SECONDS]
+    assert repos[0]["fullName"] == "quality/Turn-Based-Combat"
+
+
+def test_plain_gh_api_reads_are_not_capped_by_search_rate_limiter(monkeypatch):
+    calls = []
+
+    def fake_run_gh(cmd):
+        calls.append(cmd)
+        stdout = json.dumps({"tree": [{"type": "blob", "path": "src/combat/health.py"}]})
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(reference, "_GH_SEARCH_TIMESTAMPS", [0.0] * reference.GH_SEARCH_PER_MIN)
+    monkeypatch.setattr(reference.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        reference.time,
+        "sleep",
+        lambda seconds: (_ for _ in ()).throw(AssertionError("plain gh api read was throttled")),
+    )
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    paths = reference._candidate_paths_for_repo("example/repo", "health", {"language": "Python"})
+
+    assert paths == ["src/combat/health.py"]
+    assert calls == [["gh", "api", "repos/example/repo/git/trees/HEAD?recursive=1"]]
+
+
 def test_fetch_candidates_reads_cross_language_files_and_records_actual_language(monkeypatch):
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["turn based combat system"])
     monkeypatch.setattr(
