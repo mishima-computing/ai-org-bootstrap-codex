@@ -2574,7 +2574,8 @@ def _snippet_from_gh_item(item: Mapping[str, Any]) -> str:
 
 
 def _json_for_prompt(value: Any) -> str:
-    return json.dumps(value, indent=2, sort_keys=True)
+    # default=str keeps prompt rendering robust to non-JSON values (e.g. Path) threaded via context.
+    return json.dumps(value, indent=2, sort_keys=True, default=str)
 
 
 def _unique(values: list[str]) -> list[str]:
