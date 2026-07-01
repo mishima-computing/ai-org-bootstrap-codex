@@ -913,6 +913,106 @@ def _surface_risks(
     return _parse_surface_risks(run["raw"])
 
 
+def form_technical_approach(
+    rfc_view: dict[str, Any],
+    repo: str | Path,
+    context: Mapping[str, Any] | None = None,
+    provided_approach: Any | None = None,
+) -> dict[str, Any]:
+    """Form step 10 of the documented 10-step Technical Approach procedure."""
+    # Step 10 of 10: the orchestrator + requester/AI-Org boundary.
+    if not _is_rfc_view(rfc_view):
+        return {
+            "ok": False,
+            "error": "form_technical_approach requires a grounded common-8 RFC view",
+            "failed_step": "input",
+        }
+
+    repo_path = Path(repo).resolve()
+    approach_context = _technical_approach_context(context, repo_path)
+    steps: dict[str, Any] = {}
+
+    normalized = _normalize_problem(rfc_view, approach_context)
+    failure = _technical_approach_step_failure("normalize_problem", normalized)
+    if failure:
+        return failure
+    steps["normalize_problem"] = normalized
+
+    constraints = _extract_constraints(rfc_view, repo_path, approach_context)
+    failure = _technical_approach_step_failure("extract_constraints", constraints)
+    if failure:
+        return failure
+    steps["extract_constraints"] = constraints
+
+    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, normalized)
+    failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
+    if failure:
+        return failure
+    steps["build_prior_art_map"] = prior_art
+
+    if provided_approach is None:
+        candidates = _generate_candidates(normalized, constraints, prior_art, approach_context)
+        failure = _technical_approach_step_failure("generate_candidates", candidates)
+        if failure:
+            return failure
+        steps["generate_candidates"] = candidates
+
+        evaluations = _evaluate_candidates(candidates, normalized, constraints, approach_context)
+        failure = _technical_approach_step_failure("evaluate_candidates", evaluations)
+        if failure:
+            return failure
+        steps["evaluate_candidates"] = evaluations
+
+        selected = _select_approach(candidates, evaluations, constraints, approach_context)
+        failure = _technical_approach_step_failure("select_approach", selected)
+        if failure:
+            return failure
+        steps["select_approach"] = selected
+        source = "generated"
+    else:
+        steps["provided_approach"] = _json_safe(provided_approach)
+        candidates = None
+        evaluations = None
+        selected = _provided_approach_selection(provided_approach)
+        steps["select_approach"] = selected
+        source = "requester_provided_refined"
+
+    implementation = _implementation_strategy(selected, prior_art, constraints, rfc_view, repo_path, approach_context)
+    failure = _technical_approach_step_failure("implementation_strategy", implementation)
+    if failure:
+        return failure
+    steps["implementation_strategy"] = implementation
+
+    patch_plan = _right_size_patch_plan(selected, implementation, constraints, approach_context)
+    failure = _technical_approach_step_failure("right_size_patch_plan", patch_plan)
+    if failure:
+        return failure
+    steps["right_size_patch_plan"] = patch_plan
+
+    risks = _surface_risks(selected, implementation, patch_plan, constraints, approach_context)
+    failure = _technical_approach_step_failure("surface_risks", risks)
+    if failure:
+        return failure
+    steps["surface_risks"] = risks
+
+    return {
+        "ok": True,
+        "technical_approach": _assemble_technical_approach(
+            selected,
+            candidates,
+            evaluations,
+            prior_art,
+            implementation,
+            patch_plan,
+            risks,
+            source,
+            provided_approach=provided_approach,
+            rfc_view=rfc_view,
+        ),
+        "steps": steps,
+    }
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -1955,6 +2055,191 @@ def _parse_surface_risks(raw: str) -> dict[str, Any]:
 
 def _surface_risks_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
+
+
+def _technical_approach_context(context: Mapping[str, Any] | None, repo: Path) -> dict[str, Any]:
+    approach_context = dict(context or {})
+    approach_context.setdefault("repo", repo)
+    approach_context.setdefault("repo_root", repo)
+    return approach_context
+
+
+def _technical_approach_step_failure(step: str, result: Any) -> dict[str, Any] | None:
+    if isinstance(result, Mapping) and result.get("ok") is False:
+        return {
+            "ok": False,
+            "error": str(result.get("error", f"{step} failed")),
+            "failed_step": step,
+        }
+    return None
+
+
+def _provided_approach_selection(provided_approach: Any) -> dict[str, Any]:
+    return {
+        "chosen": "Requester-provided Technical Approach",
+        "decision": (
+            "Use the requester-provided Technical Approach as the basis and refine it against Reference and "
+            "repository evidence."
+        ),
+        "accepted_tradeoffs": [
+            "Requester intent is preserved; refinement is limited to grounding, filling gaps, and surfacing risks."
+        ],
+        "rejected": [],
+        "requester_approach": _json_safe(provided_approach),
+    }
+
+
+def _assemble_technical_approach(
+    selected: Mapping[str, Any],
+    candidates: Mapping[str, Any] | None,
+    evaluations: Mapping[str, Any] | None,
+    prior_art: Mapping[str, Any],
+    implementation: Mapping[str, Any],
+    patch_plan: Mapping[str, Any],
+    risks: Mapping[str, Any],
+    source: str,
+    *,
+    provided_approach: Any | None = None,
+    rfc_view: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "chosen_approach": _chosen_approach(selected),
+        "alternatives_with_why_not": _alternatives_with_why_not(
+            selected,
+            candidates,
+            provided_approach=provided_approach,
+            rfc_view=rfc_view,
+        ),
+        "prior_art_rationale": dict(prior_art),
+        "trade_off_analysis": _trade_off_analysis(evaluations, selected),
+        "implementation_plan": _implementation_plan(implementation),
+        "compat_migration": implementation["migration_compat"],
+        "testing_plan": implementation["testing_plan"],
+        "scoped_patch_plan": dict(patch_plan),
+        "risks_open_questions": dict(risks),
+        "source": source,
+    }
+
+
+def _chosen_approach(selected: Mapping[str, Any]) -> dict[str, Any]:
+    chosen = {
+        "chosen": selected["chosen"],
+        "decision": selected["decision"],
+        "accepted_tradeoffs": list(selected["accepted_tradeoffs"]),
+        "rejected": [dict(item) for item in selected["rejected"]],
+    }
+    if "requester_approach" in selected:
+        chosen["requester_approach"] = _json_safe(selected["requester_approach"])
+    return chosen
+
+
+def _alternatives_with_why_not(
+    selected: Mapping[str, Any],
+    candidates: Mapping[str, Any] | None,
+    *,
+    provided_approach: Any | None = None,
+    rfc_view: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    rejected = selected.get("rejected", [])
+    candidate_map = _candidate_map(candidates)
+    alternatives: list[dict[str, Any]] = []
+    for item in rejected if isinstance(rejected, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_name = item.get("candidate_name")
+        if not isinstance(candidate_name, str):
+            continue
+        alternative: dict[str, Any] = {
+            "candidate_name": candidate_name,
+            "why_not": item.get("why_not", ""),
+        }
+        candidate = candidate_map.get(candidate_name)
+        if candidate:
+            alternative["candidate"] = dict(candidate)
+        alternatives.append(alternative)
+
+    if alternatives or provided_approach is None:
+        return alternatives
+
+    provided_alternatives = _provided_alternatives(provided_approach, rfc_view)
+    return [
+        {
+            "candidate_name": alternative,
+            "why_not": "Not selected by the requester-provided Technical Approach basis.",
+        }
+        for alternative in provided_alternatives
+    ]
+
+
+def _candidate_map(candidates: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
+    if not isinstance(candidates, Mapping):
+        return {}
+    candidate_items = candidates.get("candidates")
+    if not isinstance(candidate_items, list):
+        return {}
+    return {
+        candidate["name"]: candidate
+        for candidate in candidate_items
+        if isinstance(candidate, Mapping) and isinstance(candidate.get("name"), str)
+    }
+
+
+def _provided_alternatives(
+    provided_approach: Any,
+    rfc_view: Mapping[str, Any] | None = None,
+) -> list[str]:
+    alternatives: list[str] = []
+    if isinstance(provided_approach, Mapping):
+        value = provided_approach.get("alternatives_with_why_not") or provided_approach.get("alternatives")
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    alternatives.append(item)
+                elif isinstance(item, Mapping):
+                    name = item.get("candidate_name") or item.get("name") or item.get("alternative")
+                    if isinstance(name, str):
+                        alternatives.append(name)
+    if not alternatives and isinstance(rfc_view, Mapping):
+        rfc_alternatives = rfc_view.get("alternatives")
+        if isinstance(rfc_alternatives, list):
+            alternatives.extend(item for item in rfc_alternatives if isinstance(item, str))
+    return alternatives
+
+
+def _trade_off_analysis(
+    evaluations: Mapping[str, Any] | None,
+    selected: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "evaluations": list(evaluations.get("evaluations", [])) if isinstance(evaluations, Mapping) else [],
+        "accepted_tradeoffs": list(selected["accepted_tradeoffs"]),
+        "decision": selected["decision"],
+    }
+
+
+def _implementation_plan(implementation: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "main_changes": list(implementation["main_changes"]),
+        "affected_modules": list(implementation["affected_modules"]),
+        "data_api_config_changes": list(implementation["data_api_config_changes"]),
+        "observability": implementation["observability"],
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple | set):
+        return [_json_safe(item) for item in value]
+    try:
+        json.dumps(value, ensure_ascii=True)
+    except (TypeError, ValueError):
+        return str(value)
+    return value
 
 
 def _repo_from_context(context: Mapping[str, Any] | None = None) -> Path:

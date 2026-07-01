@@ -1056,6 +1056,240 @@ def test_surface_risks_schema_is_codex_valid():
     assert sorted(risk["required"]) == sorted(risk["properties"])
 
 
+def test_form_technical_approach_runs_full_generation_and_composes_section(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_normalize(rfc_view, context=None):
+        calls.append("normalize_problem")
+        assert rfc_view == _rfc_view()
+        assert context["repo"] == tmp_path.resolve()
+        return _normalized_problem()
+
+    def fake_constraints(rfc_view, repo, context=None):
+        calls.append("extract_constraints")
+        assert rfc_view == _rfc_view()
+        assert repo == tmp_path.resolve()
+        return _constraints()
+
+    def fake_prior_art(rfc_view, repo, context=None, normalized_problem=None):
+        calls.append("build_prior_art_map")
+        assert normalized_problem == _normalized_problem()
+        return _prior_art_map()
+
+    def fake_candidates(normalized_problem, constraints, prior_art_map, context=None):
+        calls.append("generate_candidates")
+        assert normalized_problem == _normalized_problem()
+        assert constraints == _constraints()
+        assert prior_art_map == _prior_art_map()
+        return _candidates()
+
+    def fake_evaluations(candidates, normalized_problem, constraints, context=None):
+        calls.append("evaluate_candidates")
+        assert candidates == _candidates()
+        return _evaluations()
+
+    def fake_selection(candidates, evaluations, constraints, context=None):
+        calls.append("select_approach")
+        assert candidates == _candidates()
+        assert evaluations == _evaluations()
+        return _chosen()
+
+    def fake_implementation(chosen, prior_art_map, constraints, rfc_view, repo, context=None):
+        calls.append("implementation_strategy")
+        assert chosen == _chosen()
+        assert prior_art_map == _prior_art_map()
+        assert repo == tmp_path.resolve()
+        return _implementation_strategy()
+
+    def fake_patch_plan(chosen, implementation_strategy, constraints, context=None):
+        calls.append("right_size_patch_plan")
+        assert chosen == _chosen()
+        assert implementation_strategy == _implementation_strategy()
+        return _patch_plan()
+
+    def fake_risks(chosen, implementation_strategy, patch_plan, constraints, context=None):
+        calls.append("surface_risks")
+        assert chosen == _chosen()
+        assert patch_plan == _patch_plan()
+        return _risks()
+
+    monkeypatch.setattr(receive_module, "_normalize_problem", fake_normalize)
+    monkeypatch.setattr(receive_module, "_extract_constraints", fake_constraints)
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", fake_prior_art)
+    monkeypatch.setattr(receive_module, "_generate_candidates", fake_candidates)
+    monkeypatch.setattr(receive_module, "_evaluate_candidates", fake_evaluations)
+    monkeypatch.setattr(receive_module, "_select_approach", fake_selection)
+    monkeypatch.setattr(receive_module, "_implementation_strategy", fake_implementation)
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", fake_patch_plan)
+    monkeypatch.setattr(receive_module, "_surface_risks", fake_risks)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+
+    assert result["ok"] is True
+    assert calls == [
+        "normalize_problem",
+        "extract_constraints",
+        "build_prior_art_map",
+        "generate_candidates",
+        "evaluate_candidates",
+        "select_approach",
+        "implementation_strategy",
+        "right_size_patch_plan",
+        "surface_risks",
+    ]
+    assert result["steps"] == {
+        "normalize_problem": _normalized_problem(),
+        "extract_constraints": _constraints(),
+        "build_prior_art_map": _prior_art_map(),
+        "generate_candidates": _candidates(),
+        "evaluate_candidates": _evaluations(),
+        "select_approach": _chosen(),
+        "implementation_strategy": _implementation_strategy(),
+        "right_size_patch_plan": _patch_plan(),
+        "surface_risks": _risks(),
+    }
+
+    technical_approach = result["technical_approach"]
+    assert technical_approach["source"] == "generated"
+    assert technical_approach["chosen_approach"] == _chosen()
+    assert technical_approach["alternatives_with_why_not"] == [
+        {
+            "candidate_name": "Minimal",
+            "why_not": "The matrix shows weaker problem fit.",
+            "candidate": _candidate("Minimal", "minimal_local"),
+        }
+    ]
+    assert technical_approach["prior_art_rationale"] == _prior_art_map()
+    assert technical_approach["trade_off_analysis"] == {
+        "evaluations": _evaluations()["evaluations"],
+        "accepted_tradeoffs": _chosen()["accepted_tradeoffs"],
+        "decision": _chosen()["decision"],
+    }
+    assert technical_approach["implementation_plan"] == {
+        "main_changes": _implementation_strategy()["main_changes"],
+        "affected_modules": _implementation_strategy()["affected_modules"],
+        "data_api_config_changes": _implementation_strategy()["data_api_config_changes"],
+        "observability": _implementation_strategy()["observability"],
+    }
+    assert technical_approach["compat_migration"] == _implementation_strategy()["migration_compat"]
+    assert technical_approach["testing_plan"] == _implementation_strategy()["testing_plan"]
+    assert technical_approach["scoped_patch_plan"] == _patch_plan()
+    assert technical_approach["risks_open_questions"] == _risks()
+
+
+def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkeypatch, tmp_path):
+    provided_approach = {
+        "chosen_approach": "Requester wants the repo-native helper path.",
+        "alternatives": ["Generate a fresh approach from candidates."],
+    }
+    calls = []
+
+    monkeypatch.setattr(
+        receive_module,
+        "_normalize_problem",
+        lambda rfc_view, context=None: calls.append("normalize_problem") or _normalized_problem(),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_extract_constraints",
+        lambda rfc_view, repo, context=None: calls.append("extract_constraints") or _constraints(),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_build_prior_art_map",
+        lambda rfc_view, repo, context=None, normalized_problem=None: calls.append("build_prior_art_map")
+        or _prior_art_map(),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_generate_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not full-generate")),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_evaluate_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not evaluate generated candidates")),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_select_approach",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not discard requester approach")),
+    )
+
+    def fake_implementation(chosen, prior_art_map, constraints, rfc_view, repo, context=None):
+        calls.append("implementation_strategy")
+        assert chosen["chosen"] == "Requester-provided Technical Approach"
+        assert chosen["requester_approach"] == provided_approach
+        return _implementation_strategy()
+
+    def fake_patch_plan(chosen, implementation_strategy, constraints, context=None):
+        calls.append("right_size_patch_plan")
+        assert chosen["requester_approach"] == provided_approach
+        return _patch_plan()
+
+    def fake_risks(chosen, implementation_strategy, patch_plan, constraints, context=None):
+        calls.append("surface_risks")
+        assert chosen["requester_approach"] == provided_approach
+        return _risks()
+
+    monkeypatch.setattr(receive_module, "_implementation_strategy", fake_implementation)
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", fake_patch_plan)
+    monkeypatch.setattr(receive_module, "_surface_risks", fake_risks)
+
+    result = receive_module.form_technical_approach(
+        _rfc_view(),
+        tmp_path,
+        provided_approach=provided_approach,
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        "normalize_problem",
+        "extract_constraints",
+        "build_prior_art_map",
+        "implementation_strategy",
+        "right_size_patch_plan",
+        "surface_risks",
+    ]
+    assert "generate_candidates" not in result["steps"]
+    assert "evaluate_candidates" not in result["steps"]
+    assert result["steps"]["provided_approach"] == provided_approach
+    assert result["technical_approach"]["source"] == "requester_provided_refined"
+    assert result["technical_approach"]["chosen_approach"]["requester_approach"] == provided_approach
+    assert result["technical_approach"]["alternatives_with_why_not"] == [
+        {
+            "candidate_name": "Generate a fresh approach from candidates.",
+            "why_not": "Not selected by the requester-provided Technical Approach basis.",
+        }
+    ]
+
+
+def test_form_technical_approach_fails_closed_when_a_step_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        receive_module,
+        "_normalize_problem",
+        lambda rfc_view, context=None: _normalized_problem(),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_extract_constraints",
+        lambda rfc_view, repo, context=None: {"ok": False, "error": "constraint extraction failed"},
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_build_prior_art_map",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should stop on first failed step")),
+    )
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+
+    assert result == {
+        "ok": False,
+        "error": "constraint extraction failed",
+        "failed_step": "extract_constraints",
+    }
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -1206,6 +1440,16 @@ def _patch_plan() -> dict[str, object]:
         "follow_up_slices": ["Wire step 9 into final approach emission after step 10 exists."],
         "deferred": [{"item": "Automated reviewer routing.", "why_safe_to_defer": "Not needed for step 9."}],
         "yagni_note": "Do not build final section emission in step 9.",
+    }
+
+
+def _risks() -> dict[str, object]:
+    return {
+        "assumptions": ["The existing RFC receive helper pattern remains the intended extension point."],
+        "risks": [{"risk": "Prompt ambiguity.", "mitigation": "Constrain the step boundary."}],
+        "open_questions": ["Should empty risk lists be allowed for trivial RFCs?"],
+        "spikes": ["Mock parser path."],
+        "reviewer_questions": ["Are these the right reviewer questions?"],
     }
 
 
