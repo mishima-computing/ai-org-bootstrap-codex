@@ -15,6 +15,34 @@ import pytest
 from ai_org import reference
 
 
+ORIGINAL_FETCH_DESIGN_CANDIDATES = reference.fetch_design_candidates
+
+
+@pytest.fixture(autouse=True)
+def default_no_design_lane(monkeypatch):
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: [])
+
+
+def _design_candidate(source_url="https://example.com/design", delta_claim="Use leases only if crash recovery matters."):
+    return {
+        "kind": "design",
+        "structure": "Components, responsibilities, boundaries, and flow are explicit.",
+        "rationale": "The boundary keeps operational failure handling out of domain logic.",
+        "when_to_use": "Use when the constraint appears in production.",
+        "when_not_to_use": "Do not use for trivial local-only flows.",
+        "tradeoffs": "Improves reliability while adding operational complexity.",
+        "alternatives": "A simpler design was rejected because failure recovery was ambiguous.",
+        "implementation_hooks": "Read implementation candidates for leases, retries, and idempotency.",
+        "quality_attributes": "Reliability, operability, and testability.",
+        "evidence": "Accepted ADR with production adoption evidence.",
+        "delta_claim": delta_claim,
+        "author_level": "unknown",
+        "source_url": source_url,
+        "found_via": "job queue architecture",
+        "lang_env_version": "general",
+    }
+
+
 def test_fetch_candidates_uses_derived_repo_search_not_literal_term(monkeypatch):
     calls = []
     literal = "hit points implementation"
@@ -464,6 +492,7 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
     assert read is not None
     assert set(read) == {"term", "candidates"}
     assert set(read["candidates"][0]) == {
+        "kind",
         "snippet",
         "summary",
         "pitfalls",
@@ -474,6 +503,192 @@ def test_expand_keeps_only_genuine_delta_and_distills_real_fields(monkeypatch, t
     assert "found_via" not in read["candidates"][0]
     assert reference._database_path().is_relative_to(tmp_path)
     assert not reference._database_path().is_relative_to(reference.REPO_ROOT)
+
+
+def test_expand_produces_implementation_and_design_candidates_from_separate_lanes(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference, "fetch_design_candidates", ORIGINAL_FETCH_DESIGN_CANDIDATES)
+    lane_calls = []
+
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic queue worker")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["job queue worker"])
+    monkeypatch.setattr(reference, "_codex_design_search_keywords", lambda term, context: ["job queue architecture"])
+    monkeypatch.setattr(
+        reference,
+        "_search_repositories",
+        lambda keywords, context: lane_calls.append(("implementation-search", keywords))
+        or [{"fullName": "example/worker", "url": "https://github.com/example/worker", "primaryLanguage": {"name": "Python"}, "found_via": keywords[0]}],
+    )
+    monkeypatch.setattr(
+        reference,
+        "_search_design_repositories",
+        lambda keywords, context: lane_calls.append(("design-search", keywords))
+        or [{"fullName": "example/adr", "url": "https://github.com/example/adr", "primaryLanguage": {"name": "Markdown"}, "found_via": keywords[0]}],
+    )
+    monkeypatch.setattr(reference, "_candidate_paths_for_repo", lambda repo, term, context: ["worker.py"])
+    monkeypatch.setattr(reference, "_design_paths_for_repo", lambda repo, term, context: ["docs/adr/001-queue.md"])
+    monkeypatch.setattr(reference, "_read_github_file", lambda repo, path: "source content")
+    monkeypatch.setattr(
+        reference,
+        "_codex_extract_pattern",
+        lambda term, context, repo, path, content: {
+            "relevant": True,
+            "snippet": "lease = claim_due_job(now); run_idempotently(lease)",
+            "summary": "Claims due jobs with a lease before running.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": "Renew leases or release them on failure.",
+        },
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_extract_design",
+        lambda term, context, source_url, content: {
+            "relevant": True,
+            "structure": "Queue, worker, lease owner, and retry scheduler have separate responsibilities and boundaries.",
+            "rationale": "A lease boundary prevents concurrent workers from committing the same job.",
+            "when_to_use": "Use when workers can crash after claiming work.",
+            "when_not_to_use": "Do not use when jobs are single-process and in-memory only.",
+            "tradeoffs": "Adds clock and lease-renewal complexity to gain crash recovery.",
+            "alternatives": "A simple pop was rejected because crashes lose in-flight work.",
+            "implementation_hooks": "Read implementation candidates for lease renewal and idempotency keys.",
+            "quality_attributes": "Reliability, operability, and bounded duplicate execution.",
+            "evidence": "Accepted ADR with production worker migration notes.",
+            "delta_claim": "Use leases only if crash recovery matters; otherwise a simple queue is cheaper.",
+            "lang_env_version": "general",
+        },
+    )
+    monkeypatch.setattr(reference, "_codex_design_web_sources", lambda keywords, context: [])
+    monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "lease claim is a real delta"})
+    monkeypatch.setattr(reference, "_codex_design_delta_inclusion", lambda term, context, candidate: {"keep": True, "reason": candidate["delta_claim"]})
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, delta_reason: {
+            "snippet": candidate["snippet"],
+            "summary": candidate["summary"],
+            "lang_env_version": candidate["lang_env_version"],
+            "pitfalls": candidate["pitfalls"],
+        },
+    )
+    monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "high", "reason": "clear leases"})
+    monkeypatch.setattr(reference, "_codex_design_competence", lambda term, context, candidate: {"keep": True, "author_level": "expert", "reason": "accepted ADR with migration evidence"})
+
+    entry = reference.expand("job queue worker", {"language": "Python", "version": "3.12"})
+
+    assert [call[0] for call in lane_calls] == ["implementation-search", "design-search"]
+    assert {candidate["kind"] for candidate in entry["candidates"]} == {"implementation", "design"}
+    implementation = [candidate for candidate in entry["candidates"] if candidate["kind"] == "implementation"][0]
+    design = [candidate for candidate in entry["candidates"] if candidate["kind"] == "design"][0]
+    assert "lease =" in implementation["snippet"]
+    assert "structure" in design
+    assert "snippet" not in design
+    assert design["delta_claim"].startswith("Use leases only if")
+    assert entry["search_keywords"] == ["job queue worker", "job queue architecture"]
+
+
+def test_design_delta_filter_keeps_only_non_obvious_design_lessons(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic design")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: [])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: [])
+    monkeypatch.setattr(
+        reference,
+        "fetch_design_candidates",
+        lambda term, context: [
+            _design_candidate(
+                source_url="https://example.com/basic-pattern",
+                delta_claim="Observer decouples senders and receivers.",
+            ),
+            _design_candidate(
+                source_url="https://example.com/rollout-adr",
+                delta_claim="Use the event log only if replay latency is bounded; otherwise keep a compact state table.",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_design_delta_inclusion",
+        lambda term, context, candidate: {
+            "keep": "only if" in candidate["delta_claim"],
+            "reason": candidate["delta_claim"] if "only if" in candidate["delta_claim"] else "GoF-basic",
+        },
+    )
+    monkeypatch.setattr(reference, "_codex_design_competence", lambda term, context, candidate: {"keep": True, "author_level": "expert", "reason": "specific production evidence"})
+
+    entry = reference.expand("event subscription design", {})
+
+    assert [candidate["source_url"] for candidate in entry["candidates"]] == ["https://example.com/rollout-adr"]
+    assert entry["candidates"][0]["kind"] == "design"
+    assert "only if replay latency" in entry["candidates"][0]["delta_claim"]
+
+
+def test_design_github_search_uses_shared_gh_rate_limited_queue(monkeypatch):
+    now = 0.0
+    sleeps = []
+    calls = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def fake_run_gh(cmd):
+        calls.append((now, cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(reference, "_GH_SEARCH_TIMESTAMPS", [0.0] * reference.GH_SEARCH_PER_MIN)
+    monkeypatch.setattr(reference, "_WEB_SEARCH_TIMESTAMPS", [])
+    monkeypatch.setattr(reference.time, "monotonic", monotonic)
+    monkeypatch.setattr(reference.time, "sleep", sleep)
+    monkeypatch.setattr(reference, "_run_gh", fake_run_gh)
+
+    reference._search_design_repositories(["job queue architecture"], {})
+
+    assert sleeps == [reference.GH_SEARCH_WINDOW_SECONDS]
+    assert calls[0][0] >= reference.GH_SEARCH_WINDOW_SECONDS
+    assert calls[0][1][:3] == ["gh", "search", "repos"]
+    assert reference._WEB_SEARCH_TIMESTAMPS == []
+
+
+def test_design_web_search_uses_separate_limiter_not_gh_queue(monkeypatch):
+    now = 0.0
+    sleeps = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def codex_json(prompt, schema, output_name):
+        assert schema == reference.DESIGN_SOURCE_SCHEMA
+        return {
+            "sources": [
+                {
+                    "title": "Queue ADR",
+                    "url": "https://example.com/queue-adr",
+                    "content": "Accepted ADR with migration evidence.",
+                    "status": "accepted",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(reference, "_GH_SEARCH_TIMESTAMPS", [0.0] * reference.GH_SEARCH_PER_MIN)
+    monkeypatch.setattr(reference, "_WEB_SEARCH_TIMESTAMPS", [0.0] * reference.WEB_SEARCH_PER_MIN)
+    monkeypatch.setattr(reference.time, "monotonic", monotonic)
+    monkeypatch.setattr(reference.time, "sleep", sleep)
+    monkeypatch.setattr(reference, "_codex_json", codex_json)
+
+    sources = reference._codex_design_web_sources(["job queue architecture"], {})
+
+    assert sleeps == [reference.WEB_SEARCH_WINDOW_SECONDS]
+    assert sources[0]["url"] == "https://example.com/queue-adr"
+    assert len(reference._GH_SEARCH_TIMESTAMPS) == reference.GH_SEARCH_PER_MIN
 
 
 def test_low_level_author_delta_is_stored_with_honest_note(monkeypatch, tmp_path):
@@ -728,6 +943,7 @@ def test_lookup_filters_by_applicability_and_returns_only_consumption_fields(mon
     assert len(entry["candidates"]) == 1
     assert entry["candidates"][0]["snippet"] == "setState(prev => prev + 1)"
     assert set(entry["candidates"][0]) == {
+        "kind",
         "snippet",
         "summary",
         "pitfalls",
@@ -913,6 +1129,80 @@ def test_query_filters_candidates_by_term_lang_author_and_keyword(monkeypatch, t
     assert results[0]["term"] == "state update"
     assert results[0]["snippet"] == "self.value += 1"
     assert results[0]["found_via"] == "python state update"
+
+
+def test_lookup_and_query_filter_by_kind_and_design_append_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["react state update", "state update architecture"],
+            "examined": [
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept", "found_via": "react state update"},
+                {"repo": "web/example.com", "language": "general", "outcome": "kept", "found_via": "state update architecture"},
+            ],
+            "candidates": [
+                {
+                    "kind": "implementation",
+                    "snippet": "setState(prev => prev + 1)",
+                    "summary": "Functional update.",
+                    "source_url": "https://github.com/example/react/blob/HEAD/state.jsx",
+                    "lang_env_version": "React 18 hooks",
+                    "author_level": "medium",
+                    "pitfalls": "Avoid stale closures.",
+                    "found_via": "react state update",
+                },
+                _design_candidate(
+                    source_url="https://example.com/state-architecture",
+                    delta_claim="Use local reducer state only if replay is unnecessary; otherwise persist events.",
+                )
+                | {"found_via": "state update architecture"},
+            ],
+            "notes": "",
+        }
+    )
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["state update architecture"],
+            "examined": [],
+            "candidates": [
+                _design_candidate(
+                    source_url="https://example.com/state-architecture",
+                    delta_claim="Changed text that must not overwrite the original design candidate.",
+                )
+                | {"found_via": "state update architecture", "rationale": "Changed rationale."},
+            ],
+            "notes": "",
+        }
+    )
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["state disappeared"],
+            "examined": [],
+            "candidates": [],
+            "notes": "nothing-fetched: no public repository candidates were fetched.",
+        }
+    )
+
+    design_lookup = reference.lookup("state update", kind="design")
+    implementation_lookup = reference.lookup("state update", {"language": "React", "environment": "hooks", "version": "18"}, kind="implementation")
+    design_query = reference.query({"term": "state update", "kind": "design", "keyword": "state update architecture"})
+    audit = reference.audit("state update")
+
+    assert design_lookup is not None
+    assert [candidate["kind"] for candidate in design_lookup["candidates"]] == ["design"]
+    assert "snippet" not in design_lookup["candidates"][0]
+    assert implementation_lookup is not None
+    assert [candidate["kind"] for candidate in implementation_lookup["candidates"]] == ["implementation"]
+    assert implementation_lookup["candidates"][0]["snippet"] == "setState(prev => prev + 1)"
+    assert len(design_query) == 1
+    assert design_query[0]["kind"] == "design"
+    assert "Changed text" not in design_query[0]["delta_claim"]
+    assert audit is not None
+    assert len(audit["candidates"]) == 2
+    assert [attempt["attempt"] for attempt in audit["research"]] == [1, 2, 3]
 
 
 def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch, tmp_path):
@@ -1103,8 +1393,12 @@ def test_reference_schemas_are_codex_valid():
     for schema in [
         reference.BASELINE_SCHEMA,
         reference.SEARCH_KEYWORDS_SCHEMA,
+        reference.DESIGN_SEARCH_KEYWORDS_SCHEMA,
         reference.EXTRACT_SCHEMA,
+        reference.DESIGN_SOURCE_SCHEMA,
+        reference.DESIGN_EXTRACT_SCHEMA,
         reference.DELTA_SCHEMA,
+        reference.DESIGN_COMPETENCE_SCHEMA,
         reference.DISTILL_SCHEMA,
         reference.AUTHOR_LEVEL_SCHEMA,
         reference.REFERENCE_TERMS_SCHEMA,

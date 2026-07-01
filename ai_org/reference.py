@@ -24,7 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STORE_PATH = Path("~/.ai-org/reference/reference.sqlite3")
 
 ENTRY_FIELDS = ("term", "search_keywords", "examined", "candidates", "notes")
-CANDIDATE_FIELDS = (
+IMPLEMENTATION_CANDIDATE_FIELDS = (
+    "kind",
     "snippet",
     "summary",
     "source_url",
@@ -33,6 +34,24 @@ CANDIDATE_FIELDS = (
     "pitfalls",
     "found_via",
 )
+DESIGN_CANDIDATE_FIELDS = (
+    "kind",
+    "structure",
+    "rationale",
+    "when_to_use",
+    "when_not_to_use",
+    "tradeoffs",
+    "alternatives",
+    "implementation_hooks",
+    "quality_attributes",
+    "evidence",
+    "delta_claim",
+    "author_level",
+    "source_url",
+    "found_via",
+    "lang_env_version",
+)
+CANDIDATE_KINDS = {"implementation", "design"}
 EXAMINED_FIELDS = ("repo", "language", "outcome", "found_via")
 EXAMINED_OUTCOMES = {
     "kept",
@@ -172,6 +191,18 @@ SEARCH_KEYWORDS_SCHEMA = {
     },
 }
 
+DESIGN_SEARCH_KEYWORDS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["keywords"],
+    "properties": {
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+}
+
 EXTRACT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -185,12 +216,78 @@ EXTRACT_SCHEMA = {
     },
 }
 
+DESIGN_SOURCE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["sources"],
+    "properties": {
+        "sources": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "url", "content", "status"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                    "content": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+DESIGN_EXTRACT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "relevant",
+        "structure",
+        "rationale",
+        "when_to_use",
+        "when_not_to_use",
+        "tradeoffs",
+        "alternatives",
+        "implementation_hooks",
+        "quality_attributes",
+        "evidence",
+        "delta_claim",
+        "lang_env_version",
+    ],
+    "properties": {
+        "relevant": {"type": "boolean"},
+        "structure": {"type": "string"},
+        "rationale": {"type": "string"},
+        "when_to_use": {"type": "string"},
+        "when_not_to_use": {"type": "string"},
+        "tradeoffs": {"type": "string"},
+        "alternatives": {"type": "string"},
+        "implementation_hooks": {"type": "string"},
+        "quality_attributes": {"type": "string"},
+        "evidence": {"type": "string"},
+        "delta_claim": {"type": "string"},
+        "lang_env_version": {"type": "string"},
+    },
+}
+
 DELTA_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": ["keep", "reason"],
     "properties": {
         "keep": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+}
+
+DESIGN_COMPETENCE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["keep", "author_level", "reason"],
+    "properties": {
+        "keep": {"type": "boolean"},
+        "author_level": {"type": "string"},
         "reason": {"type": "string"},
     },
 }
@@ -233,6 +330,7 @@ MAX_REFERENCE_TERMS = 30
 REFERENCE_MAX_PARALLEL = 6
 REFERENCE_SQLITE_BUSY_TIMEOUT_MS = 30000
 GH_SEARCH_WINDOW_SECONDS = 60.0
+WEB_SEARCH_WINDOW_SECONDS = 60.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -244,25 +342,30 @@ def _env_int(name: str, default: int) -> int:
 
 
 GH_SEARCH_PER_MIN = _env_int("AI_ORG_GH_SEARCH_PER_MIN", 28)
+WEB_SEARCH_PER_MIN = _env_int("AI_ORG_WEB_SEARCH_PER_MIN", 12)
 GH_SEARCH_RETRY_BACKOFF_SECONDS = 2.0
 
 _REFERENCE_DB_WRITE_LOCK = threading.Lock()
 _GH_SEARCH_LOCK = threading.Lock()
 _GH_SEARCH_TIMESTAMPS: list[float] = []
+_WEB_SEARCH_LOCK = threading.Lock()
+_WEB_SEARCH_TIMESTAMPS: list[float] = []
 
 
-def lookup(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+def lookup(term: str, context: Mapping[str, Any] | None = None, kind: str | None = None) -> dict[str, Any] | None:
     """Read consumption fields for stored candidates matching the consuming stack."""
     entry = audit(term)
     if entry is None:
         return None
 
+    context = dict(context or {})
+    requested_kind = _clean_kind(kind or str(context.get("kind") or ""), allow_empty=True)
     return {
         "term": entry["term"],
         "candidates": [
             _consumption_candidate(candidate)
             for candidate in entry["candidates"]
-            if _candidate_matches_context(candidate, context or {})
+            if _candidate_matches_kind(candidate, requested_kind) and _candidate_matches_context(candidate, context)
         ],
     }
 
@@ -291,6 +394,11 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
         where.append("lower(c.author_level) = lower(?)")
         params.append(author_level)
 
+    kind = _clean_kind(str(filters.get("kind") or ""), allow_empty=True)
+    if kind:
+        where.append("lower(c.kind) = lower(?)")
+        params.append(kind)
+
     search_values = [
         str(filters.get(field) or "").strip()
         for field in ("found_via", "keyword")
@@ -316,8 +424,10 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
             params.extend([like_value, like_value])
 
     sql = (
-        "SELECT c.term, c.snippet, c.summary, c.pitfalls, c.lang_env_version, "
-        "c.author_level, c.source_url, c.found_via "
+        "SELECT c.term, c.kind, c.snippet, c.summary, c.pitfalls, c.structure, "
+        "c.rationale, c.when_to_use, c.when_not_to_use, c.tradeoffs, c.alternatives, "
+        "c.implementation_hooks, c.quality_attributes, c.evidence, c.delta_claim, "
+        "c.lang_env_version, c.author_level, c.source_url, c.found_via "
         "FROM candidates c"
     )
     if where:
@@ -343,12 +453,12 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
 
 
 def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Fetch, filter, annotate, and persist implementation knowledge for term."""
+    """Fetch, filter, annotate, and persist implementation and design knowledge for term."""
     context = dict(context or {})
     baseline = _codex_baseline(term, context)
     search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
     examined: list[dict[str, str]] = []
-    fetched = fetch_candidates(
+    implementation_fetched = fetch_candidates(
         term,
         {
             **context,
@@ -356,23 +466,38 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
             "_reference_examined": examined,
         },
     )
+    design_keywords: list[str] = []
+    design_fetched = fetch_design_candidates(
+        term,
+        {
+            **context,
+            "_reference_design_search_keywords": design_keywords,
+            "_reference_examined": examined,
+        },
+    )
+    fetched = implementation_fetched + design_fetched
 
     kept: list[dict[str, Any]] = []
     low_level_count = 0
     for raw_candidate in fetched:
+        raw_kind = _candidate_kind(raw_candidate)
         audit_repo = _candidate_audit_repo(raw_candidate)
         audit_language = _candidate_audit_language(raw_candidate)
-        audit_found_via = _candidate_audit_found_via(raw_candidate, search_keywords)
+        candidate_keywords = design_keywords if raw_kind == "design" else search_keywords
+        audit_found_via = _candidate_audit_found_via(raw_candidate, candidate_keywords)
         if audit_repo:
             _record_examined(examined, audit_repo, audit_language, "unreadable", audit_found_via)
 
-        normalized = _normalize_raw_candidate(raw_candidate, search_keywords)
+        normalized = _normalize_raw_candidate(raw_candidate, candidate_keywords)
         if normalized is None:
             if audit_repo:
                 _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
             continue
 
-        delta = _codex_delta_inclusion(term, context, baseline, normalized)
+        if normalized["kind"] == "design":
+            delta = _codex_design_delta_inclusion(term, context, normalized)
+        else:
+            delta = _codex_delta_inclusion(term, context, baseline, normalized)
         if not delta.get("keep"):
             if audit_repo:
                 _record_examined(
@@ -384,15 +509,24 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
                 )
             continue
 
-        distilled = _codex_distill_candidate(term, context, baseline, normalized, str(delta.get("reason") or ""))
-        normalized = _normalize_raw_candidate({**normalized, **distilled}, search_keywords)
-        if normalized is None or not _real_distillation(normalized):
-            if audit_repo:
-                _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
-            continue
+        if normalized["kind"] == "design":
+            normalized["delta_claim"] = normalized.get("delta_claim") or str(delta.get("reason") or "").strip()
+            competence = _codex_design_competence(term, context, normalized)
+            if not competence.get("keep"):
+                if audit_repo:
+                    _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
+                continue
+            author_level = _clean_author_level(competence.get("author_level", "unknown"))
+        else:
+            distilled = _codex_distill_candidate(term, context, baseline, normalized, str(delta.get("reason") or ""))
+            normalized = _normalize_raw_candidate({**normalized, **distilled}, search_keywords)
+            if normalized is None or not _real_distillation(normalized):
+                if audit_repo:
+                    _record_examined(examined, audit_repo, audit_language, "rejected-low-value", audit_found_via)
+                continue
 
-        author = _codex_author_level(term, context, normalized)
-        author_level = _clean_author_level(author.get("author_level", "unknown"))
+            author = _codex_author_level(term, context, normalized)
+            author_level = _clean_author_level(author.get("author_level", "unknown"))
         normalized["author_level"] = author_level
         if _is_low_level_author(author_level):
             low_level_count += 1
@@ -408,6 +542,16 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
     elif not fetched:
         notes = "nothing-fetched: no public repository candidates were fetched."
 
+    referenced_keywords = [
+        str(item.get("found_via") or "")
+        for item in examined
+        if isinstance(item, Mapping)
+    ] + [
+        str(candidate.get("found_via") or "")
+        for candidate in kept
+        if isinstance(candidate, Mapping)
+    ]
+    search_keywords = _clean_search_keywords(search_keywords + referenced_keywords)
     entry = {
         "term": str(term),
         "search_keywords": search_keywords,
@@ -537,6 +681,7 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
             extracted_any_candidate = True
             candidates.append(
                 {
+                    "kind": "implementation",
                     "snippet": snippet,
                     "summary": str(extracted.get("summary") or "").strip(),
                     "source_url": f"{source_url}/blob/HEAD/{path}",
@@ -557,6 +702,78 @@ def fetch_candidates(term: str, context: Mapping[str, Any] | None = None) -> lis
                 return candidates
         if examined is not None and read_any_file and not extracted_any_candidate:
             _record_examined(examined, full_name, primary_language, "rejected-low-value", found_via)
+    return candidates
+
+
+def fetch_design_candidates(term: str, context: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Fetch public design candidates from design docs, ADRs/RFCs, and web design sources."""
+    context = dict(context or {})
+    design_keywords = context.pop("_reference_design_search_keywords", None)
+    examined = context.pop("_reference_examined", None)
+    if not isinstance(design_keywords, list):
+        design_keywords = []
+    if not isinstance(examined, list):
+        examined = None
+
+    cleaned_keywords = _clean_design_search_keywords(_codex_design_search_keywords(term, context))
+    design_keywords.extend(keyword for keyword in cleaned_keywords if keyword not in design_keywords)
+    candidates: list[dict[str, Any]] = []
+
+    for repo in _search_design_repositories(cleaned_keywords, context):
+        full_name = str(repo.get("fullName") or repo.get("nameWithOwner") or "").strip()
+        if not full_name:
+            continue
+        primary_language = _repo_primary_language(repo)
+        found_via = _clean_found_via(repo.get("found_via"), cleaned_keywords)
+        if examined is not None:
+            _record_examined(examined, full_name, primary_language, "unreadable", found_via)
+        source_url = str(repo.get("url") or f"https://github.com/{full_name}").strip()
+        extracted_any_candidate = False
+        for path in _design_paths_for_repo(full_name, term, context):
+            content = _read_github_file(full_name, path)
+            if not content:
+                continue
+            extracted = _codex_extract_design(term, context, f"{source_url}/blob/HEAD/{path}", content)
+            if not extracted.get("relevant"):
+                continue
+            candidate = _raw_design_candidate(
+                extracted,
+                source_url=f"{source_url}/blob/HEAD/{path}",
+                found_via=found_via,
+                repo=full_name,
+                language=primary_language,
+            )
+            if candidate is None:
+                continue
+            extracted_any_candidate = True
+            candidates.append(candidate)
+            if len(candidates) >= MAX_REPOS * MAX_FILES_PER_REPO:
+                return candidates
+        if examined is not None and not extracted_any_candidate:
+            _record_examined(examined, full_name, primary_language, "rejected-low-value", found_via)
+
+    for source in _codex_design_web_sources(cleaned_keywords, context):
+        if not isinstance(source, Mapping):
+            continue
+        found_via = _clean_found_via(source.get("found_via"), cleaned_keywords)
+        if not found_via:
+            found_via = cleaned_keywords[0] if len(cleaned_keywords) == 1 else ""
+        source_url = str(source.get("url") or "").strip()
+        content = str(source.get("content") or "").strip()
+        if not source_url or not content or not found_via:
+            continue
+        extracted = _codex_extract_design(term, context, source_url, content)
+        if not extracted.get("relevant"):
+            continue
+        candidate = _raw_design_candidate(
+            extracted,
+            source_url=source_url,
+            found_via=found_via,
+            repo=_web_source_repo_label(source),
+            language="general",
+        )
+        if candidate is not None:
+            candidates.append(candidate)
     return candidates
 
 
@@ -581,6 +798,34 @@ def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
     return _unique(keywords)[:8]
 
 
+def _codex_design_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
+    result = _codex_json(
+        _design_search_keywords_prompt(term, context),
+        DESIGN_SEARCH_KEYWORDS_SCHEMA,
+        "design-search-keywords.json",
+    )
+    raw_keywords = result.get("keywords")
+    if not isinstance(raw_keywords, list):
+        raw_keywords = _fallback_design_keywords(term)
+    keywords = []
+    for value in raw_keywords:
+        keyword = _design_search_keyword(str(value))
+        if keyword:
+            keywords.append(keyword)
+    return _unique(keywords)[:8]
+
+
+def _fallback_design_keywords(term: str) -> list[str]:
+    base = " ".join(_search_keyword_tokens(term))
+    if not base:
+        return []
+    return [
+        f"{base} architecture",
+        f"{base} design",
+        f"{base} pattern",
+    ]
+
+
 def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> list[dict[str, Any]]:
     repos: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -590,6 +835,39 @@ def _search_repositories(keywords: list[str], context: Mapping[str, Any]) -> lis
             "search",
             "repos",
             keyword,
+            "--limit",
+            "5",
+            "--json",
+            "fullName,url,description,primaryLanguage,stargazersCount",
+        ]
+        raw_repos = _gh_search_json(cmd)
+        if not isinstance(raw_repos, list):
+            continue
+        for repo in raw_repos:
+            if not isinstance(repo, Mapping):
+                continue
+            normalized = _normalize_search_repo(repo)
+            full_name = str(normalized.get("fullName") or "").strip()
+            if not full_name or full_name.lower() in seen:
+                continue
+            seen.add(full_name.lower())
+            normalized["found_via"] = keyword
+            repos.append(normalized)
+            if len(repos) >= MAX_REPOS:
+                return repos
+    return repos
+
+
+def _search_design_repositories(keywords: list[str], context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    repos: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    design_terms = ("ADR OR RFC OR KEP OR PEP OR DESIGN.md OR architecture OR docs")
+    for keyword in keywords:
+        cmd = [
+            "gh",
+            "search",
+            "repos",
+            f"{keyword} {design_terms}",
             "--limit",
             "5",
             "--json",
@@ -676,6 +954,67 @@ def _candidate_paths_for_repo(repo: str, term: str, context: Mapping[str, Any]) 
         scored.append((score, path))
 
     return [path for _score, path in sorted(scored, key=lambda item: (-item[0], len(item[1]), item[1]))[:MAX_FILES_PER_REPO]]
+
+
+def _design_paths_for_repo(repo: str, term: str, context: Mapping[str, Any]) -> list[str]:
+    tree = _gh_json(["gh", "api", f"repos/{repo}/git/trees/HEAD?recursive=1"])
+    items = tree.get("tree") if isinstance(tree, Mapping) else None
+    if not isinstance(items, list):
+        return []
+
+    term_tokens = _version_tokens(term)
+    scored: list[tuple[int, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping) or item.get("type") != "blob":
+            continue
+        path = str(item.get("path") or "")
+        lowered = path.lower()
+        if not _is_design_doc_path(lowered):
+            continue
+        score = sum(4 for token in term_tokens if token in lowered)
+        score += sum(
+            5
+            for word in (
+                "adr",
+                "architecture",
+                "design",
+                "rfc",
+                "pep",
+                "kep",
+                "decision",
+                "docs",
+                "pattern",
+            )
+            if word in lowered
+        )
+        score -= sum(8 for word in ("node_modules", "vendor", "dist", "build", "coverage") if word in lowered)
+        scored.append((score, path))
+
+    return [path for _score, path in sorted(scored, key=lambda item: (-item[0], len(item[1]), item[1]))[:MAX_FILES_PER_REPO]]
+
+
+def _is_design_doc_path(lowered_path: str) -> bool:
+    if not lowered_path.endswith((".md", ".rst", ".txt", ".adoc")):
+        return False
+    name = lowered_path.rsplit("/", 1)[-1]
+    if name in {"design.md", "architecture.md", "rfc.md"}:
+        return True
+    return any(
+        marker in lowered_path
+        for marker in (
+            "/adr",
+            "adr-",
+            "/decisions/",
+            "/docs/",
+            "architecture",
+            "design",
+            "/rfcs/",
+            "/rfc/",
+            "/keps/",
+            "/pep",
+            "patterns",
+        )
+    )
 
 
 def _read_github_file(repo: str, path: str) -> str:
@@ -791,6 +1130,24 @@ def _acquire_gh_search_slot() -> None:
                 return
 
             sleep_for = _GH_SEARCH_TIMESTAMPS[0] + GH_SEARCH_WINDOW_SECONDS - now
+
+        time.sleep(max(sleep_for, 0.001))
+
+
+def _acquire_web_search_slot() -> None:
+    while True:
+        with _WEB_SEARCH_LOCK:
+            now = time.monotonic()
+            cutoff = now - WEB_SEARCH_WINDOW_SECONDS
+            while _WEB_SEARCH_TIMESTAMPS and _WEB_SEARCH_TIMESTAMPS[0] <= cutoff:
+                _WEB_SEARCH_TIMESTAMPS.pop(0)
+
+            limit = _env_int("AI_ORG_WEB_SEARCH_PER_MIN", WEB_SEARCH_PER_MIN)
+            if len(_WEB_SEARCH_TIMESTAMPS) < limit:
+                _WEB_SEARCH_TIMESTAMPS.append(now)
+                return
+
+            sleep_for = _WEB_SEARCH_TIMESTAMPS[0] + WEB_SEARCH_WINDOW_SECONDS - now
 
         time.sleep(max(sleep_for, 0.001))
 
@@ -918,6 +1275,97 @@ def _codex_author_level(term: str, context: Mapping[str, Any], candidate: Mappin
     return {"author_level": "unknown", "reason": "invalid author-level judgment"}
 
 
+def _codex_design_web_sources(keywords: list[str], context: Mapping[str, Any]) -> list[dict[str, str]]:
+    if not keywords:
+        return []
+    _acquire_web_search_slot()
+    result = _codex_json(
+        _design_web_sources_prompt(keywords, context),
+        DESIGN_SOURCE_SCHEMA,
+        "design-web-sources.json",
+    )
+    raw_sources = result.get("sources")
+    if not isinstance(raw_sources, list):
+        return []
+    sources = []
+    for source in raw_sources:
+        if not isinstance(source, Mapping):
+            continue
+        url = str(source.get("url") or "").strip()
+        content = str(source.get("content") or "").strip()
+        if not url or not content:
+            continue
+        sources.append(
+            {
+                "title": str(source.get("title") or "").strip(),
+                "url": url,
+                "content": content[:MAX_FILE_CHARS],
+                "status": str(source.get("status") or "").strip(),
+                "found_via": keywords[0],
+            }
+        )
+    return sources[:8]
+
+
+def _codex_extract_design(
+    term: str,
+    context: Mapping[str, Any],
+    source_url: str,
+    content: str,
+) -> dict[str, Any]:
+    result = _codex_json(
+        _extract_design_prompt(term, context, source_url, content),
+        DESIGN_EXTRACT_SCHEMA,
+        "design-extract.json",
+    )
+    if isinstance(result.get("relevant"), bool):
+        return result
+    return {
+        "relevant": False,
+        "structure": "",
+        "rationale": "",
+        "when_to_use": "",
+        "when_not_to_use": "",
+        "tradeoffs": "",
+        "alternatives": "",
+        "implementation_hooks": "",
+        "quality_attributes": "",
+        "evidence": "",
+        "delta_claim": "",
+        "lang_env_version": "",
+    }
+
+
+def _codex_design_delta_inclusion(
+    term: str,
+    context: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = _codex_json(
+        _design_delta_prompt(term, context, candidate),
+        DELTA_SCHEMA,
+        "design-delta.json",
+    )
+    if isinstance(result.get("keep"), bool) and isinstance(result.get("reason"), str):
+        return result
+    return {"keep": False, "reason": "invalid design delta judgment"}
+
+
+def _codex_design_competence(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
+    result = _codex_json(
+        _design_competence_prompt(term, context, candidate),
+        DESIGN_COMPETENCE_SCHEMA,
+        "design-competence.json",
+    )
+    if (
+        isinstance(result.get("keep"), bool)
+        and isinstance(result.get("author_level"), str)
+        and isinstance(result.get("reason"), str)
+    ):
+        return result
+    return {"keep": False, "author_level": "unknown", "reason": "invalid design source competence judgment"}
+
+
 def _extract_reference_terms(text: str, context: Mapping[str, Any]) -> list[str]:
     result = _codex_json(
         _reference_terms_prompt(text, context),
@@ -997,6 +1445,20 @@ def _search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
     )
 
 
+def _design_search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
+    return (
+        "Derive design-oriented search queries for finding architecture and pattern knowledge for this "
+        "concept. This is a separate design lane, not a code search. Prefer queries that find ADRs, RFCs, "
+        "PEPs, KEPs, DESIGN.md files, docs folders, architecture writeups, pattern catalogs such as GoF, "
+        "POSA, Game Programming Patterns, and project-specific design decisions. Do not return code API "
+        "or syntax queries.\n"
+        f"Reference target term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        "Rules: English only; include architecture, design, pattern, ADR, RFC, PEP, KEP, or decision words "
+        "when useful; keep each query specific enough to find design material. Return only schema JSON."
+    )
+
+
 def _extract_prompt(term: str, context: Mapping[str, Any], repo: str, path: str, content: str) -> str:
     return (
         "Inspect this repository file and extract the implementation pattern for the target term. "
@@ -1012,6 +1474,33 @@ def _extract_prompt(term: str, context: Mapping[str, Any], repo: str, path: str,
     )
 
 
+def _design_web_sources_prompt(keywords: list[str], context: Mapping[str, Any]) -> str:
+    return (
+        "Use web search to find primary or high-quality design sources for these architecture/pattern "
+        "queries. Prefer accepted or merged RFCs, PEPs, KEPs, ADRs, project architecture docs, pattern "
+        "catalogs, migration reports, rollback notes, and production postmortems. Avoid shallow commentary "
+        "unless it contains specific constraints and consequences. Return concise source excerpts or "
+        "summaries in content; do not invent URLs.\n"
+        f"Design queries: {_json_for_prompt(keywords)}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        "Return only schema JSON."
+    )
+
+
+def _extract_design_prompt(term: str, context: Mapping[str, Any], source_url: str, content: str) -> str:
+    return (
+        "Extract design knowledge for the target concept from this source. Do not pretend there is a code "
+        "snippet. Capture structure as components, responsibilities, boundaries, and flow. Keep only "
+        "specific design knowledge with constraints, consequences, and integration hooks.\n"
+        f"Reference target term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        f"Source URL: {source_url}\n"
+        f"Source content:\n{content}\n"
+        "Evidence must mention source status or adoption when present, such as accepted, merged, production "
+        "use, migration, rollback, or postmortem. Return only schema JSON."
+    )
+
+
 def _delta_prompt(term: str, context: Mapping[str, Any], baseline: str, candidate: Mapping[str, Any]) -> str:
     return (
         "Strictly judge whether the candidate contains implementation knowledge that genuinely beats "
@@ -1023,6 +1512,36 @@ def _delta_prompt(term: str, context: Mapping[str, Any], baseline: str, candidat
         f"Baseline:\n{baseline}\n\n"
         f"Candidate:\n{_json_for_prompt(candidate)}\n"
         "Return keep=false for baseline-equivalent prose, trivial variations, or merely different names. "
+        "Return only schema JSON."
+    )
+
+
+def _design_delta_prompt(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> str:
+    return (
+        "Strictly judge whether this design candidate adds a non-obvious design lesson that a competent "
+        "LLM would not already know as basic pattern trivia. Keep only candidates with at least one of: "
+        "a non-obvious constraint such as use X only if Y else Z; a hard-won operational, migration, scale, "
+        "performance, UX, or rollback tradeoff; a domain-specific architecture such as game loop timing, "
+        "ECS layout, behavior-tree pitfalls, or Kubernetes version skew; a rejected alternative with a "
+        "concrete reason; or a design invariant the contributor can check. Reject GoF basics, syntax advice, "
+        "generic pros and cons, and baseline-equivalent design prose.\n"
+        f"Term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        f"Candidate:\n{_json_for_prompt(candidate)}\n"
+        "Return only schema JSON."
+    )
+
+
+def _design_competence_prompt(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> str:
+    return (
+        "Judge design source competence. Prefer primary sources over commentary; accepted or merged status "
+        "for RFCs, PEPs, KEPs, and ADRs; author or project domain track record; evidence of production use, "
+        "migration, rollback, or postmortem; and specificity of constraints and consequences. Stars are weak "
+        "metadata only and must not decide the verdict. keep=false if the source is vague, unaccepted without "
+        "evidence, or lacks specific consequences.\n"
+        f"Term: {term}\n"
+        f"Consuming stack context: {_json_for_prompt(context)}\n"
+        f"Candidate:\n{_json_for_prompt(candidate)}\n"
         "Return only schema JSON."
     )
 
@@ -1107,14 +1626,15 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                     ),
                 )
                 for candidate in entry["candidates"]:
+                    stored = _stored_candidate(candidate)
                     existing = connection.execute(
                         """
                         SELECT 1
                         FROM candidates
-                        WHERE lower(term) = lower(?) AND source_url = ? AND snippet = ?
+                        WHERE lower(term) = lower(?) AND source_url = ?
                         LIMIT 1
                         """,
-                        (term, candidate["source_url"], candidate["snippet"]),
+                        (term, stored["source_url"]),
                     ).fetchone()
                     if existing is not None:
                         continue
@@ -1122,25 +1642,47 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                         """
                         INSERT INTO candidates(
                             term,
+                            kind,
                             snippet,
                             summary,
                             pitfalls,
+                            structure,
+                            rationale,
+                            when_to_use,
+                            when_not_to_use,
+                            tradeoffs,
+                            alternatives,
+                            implementation_hooks,
+                            quality_attributes,
+                            evidence,
+                            delta_claim,
                             lang_env_version,
                             author_level,
                             source_url,
                             found_via
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             term,
-                            candidate["snippet"],
-                            candidate["summary"],
-                            candidate["pitfalls"],
-                            candidate["lang_env_version"],
-                            candidate["author_level"],
-                            candidate["source_url"],
-                            candidate["found_via"],
+                            stored["kind"],
+                            stored.get("snippet", ""),
+                            stored.get("summary", ""),
+                            stored.get("pitfalls", ""),
+                            stored.get("structure", ""),
+                            stored.get("rationale", ""),
+                            stored.get("when_to_use", ""),
+                            stored.get("when_not_to_use", ""),
+                            stored.get("tradeoffs", ""),
+                            stored.get("alternatives", ""),
+                            stored.get("implementation_hooks", ""),
+                            stored.get("quality_attributes", ""),
+                            stored.get("evidence", ""),
+                            stored.get("delta_claim", ""),
+                            stored["lang_env_version"],
+                            stored["author_level"],
+                            stored["source_url"],
+                            stored["found_via"],
                         ),
                     )
 
@@ -1164,7 +1706,9 @@ def _read_entry(term: str) -> dict[str, Any] | None:
                 return None
             candidate_rows = connection.execute(
                 """
-                SELECT term, snippet, summary, pitfalls, lang_env_version, author_level, source_url, found_via
+                SELECT term, kind, snippet, summary, pitfalls, structure, rationale, when_to_use,
+                    when_not_to_use, tradeoffs, alternatives, implementation_hooks, quality_attributes,
+                    evidence, delta_claim, lang_env_version, author_level, source_url, found_via
                 FROM candidates
                 WHERE lower(term) = lower(?)
                 ORDER BY id
@@ -1220,8 +1764,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
         if candidate_columns and candidate_foreign_keys:
             _migrate_candidates_without_foreign_key(connection)
+            candidate_columns = _table_columns(connection, "candidates")
         elif not candidate_columns:
             _create_candidates_table(connection)
+            candidate_columns = _table_columns(connection, "candidates")
+
+        _add_missing_candidate_columns(connection, candidate_columns)
 
         connection.executescript(
             """
@@ -1232,6 +1780,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_author_level ON candidates(author_level);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_found_via ON candidates(found_via);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_dedup ON candidates(term, source_url, snippet);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_kind ON candidates(kind);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_source_url ON candidates(term, source_url);
             """
         )
     connection.execute("PRAGMA foreign_keys = ON")
@@ -1263,9 +1813,20 @@ def _create_candidates_table(connection: sqlite3.Connection) -> None:
         CREATE TABLE candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             term TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'implementation',
             snippet TEXT NOT NULL,
             summary TEXT NOT NULL,
             pitfalls TEXT NOT NULL,
+            structure TEXT NOT NULL DEFAULT '',
+            rationale TEXT NOT NULL DEFAULT '',
+            when_to_use TEXT NOT NULL DEFAULT '',
+            when_not_to_use TEXT NOT NULL DEFAULT '',
+            tradeoffs TEXT NOT NULL DEFAULT '',
+            alternatives TEXT NOT NULL DEFAULT '',
+            implementation_hooks TEXT NOT NULL DEFAULT '',
+            quality_attributes TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '',
+            delta_claim TEXT NOT NULL DEFAULT '',
             lang_env_version TEXT NOT NULL,
             author_level TEXT NOT NULL,
             source_url TEXT NOT NULL,
@@ -1273,6 +1834,25 @@ def _create_candidates_table(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _add_missing_candidate_columns(connection: sqlite3.Connection, candidate_columns: set[str]) -> None:
+    additions = {
+        "kind": "TEXT NOT NULL DEFAULT 'implementation'",
+        "structure": "TEXT NOT NULL DEFAULT ''",
+        "rationale": "TEXT NOT NULL DEFAULT ''",
+        "when_to_use": "TEXT NOT NULL DEFAULT ''",
+        "when_not_to_use": "TEXT NOT NULL DEFAULT ''",
+        "tradeoffs": "TEXT NOT NULL DEFAULT ''",
+        "alternatives": "TEXT NOT NULL DEFAULT ''",
+        "implementation_hooks": "TEXT NOT NULL DEFAULT ''",
+        "quality_attributes": "TEXT NOT NULL DEFAULT ''",
+        "evidence": "TEXT NOT NULL DEFAULT ''",
+        "delta_claim": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, declaration in additions.items():
+        if column not in candidate_columns:
+            connection.execute(f"ALTER TABLE candidates ADD COLUMN {column} {declaration}")
 
 
 def _migrate_research_to_history(connection: sqlite3.Connection) -> None:
@@ -1299,9 +1879,20 @@ def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> N
         INSERT INTO candidates(
             id,
             term,
+            kind,
             snippet,
             summary,
             pitfalls,
+            structure,
+            rationale,
+            when_to_use,
+            when_not_to_use,
+            tradeoffs,
+            alternatives,
+            implementation_hooks,
+            quality_attributes,
+            evidence,
+            delta_claim,
             lang_env_version,
             author_level,
             source_url,
@@ -1310,9 +1901,20 @@ def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> N
         SELECT
             id,
             term,
+            'implementation',
             snippet,
             summary,
             pitfalls,
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
             lang_env_version,
             author_level,
             source_url,
@@ -1342,18 +1944,46 @@ def _path_is_inside(path: Path, parent: Path) -> bool:
 
 
 def _candidate_from_row(row: Mapping[str, Any], *, include_term: bool = False) -> dict[str, str]:
-    candidate = {
-        "snippet": str(row["snippet"] or ""),
-        "summary": str(row["summary"] or ""),
-        "source_url": str(row["source_url"] or ""),
-        "lang_env_version": str(row["lang_env_version"] or ""),
-        "author_level": str(row["author_level"] or ""),
-        "pitfalls": str(row["pitfalls"] or ""),
-        "found_via": str(row["found_via"] or ""),
-    }
+    kind = _clean_kind(_row_get(row, "kind"), allow_empty=False)
+    if kind == "design":
+        candidate = {
+            "kind": "design",
+            "structure": str(_row_get(row, "structure") or ""),
+            "rationale": str(_row_get(row, "rationale") or ""),
+            "when_to_use": str(_row_get(row, "when_to_use") or ""),
+            "when_not_to_use": str(_row_get(row, "when_not_to_use") or ""),
+            "tradeoffs": str(_row_get(row, "tradeoffs") or ""),
+            "alternatives": str(_row_get(row, "alternatives") or ""),
+            "implementation_hooks": str(_row_get(row, "implementation_hooks") or ""),
+            "quality_attributes": str(_row_get(row, "quality_attributes") or ""),
+            "evidence": str(_row_get(row, "evidence") or ""),
+            "delta_claim": str(_row_get(row, "delta_claim") or ""),
+            "author_level": str(_row_get(row, "author_level") or ""),
+            "source_url": str(_row_get(row, "source_url") or ""),
+            "found_via": str(_row_get(row, "found_via") or ""),
+            "lang_env_version": str(_row_get(row, "lang_env_version") or ""),
+        }
+    else:
+        candidate = {
+            "kind": "implementation",
+            "snippet": str(_row_get(row, "snippet") or ""),
+            "summary": str(_row_get(row, "summary") or ""),
+            "source_url": str(_row_get(row, "source_url") or ""),
+            "lang_env_version": str(_row_get(row, "lang_env_version") or ""),
+            "author_level": str(_row_get(row, "author_level") or ""),
+            "pitfalls": str(_row_get(row, "pitfalls") or ""),
+            "found_via": str(_row_get(row, "found_via") or ""),
+        }
     if include_term:
-        return {"term": str(row["term"] or ""), **candidate}
+        return {"term": str(_row_get(row, "term") or ""), **candidate}
     return candidate
+
+
+def _row_get(row: Mapping[str, Any], key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return ""
 
 
 def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1371,7 +2001,25 @@ def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _consumption_candidate(candidate: Mapping[str, Any]) -> dict[str, str]:
+    if _candidate_kind(candidate) == "design":
+        return {
+            "kind": "design",
+            "structure": str(candidate.get("structure") or ""),
+            "rationale": str(candidate.get("rationale") or ""),
+            "when_to_use": str(candidate.get("when_to_use") or ""),
+            "when_not_to_use": str(candidate.get("when_not_to_use") or ""),
+            "tradeoffs": str(candidate.get("tradeoffs") or ""),
+            "alternatives": str(candidate.get("alternatives") or ""),
+            "implementation_hooks": str(candidate.get("implementation_hooks") or ""),
+            "quality_attributes": str(candidate.get("quality_attributes") or ""),
+            "evidence": str(candidate.get("evidence") or ""),
+            "delta_claim": str(candidate.get("delta_claim") or ""),
+            "lang_env_version": str(candidate.get("lang_env_version") or ""),
+            "author_level": str(candidate.get("author_level") or ""),
+            "source_url": str(candidate.get("source_url") or ""),
+        }
     return {
+        "kind": "implementation",
         "snippet": str(candidate.get("snippet") or ""),
         "summary": str(candidate.get("summary") or ""),
         "pitfalls": str(candidate.get("pitfalls") or ""),
@@ -1382,9 +2030,15 @@ def _consumption_candidate(candidate: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _candidate_matches_context(candidate: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    if _candidate_kind(candidate) == "design":
+        return True
     if not _version_tokens(_context_lang_env_version(context)):
         return True
     return bool(_applicability(str(candidate.get("lang_env_version") or ""), context).get("matches_context"))
+
+
+def _candidate_matches_kind(candidate: Mapping[str, Any], kind: str) -> bool:
+    return not kind or _candidate_kind(candidate) == kind
 
 
 def _lang_env_matches_filter(lang_env_version: str, requested_tokens: set[str]) -> bool:
@@ -1478,9 +2132,14 @@ def _valid_research_attempt(value: Any) -> bool:
 
 
 def _valid_candidate(value: Any) -> bool:
-    if not isinstance(value, Mapping) or set(value) != set(CANDIDATE_FIELDS):
+    if not isinstance(value, Mapping):
         return False
-    return all(isinstance(value[field], str) for field in CANDIDATE_FIELDS) and bool(value["found_via"].strip())
+    normalized = _normalize_raw_candidate(value)
+    if normalized is None:
+        return False
+    kind = normalized["kind"]
+    fields = DESIGN_CANDIDATE_FIELDS if kind == "design" else IMPLEMENTATION_CANDIDATE_FIELDS
+    return set(normalized) == set(fields) and all(isinstance(normalized[field], str) for field in fields)
 
 
 def _valid_examined(value: Any) -> bool:
@@ -1499,12 +2158,18 @@ def _valid_examined(value: Any) -> bool:
 def _normalize_raw_candidate(value: Any, search_keywords: list[str] | None = None) -> dict[str, str] | None:
     if not isinstance(value, Mapping):
         return None
-    snippet = str(value.get("snippet") or "").strip()
+    kind = _candidate_kind(value)
     source_url = str(value.get("source_url") or "").strip()
     found_via = _candidate_audit_found_via(value, search_keywords or [])
-    if not snippet or not source_url or not found_via:
+    if not source_url or not found_via:
+        return None
+    if kind == "design":
+        return _normalize_raw_design_candidate(value, source_url, found_via)
+    snippet = str(value.get("snippet") or "").strip()
+    if not snippet:
         return None
     return {
+        "kind": "implementation",
         "snippet": snippet,
         "summary": str(value.get("summary") or "").strip(),
         "source_url": source_url,
@@ -1515,7 +2180,44 @@ def _normalize_raw_candidate(value: Any, search_keywords: list[str] | None = Non
     }
 
 
+def _normalize_raw_design_candidate(value: Mapping[str, Any], source_url: str, found_via: str) -> dict[str, str] | None:
+    candidate = {
+        "kind": "design",
+        "structure": str(value.get("structure") or "").strip(),
+        "rationale": str(value.get("rationale") or "").strip(),
+        "when_to_use": str(value.get("when_to_use") or "").strip(),
+        "when_not_to_use": str(value.get("when_not_to_use") or "").strip(),
+        "tradeoffs": str(value.get("tradeoffs") or "").strip(),
+        "alternatives": str(value.get("alternatives") or "").strip(),
+        "implementation_hooks": str(value.get("implementation_hooks") or "").strip(),
+        "quality_attributes": str(value.get("quality_attributes") or "").strip(),
+        "evidence": str(value.get("evidence") or "").strip(),
+        "delta_claim": str(value.get("delta_claim") or "").strip(),
+        "author_level": str(value.get("author_level") or "").strip(),
+        "source_url": source_url,
+        "found_via": found_via,
+        "lang_env_version": str(value.get("lang_env_version") or "").strip() or "n/a",
+    }
+    required = (
+        "structure",
+        "rationale",
+        "when_to_use",
+        "when_not_to_use",
+        "tradeoffs",
+        "alternatives",
+        "implementation_hooks",
+        "quality_attributes",
+        "evidence",
+        "delta_claim",
+    )
+    if not all(candidate[field] for field in required):
+        return None
+    return candidate
+
+
 def _real_distillation(candidate: Mapping[str, str]) -> bool:
+    if _candidate_kind(candidate) != "implementation":
+        return True
     summary = str(candidate.get("summary") or "").strip()
     snippet = str(candidate.get("snippet") or "").strip()
     pitfalls = str(candidate.get("pitfalls") or "").strip()
@@ -1533,16 +2235,13 @@ def _real_distillation(candidate: Mapping[str, str]) -> bool:
 
 
 def _stored_candidate(candidate: Mapping[str, str]) -> dict[str, str]:
-    lang_env_version = candidate.get("lang_env_version") or ""
-    return {
-        "snippet": candidate.get("snippet", ""),
-        "summary": candidate.get("summary", ""),
-        "source_url": candidate.get("source_url", ""),
-        "lang_env_version": lang_env_version,
-        "author_level": candidate.get("author_level", "") or "unknown",
-        "pitfalls": candidate.get("pitfalls", ""),
-        "found_via": candidate.get("found_via", ""),
-    }
+    normalized = _normalize_raw_candidate(candidate)
+    if normalized is None:
+        return {"kind": "implementation", "snippet": "", "summary": "", "source_url": "", "lang_env_version": "", "author_level": "unknown", "pitfalls": "", "found_via": ""}
+    normalized["author_level"] = normalized.get("author_level", "") or "unknown"
+    if normalized["kind"] == "design":
+        normalized["lang_env_version"] = normalized.get("lang_env_version", "") or "n/a"
+    return normalized
 
 
 def _clean_search_keywords(values: Any) -> list[str]:
@@ -1554,6 +2253,24 @@ def _clean_search_keywords(values: Any) -> list[str]:
         if keyword:
             keywords.append(keyword)
     return _unique(keywords)
+
+
+def _clean_design_search_keywords(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    keywords = []
+    for value in values:
+        keyword = _design_search_keyword(str(value))
+        if keyword:
+            keywords.append(keyword)
+    return _unique(keywords)
+
+
+def _design_search_keyword(value: str) -> str:
+    keyword = " ".join(str(value).strip().split())
+    if not keyword or not keyword.isascii() or not re.search(r"[A-Za-z]", keyword):
+        return ""
+    return keyword[:160]
 
 
 def _general_search_keyword(value: str) -> str:
@@ -1595,6 +2312,56 @@ def _clean_found_via(value: Any, search_keywords: list[str]) -> str:
     if allowed:
         return allowed.get(found_via.lower(), "")
     return found_via
+
+
+def _clean_kind(value: Any, *, allow_empty: bool) -> str:
+    kind = str(value or "").strip().lower()
+    if allow_empty and not kind:
+        return ""
+    return kind if kind in CANDIDATE_KINDS else "implementation"
+
+
+def _candidate_kind(candidate: Any) -> str:
+    if not isinstance(candidate, Mapping):
+        return "implementation"
+    return _clean_kind(candidate.get("kind"), allow_empty=False)
+
+
+def _raw_design_candidate(
+    extracted: Mapping[str, Any],
+    *,
+    source_url: str,
+    found_via: str,
+    repo: str,
+    language: str,
+) -> dict[str, str] | None:
+    candidate = {
+        "kind": "design",
+        "structure": str(extracted.get("structure") or "").strip(),
+        "rationale": str(extracted.get("rationale") or "").strip(),
+        "when_to_use": str(extracted.get("when_to_use") or "").strip(),
+        "when_not_to_use": str(extracted.get("when_not_to_use") or "").strip(),
+        "tradeoffs": str(extracted.get("tradeoffs") or "").strip(),
+        "alternatives": str(extracted.get("alternatives") or "").strip(),
+        "implementation_hooks": str(extracted.get("implementation_hooks") or "").strip(),
+        "quality_attributes": str(extracted.get("quality_attributes") or "").strip(),
+        "evidence": str(extracted.get("evidence") or "").strip(),
+        "delta_claim": str(extracted.get("delta_claim") or "").strip(),
+        "author_level": "unknown",
+        "source_url": str(source_url or "").strip(),
+        "found_via": str(found_via or "").strip(),
+        "lang_env_version": str(extracted.get("lang_env_version") or "").strip() or "n/a",
+        "_reference_repo": str(repo or "").strip(),
+        "_reference_language": str(language or "").strip(),
+        "_reference_found_via": str(found_via or "").strip(),
+    }
+    return _normalize_raw_candidate(candidate, [candidate["found_via"]])
+
+
+def _web_source_repo_label(source: Mapping[str, Any]) -> str:
+    url = str(source.get("url") or "").strip()
+    match = re.match(r"https?://([^/]+)", url)
+    return f"web/{match.group(1)}" if match else "web/source"
 
 
 def _record_examined(examined: list[dict[str, str]], repo: str, language: str, outcome: str, found_via: str) -> None:
