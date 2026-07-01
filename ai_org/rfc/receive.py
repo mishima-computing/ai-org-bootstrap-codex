@@ -305,15 +305,30 @@ EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
 }
 
 PRIOR_ART_PATTERN_FIELDS = (
-    "pattern",
-    "where_seen",
+    "name",
+    "source",
     "when_applies",
     "tradeoffs",
     "disposition",
-    "rationale",
+    "traces_to",
+)
+PRIOR_ART_SOURCE_FIELDS = (
+    "reference_concept",
+    "facet_kind",
+    "where",
+)
+PRIOR_ART_FACET_KINDS = ("design", "implementation", "none")
+PRIOR_ART_TRADEOFF_FIELDS = (
+    "pros",
+    "cons",
+)
+PRIOR_ART_DISPOSITION_FIELDS = (
+    "choice",
+    "why",
 )
 PRIOR_ART_DISPOSITIONS = ("adopt", "adapt", "reject")
 PRIOR_ART_MAP_FIELDS = ("patterns",)
+MAX_PRIOR_ART_REGENERATIONS = 2
 
 PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -330,12 +345,37 @@ PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(PRIOR_ART_PATTERN_FIELDS),
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "where_seen": {"type": "string"},
+                    "name": {"type": "string"},
+                    "source": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(PRIOR_ART_SOURCE_FIELDS),
+                        "properties": {
+                            "reference_concept": {"type": "string"},
+                            "facet_kind": {"type": "string", "enum": list(PRIOR_ART_FACET_KINDS)},
+                            "where": {"type": "string"},
+                        },
+                    },
                     "when_applies": {"type": "string"},
-                    "tradeoffs": {"type": "string"},
-                    "disposition": {"type": "string", "enum": list(PRIOR_ART_DISPOSITIONS)},
-                    "rationale": {"type": "string"},
+                    "tradeoffs": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(PRIOR_ART_TRADEOFF_FIELDS),
+                        "properties": {
+                            "pros": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                            "cons": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                        },
+                    },
+                    "disposition": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(PRIOR_ART_DISPOSITION_FIELDS),
+                        "properties": {
+                            "choice": {"type": "string", "enum": list(PRIOR_ART_DISPOSITIONS)},
+                            "why": {"type": "string"},
+                        },
+                    },
+                    "traces_to": {"type": "array", "minItems": 1, "items": {"type": "string"}},
                 },
             },
         },
@@ -848,30 +888,58 @@ def _build_prior_art_map(
     rfc_view: dict[str, Any],
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
-    normalized_problem: Mapping[str, Any] | None = None,
+    approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 3 of the documented 10-step Technical Approach procedure."""
-    # Step 3 of 10: read Reference facets and repo context to map prior art before candidate generation.
+    # Step 3 of 10: attach prior art to the accumulated approach before candidate generation.
     if not _is_rfc_view(rfc_view):
         return _prior_art_error("build_prior_art_map requires a grounded common-8 RFC view")
 
     repo_path = Path(repo).resolve()
-    concepts = _prior_art_key_concepts(rfc_view, context, normalized_problem)
+    accumulated_approach = _prior_art_approach_context(approach)
+    concepts = _prior_art_key_concepts(rfc_view, context, accumulated_approach)
     try:
         reference_facets = _read_prior_art_reference_facets(concepts, context)
     except Exception as exc:
         return _prior_art_error(f"Reference prior-art read failed: {exc}")
-    run = codex_exec.run_json(
-        repo_path,
-        schema=PRIOR_ART_MAP_SCHEMA,
-        prompt=_prior_art_map_prompt(rfc_view, repo_path, concepts, reference_facets, context, normalized_problem),
-        schema_filename="rfc-prior-art-map.schema.json",
-        output_filename="rfc-prior-art-map.json",
-        failure_label="Codex prior-art mapping",
+
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_PRIOR_ART_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo_path,
+            schema=PRIOR_ART_MAP_SCHEMA,
+            prompt=_prior_art_map_prompt(
+                rfc_view,
+                repo_path,
+                concepts,
+                reference_facets,
+                context,
+                accumulated_approach,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-prior-art-map.schema.json",
+            output_filename="rfc-prior-art-map.json",
+            failure_label="Codex prior-art mapping",
+        )
+        if not run["ok"]:
+            return _prior_art_error(run["error"])
+        parsed = _parse_prior_art_map(run["raw"])
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+
+        lint_errors = _lint_prior_art_map(parsed, reference_facets, accumulated_approach)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _prior_art_error(
+        "Codex prior-art mapping remained invalid after "
+        f"{MAX_PRIOR_ART_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _prior_art_error(run["error"])
-    return _parse_prior_art_map(run["raw"])
 
 
 def _generate_candidates(
@@ -1074,11 +1142,12 @@ def form_technical_approach(
     steps["extract_constraints"] = constraints
     approach["constraints"] = constraints
 
-    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, normalized)
+    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, dict(approach))
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
     if failure:
         return failure
     steps["build_prior_art_map"] = prior_art
+    approach["prior_art"] = prior_art
 
     if provided_approach is None:
         candidates = _generate_candidates(normalized, constraints, prior_art, approach_context)
@@ -1389,35 +1458,58 @@ def _prior_art_map_prompt(
     concepts: list[str],
     reference_facets: list[dict[str, Any]],
     context: Mapping[str, Any] | None = None,
-    normalized_problem: Mapping[str, Any] | None = None,
+    approach: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
-    context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
-    normalized_problem_text = json.dumps(normalized_problem or {}, indent=2, sort_keys=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     concepts_text = json.dumps(concepts, indent=2, ensure_ascii=True)
     reference_text = json.dumps(reference_facets, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic validation. Regenerate the whole prior_art branch and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
         "You are forming step 3 of AI Org's 10-step Technical Approach procedure: build a prior-art map.\n"
         "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
-        "RFC view, normalized problem if provided, Reference design facets, Reference implementation facets, "
+        "RFC view, accumulated approach document, Reference design facets, Reference implementation facets, "
         "and repository context to synthesize 3 to 6 prior-art patterns. Do not generate candidate approaches, "
         "select an approach, create a patch plan, or perform later Technical Approach steps.\n\n"
+        "This step must attach one nested-tag branch to the accumulated approach document. The accumulated "
+        "document currently contains approach.normalized_problem and approach.constraints. Trace every pattern "
+        "to the normalized problem or constraints it addresses. Use the raw RFC only as grounding and ambiguity "
+        "context, not as an independent restart of problem discovery.\n\n"
         "Each pattern must identify a real design or implementation pattern visible in the Reference facets, "
         "the repository, or both. Treat frameworks, engines, and libraries as candidates judged on fit; do not "
         "favor them merely because they appeared often. A candidate such as Godot belongs here only when the "
         "evidence makes it relevant, and its disposition must be adopt, adapt, or reject on merit.\n\n"
+        "Be honest about Reference coverage per concept. If Reference facets were returned for a concept, use "
+        "their structure, rationale, when_to_use, tradeoffs, and implementation_hooks in at least one pattern "
+        "when relevant, and set source.reference_concept to that concept with source.facet_kind design or "
+        "implementation. Do not say Reference facets are absent for a concept that appears in the retrieved "
+        "facets. Set source.facet_kind to none only for patterns derived solely from the RFC or repository, or "
+        "for concepts that genuinely returned no Reference entry.\n\n"
         "For each pattern:\n"
-        "- pattern: concise name of the prior-art pattern or candidate.\n"
-        "- where_seen: Reference source, repo location, or both; say when evidence is absent or weak.\n"
+        "- name: concise name of the prior-art pattern or candidate.\n"
+        "- source: nested object with reference_concept, facet_kind, and where. facet_kind must be design, "
+        "implementation, or none.\n"
         "- when_applies: conditions that make the pattern appropriate.\n"
-        "- tradeoffs: concrete benefits, costs, and failure modes.\n"
-        "- disposition: exactly adopt, adapt, or reject for this RFC.\n"
-        "- rationale: why that disposition follows from the RFC, Reference, and repo context.\n\n"
+        "- tradeoffs: nested object with pros and cons arrays; include concrete benefits, costs, and failure "
+        "modes.\n"
+        "- disposition: nested object with choice and why. choice must be adopt, adapt, or reject for this RFC.\n"
+        "- traces_to: approach elements this pattern addresses, such as normalized_problem.success_criteria[0] "
+        "or constraints.hard_constraints[0].\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
-        + f"\nNormalized problem:\n{normalized_problem_text}\n"
+        + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nContext:\n{context_text}\n"
         + f"\nReference key concepts queried:\n{concepts_text}\n"
         + f"\nReference facets read before this call:\n{reference_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1646,18 +1738,27 @@ def _surface_risks_prompt(
 def _prior_art_key_concepts(
     rfc_view: dict[str, Any],
     context: Mapping[str, Any] | None = None,
-    normalized_problem: Mapping[str, Any] | None = None,
+    approach: Mapping[str, Any] | None = None,
 ) -> list[str]:
     concepts: list[str] = []
-    context = context or {}
+    reference_context = dict(context or {})
     for field in ("reference_terms", "key_concepts", "concepts", "terms"):
-        _extend_concepts(concepts, context.get(field))
+        _extend_concepts(concepts, reference_context.get(field))
 
-    _add_concept(concepts, rfc_view.get("title", ""))
-    _add_concept(concepts, rfc_view.get("affected_area", ""))
-    _extend_concepts(concepts, _explicit_terms(_rfc_text(rfc_view)))
-    if normalized_problem:
-        _extend_concepts(concepts, _explicit_terms(json.dumps(normalized_problem, sort_keys=True, default=str)))
+    extraction_text = (
+        _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + "\nAccumulated approach:\n"
+        + json.dumps(approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    )
+    extracted = reference._extract_reference_terms(extraction_text, reference_context)
+    _extend_concepts(concepts, extracted)
+
+    if not concepts:
+        _add_concept(concepts, rfc_view.get("title", ""))
+        _add_concept(concepts, rfc_view.get("affected_area", ""))
+        _extend_concepts(concepts, _explicit_terms(_rfc_text(rfc_view)))
+        if approach:
+            _extend_concepts(concepts, _explicit_terms(json.dumps(approach, sort_keys=True, default=str)))
 
     if len(concepts) < 6:
         _extend_concepts(concepts, _important_phrases(_rfc_text(rfc_view)))
@@ -1718,8 +1819,8 @@ def _read_prior_art_reference_facets(
             if not candidates:
                 candidates = reference.query({"term": term, "kind": kind})
             term_facets[kind] = _trim_reference_candidates(candidates)
-        if term_facets["design"] or term_facets["implementation"]:
-            facets.append(term_facets)
+        term_facets["status"] = "retrieved" if term_facets["design"] or term_facets["implementation"] else "not_found"
+        facets.append(term_facets)
     return facets
 
 
@@ -2134,23 +2235,180 @@ def _parse_prior_art_map(raw: str) -> dict[str, Any]:
     if not isinstance(patterns, list) or not 3 <= len(patterns) <= 6:
         return _prior_art_error("Codex prior-art mapping returned invalid patterns")
 
-    parsed_patterns: list[dict[str, str]] = []
+    parsed_patterns: list[dict[str, Any]] = []
     for pattern in patterns:
         if not isinstance(pattern, dict):
             return _prior_art_error("Codex prior-art mapping returned invalid pattern item")
         if set(pattern) != set(PRIOR_ART_PATTERN_FIELDS):
             return _prior_art_error("Codex prior-art mapping returned invalid pattern fields")
-        if not all(isinstance(pattern[field], str) for field in PRIOR_ART_PATTERN_FIELDS):
-            return _prior_art_error("Codex prior-art mapping returned invalid pattern values")
-        if pattern["disposition"] not in PRIOR_ART_DISPOSITIONS:
+        source = _parse_prior_art_source(pattern.get("source"))
+        if source is None:
+            return _prior_art_error("Codex prior-art mapping returned invalid source")
+        tradeoffs = _parse_prior_art_tradeoffs(pattern.get("tradeoffs"))
+        if tradeoffs is None:
+            return _prior_art_error("Codex prior-art mapping returned invalid tradeoffs")
+        disposition = _parse_prior_art_disposition(pattern.get("disposition"))
+        if disposition is None:
             return _prior_art_error("Codex prior-art mapping returned invalid disposition")
-        parsed_patterns.append({field: pattern[field] for field in PRIOR_ART_PATTERN_FIELDS})
+        traces_to = pattern.get("traces_to")
+        if not isinstance(traces_to, list) or not all(isinstance(item, str) for item in traces_to):
+            return _prior_art_error("Codex prior-art mapping returned invalid traces_to")
+        name = pattern.get("name")
+        when_applies = pattern.get("when_applies")
+        if not isinstance(name, str) or not isinstance(when_applies, str):
+            return _prior_art_error("Codex prior-art mapping returned invalid pattern values")
+        parsed_patterns.append(
+            {
+                "name": name,
+                "source": source,
+                "when_applies": when_applies,
+                "tradeoffs": tradeoffs,
+                "disposition": disposition,
+                "traces_to": list(traces_to),
+            }
+        )
 
     return {"patterns": parsed_patterns}
 
 
 def _prior_art_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
+
+
+def _parse_prior_art_source(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(PRIOR_ART_SOURCE_FIELDS):
+        return None
+    reference_concept = value.get("reference_concept")
+    facet_kind = value.get("facet_kind")
+    where = value.get("where")
+    if not isinstance(reference_concept, str) or facet_kind not in PRIOR_ART_FACET_KINDS or not isinstance(where, str):
+        return None
+    return {"reference_concept": reference_concept, "facet_kind": facet_kind, "where": where}
+
+
+def _parse_prior_art_tradeoffs(value: Any) -> dict[str, list[str]] | None:
+    if not isinstance(value, dict) or set(value) != set(PRIOR_ART_TRADEOFF_FIELDS):
+        return None
+    pros = value.get("pros")
+    cons = value.get("cons")
+    if not isinstance(pros, list) or not isinstance(cons, list):
+        return None
+    if not all(isinstance(item, str) for item in pros + cons):
+        return None
+    return {"pros": list(pros), "cons": list(cons)}
+
+
+def _parse_prior_art_disposition(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(PRIOR_ART_DISPOSITION_FIELDS):
+        return None
+    choice = value.get("choice")
+    why = value.get("why")
+    if choice not in PRIOR_ART_DISPOSITIONS or not isinstance(why, str):
+        return None
+    return {"choice": choice, "why": why}
+
+
+def _prior_art_approach_context(approach: Mapping[str, Any] | None) -> dict[str, Any]:
+    if approach is None:
+        return {}
+    if "normalized_problem" in approach or "constraints" in approach:
+        return dict(approach)
+    if set(approach) == set(NORMALIZED_PROBLEM_FIELDS):
+        return {"normalized_problem": dict(approach)}
+    return dict(approach)
+
+
+def _lint_prior_art_map(
+    parsed: Mapping[str, Any],
+    reference_facets: list[dict[str, Any]],
+    approach: Mapping[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    for path, value in _walk_normalized_problem_strings(parsed):
+        if not value.strip():
+            errors.append(f"{path} is empty")
+        if _contains_japanese_script(value):
+            errors.append(f"{path} must be English-only")
+
+    patterns = parsed.get("patterns")
+    if not isinstance(patterns, list):
+        return errors
+
+    retrieved = _retrieved_reference_facet_index(reference_facets)
+    used_retrieved_facet = False
+    trace_targets = _prior_art_trace_targets(approach)
+    for index, pattern in enumerate(patterns):
+        if not isinstance(pattern, Mapping):
+            continue
+        source = pattern.get("source")
+        if not isinstance(source, Mapping):
+            continue
+        concept = source.get("reference_concept")
+        facet_kind = source.get("facet_kind")
+        if not isinstance(concept, str) or not isinstance(facet_kind, str):
+            continue
+        canonical_concept = concept.strip().lower()
+        if facet_kind == "none":
+            if canonical_concept in retrieved:
+                errors.append(
+                    f"patterns[{index}].source.facet_kind is none but Reference returned facets for {concept}"
+                )
+        elif facet_kind in ("design", "implementation"):
+            if facet_kind not in retrieved.get(canonical_concept, set()):
+                errors.append(
+                    f"patterns[{index}].source.facet_kind {facet_kind} does not match retrieved facets for {concept}"
+                )
+            else:
+                used_retrieved_facet = True
+
+        traces_to = pattern.get("traces_to")
+        if not isinstance(traces_to, list) or not traces_to:
+            errors.append(f"patterns[{index}].traces_to is empty")
+        elif trace_targets and not any(_prior_art_trace_is_known(str(trace), trace_targets) for trace in traces_to):
+            errors.append(f"patterns[{index}].traces_to must name normalized_problem or constraints elements")
+
+        tradeoffs = pattern.get("tradeoffs")
+        if isinstance(tradeoffs, Mapping):
+            for field in PRIOR_ART_TRADEOFF_FIELDS:
+                value = tradeoffs.get(field)
+                if not isinstance(value, list) or not value:
+                    errors.append(f"patterns[{index}].tradeoffs.{field} is empty")
+
+    if retrieved and not used_retrieved_facet:
+        errors.append("Reference facets were retrieved but no pattern cites a design or implementation facet")
+    return errors
+
+
+def _retrieved_reference_facet_index(reference_facets: list[dict[str, Any]]) -> dict[str, set[str]]:
+    retrieved: dict[str, set[str]] = {}
+    for facet in reference_facets:
+        if not isinstance(facet, Mapping):
+            continue
+        term = str(facet.get("term") or "").strip().lower()
+        if not term:
+            continue
+        kinds = {kind for kind in ("design", "implementation") if facet.get(kind)}
+        if kinds:
+            retrieved[term] = kinds
+    return retrieved
+
+
+def _prior_art_trace_targets(approach: Mapping[str, Any]) -> set[str]:
+    targets: set[str] = set()
+    for root in ("normalized_problem", "constraints"):
+        value = approach.get(root) if isinstance(approach, Mapping) else None
+        if not isinstance(value, Mapping):
+            continue
+        targets.add(root)
+        for path, _ in _walk_normalized_problem_strings(value):
+            if path:
+                targets.add(f"{root}.{path}")
+    return targets
+
+
+def _prior_art_trace_is_known(trace: str, targets: set[str]) -> bool:
+    canonical = _canonical_phrase(trace)
+    return any(canonical == target or canonical.startswith(f"{target}.") or canonical.startswith(f"{target}[") for target in targets)
 
 
 def _parse_candidate_approaches(raw: str) -> dict[str, Any]:

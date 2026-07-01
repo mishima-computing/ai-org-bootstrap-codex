@@ -387,28 +387,58 @@ def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, t
     expected = {
         "patterns": [
             {
-                "pattern": "Reference-first prior-art synthesis",
-                "where_seen": "Reference design facet for prior-art map.",
+                "name": "Reference-first prior-art synthesis",
+                "source": {
+                    "reference_concept": "prior-art map",
+                    "facet_kind": "design",
+                    "where": "Reference design facet for prior-art map.",
+                },
                 "when_applies": "Use when an RFC approach needs evidence before candidate generation.",
-                "tradeoffs": "Improves grounding but depends on Reference coverage.",
-                "disposition": "adopt",
-                "rationale": "The RFC explicitly requires Reference design and implementation facets.",
+                "tradeoffs": {
+                    "pros": ["Improves grounding before candidate generation."],
+                    "cons": ["Depends on Reference coverage."],
+                },
+                "disposition": {
+                    "choice": "adopt",
+                    "why": "The RFC explicitly requires Reference design facets.",
+                },
+                "traces_to": ["normalized_problem.problem", "constraints.hard_constraints[0].statement"],
             },
             {
-                "pattern": "Repo-native read-only inspection",
-                "where_seen": "Existing RFC steps use read-only Codex calls.",
+                "name": "Implementation hook synthesis",
+                "source": {
+                    "reference_concept": "prior-art map",
+                    "facet_kind": "implementation",
+                    "where": "Reference implementation facet for prior-art map.",
+                },
                 "when_applies": "Use when repository context can constrain a design without edits.",
-                "tradeoffs": "Keeps phases isolated but cannot verify changes.",
-                "disposition": "adapt",
-                "rationale": "Step 3 should read context but stop before candidate approaches.",
+                "tradeoffs": {
+                    "pros": ["Connects retrieved implementation hooks to candidate generation."],
+                    "cons": ["Cannot verify code changes in a read-only step."],
+                },
+                "disposition": {
+                    "choice": "adapt",
+                    "why": "Step 3 should read implementation knowledge but stop before candidate approaches.",
+                },
+                "traces_to": ["constraints.hard_constraints[0].implication.must"],
             },
             {
-                "pattern": "Frequency-based framework selection",
-                "where_seen": "General engine-selection discussions.",
+                "name": "Frequency-based framework selection",
+                "source": {
+                    "reference_concept": "framework selection",
+                    "facet_kind": "none",
+                    "where": "Grounded RFC and repo context only.",
+                },
                 "when_applies": "Only when frequency correlates with maintainability evidence.",
-                "tradeoffs": "Popularity can hide poor repository fit.",
-                "disposition": "reject",
-                "rationale": "The RFC says engines are judged on fit, not appearance count.",
+                "tradeoffs": {
+                    "pros": ["Can reveal common ecosystem choices."],
+                    "cons": ["Popularity can hide poor repository fit."],
+                },
+                "disposition": {
+                    "choice": "reject",
+                    "why": "The RFC says engines are judged on fit, not appearance count.",
+                },
+                "traces_to": ["constraints.soft_preferences[0].statement"],
             },
         ]
     }
@@ -467,13 +497,23 @@ def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, t
 
     monkeypatch.setattr(receive_module.reference, "lookup", fake_lookup)
     monkeypatch.setattr(receive_module.reference, "query", fake_query)
+    monkeypatch.setattr(
+        receive_module.reference,
+        "_extract_reference_terms",
+        lambda text, context: ["prior-art map", "framework selection"],
+    )
     monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    approach = {
+        "normalized_problem": {"problem": "Approach formation needs prior art."},
+        "constraints": _constraints(),
+    }
 
     result = receive_module._build_prior_art_map(
         rfc_view,
         tmp_path,
         {"reference_terms": ["prior-art map"], "language": "Python"},
-        {"problem": "Approach formation needs prior art."},
+        approach,
     )
 
     assert result == expected
@@ -483,7 +523,10 @@ def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, t
         {"reference_terms": ["prior-art map"], "language": "Python"},
         "implementation",
     ) in reference_calls
-    assert all(pattern["disposition"] in {"adopt", "adapt", "reject"} for pattern in result["patterns"])
+    assert result["patterns"][0]["source"]["reference_concept"] == "prior-art map"
+    assert result["patterns"][0]["source"]["facet_kind"] == "design"
+    assert result["patterns"][1]["source"]["facet_kind"] == "implementation"
+    assert all(pattern["disposition"]["choice"] in {"adopt", "adapt", "reject"} for pattern in result["patterns"])
     assert len(codex_calls) == 1
     repo, kwargs = codex_calls[0]
     assert repo == tmp_path.resolve()
@@ -494,11 +537,49 @@ def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, t
     assert "step 3" in kwargs["prompt"]
     assert "Reference design facets" in kwargs["prompt"]
     assert "Reference implementation facets" in kwargs["prompt"]
+    assert "structure" in kwargs["prompt"]
+    assert "implementation_hooks" in kwargs["prompt"]
+    assert "facet_kind to none only" in kwargs["prompt"]
+    assert "Accumulated approach so far" in kwargs["prompt"]
     assert "Inspect the repository read-only" in kwargs["prompt"]
     assert "Do not generate candidate approaches" in kwargs["prompt"]
     assert "Godot" in kwargs["prompt"]
     assert "Return only JSON matching the provided schema." in kwargs["prompt"]
     assert query_calls
+
+
+def test_build_prior_art_map_marks_none_when_reference_has_no_entry(monkeypatch, tmp_path):
+    expected = {
+        "patterns": [
+            _prior_art_pattern("RFC-only repository pattern", "adopt", facet_kind="none"),
+            _prior_art_pattern("Repo-local constraint pattern", "adapt", facet_kind="none"),
+            _prior_art_pattern("Unmatched concept fallback", "reject", facet_kind="none"),
+        ]
+    }
+
+    monkeypatch.setattr(receive_module.reference, "lookup", lambda term, context=None, kind=None: None)
+    monkeypatch.setattr(receive_module.reference, "query", lambda filters: [])
+    monkeypatch.setattr(
+        receive_module.reference,
+        "_extract_reference_terms",
+        lambda text, context: ["unknown design concept"],
+    )
+    monkeypatch.setattr(
+        receive_module.codex_exec,
+        "run_json",
+        lambda repo, **kwargs: {"ok": True, "raw": json.dumps(expected)},
+    )
+
+    result = receive_module._build_prior_art_map(
+        _rfc_view(),
+        tmp_path,
+        {"language": "Python"},
+        {"normalized_problem": _normalized_problem(), "constraints": _constraints()},
+    )
+
+    assert result == expected
+    assert {pattern["source"]["facet_kind"] for pattern in result["patterns"]} == {"none"}
+    assert all(pattern["source"]["reference_concept"] for pattern in result["patterns"])
 
 
 def test_build_prior_art_map_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
@@ -530,6 +611,7 @@ def test_build_prior_art_map_fails_closed_on_invalid_shape(monkeypatch, tmp_path
 
     monkeypatch.setattr(receive_module.reference, "lookup", lambda term, context=None, kind=None: None)
     monkeypatch.setattr(receive_module.reference, "query", lambda filters: [])
+    monkeypatch.setattr(receive_module.reference, "_extract_reference_terms", lambda text, context: ["prior-art map"])
 
     for payload in invalid_outputs:
         monkeypatch.setattr(
@@ -542,6 +624,7 @@ def test_build_prior_art_map_fails_closed_on_invalid_shape(monkeypatch, tmp_path
             _rfc_view(),
             tmp_path,
             {"reference_terms": ["prior-art map"]},
+            {"normalized_problem": _normalized_problem(), "constraints": _constraints()},
         )
 
         assert result["ok"] is False
@@ -557,7 +640,22 @@ def test_prior_art_map_schema_is_codex_valid():
     _assert_codex_valid_object_schema(schema)
 
     pattern = schema["properties"]["patterns"]["items"]
-    assert pattern["properties"]["disposition"]["enum"] == ["adopt", "adapt", "reject"]
+    source = pattern["properties"]["source"]
+    tradeoffs = pattern["properties"]["tradeoffs"]
+    disposition = pattern["properties"]["disposition"]
+    assert source["properties"]["facet_kind"]["enum"] == ["design", "implementation", "none"]
+    assert disposition["properties"]["choice"]["enum"] == ["adopt", "adapt", "reject"]
+    assert sorted(pattern["properties"]) == [
+        "disposition",
+        "name",
+        "source",
+        "traces_to",
+        "tradeoffs",
+        "when_applies",
+    ]
+    assert sorted(source["properties"]) == ["facet_kind", "reference_concept", "where"]
+    assert sorted(tradeoffs["properties"]) == ["cons", "pros"]
+    assert sorted(disposition["properties"]) == ["choice", "why"]
     assert schema["properties"]["patterns"]["minItems"] == 3
     assert schema["properties"]["patterns"]["maxItems"] == 6
 
@@ -1272,9 +1370,9 @@ def test_form_technical_approach_runs_full_generation_and_composes_section(monke
         assert approach == {"normalized_problem": _normalized_problem()}
         return _constraints()
 
-    def fake_prior_art(rfc_view, repo, context=None, normalized_problem=None):
+    def fake_prior_art(rfc_view, repo, context=None, approach=None):
         calls.append("build_prior_art_map")
-        assert normalized_problem == _normalized_problem()
+        assert approach == {"normalized_problem": _normalized_problem(), "constraints": _constraints()}
         return _prior_art_map()
 
     def fake_candidates(normalized_problem, constraints, prior_art_map, context=None):
@@ -1352,6 +1450,7 @@ def test_form_technical_approach_runs_full_generation_and_composes_section(monke
     assert result["approach"] == {
         "normalized_problem": _normalized_problem(),
         "constraints": _constraints(),
+        "prior_art": _prior_art_map(),
     }
 
     technical_approach = result["technical_approach"]
@@ -1404,7 +1503,7 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     monkeypatch.setattr(
         receive_module,
         "_build_prior_art_map",
-        lambda rfc_view, repo, context=None, normalized_problem=None: calls.append("build_prior_art_map")
+        lambda rfc_view, repo, context=None, approach=None: calls.append(("build_prior_art_map", approach))
         or _prior_art_map(),
     )
     monkeypatch.setattr(
@@ -1453,7 +1552,7 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     assert calls == [
         "normalize_problem",
         ("extract_constraints", {"normalized_problem": _normalized_problem()}),
-        "build_prior_art_map",
+        ("build_prior_art_map", {"normalized_problem": _normalized_problem(), "constraints": _constraints()}),
         "implementation_strategy",
         "right_size_patch_plan",
         "surface_risks",
@@ -1531,14 +1630,24 @@ def _rfc_view() -> dict[str, object]:
     }
 
 
-def _prior_art_pattern(name: str, disposition: str) -> dict[str, object]:
+def _prior_art_pattern(name: str, disposition: str, *, facet_kind: str = "design") -> dict[str, object]:
     return {
-        "pattern": name,
-        "where_seen": "Reference.",
+        "name": name,
+        "source": {
+            "reference_concept": name.lower(),
+            "facet_kind": facet_kind,
+            "where": "Reference." if facet_kind != "none" else "RFC or repository context.",
+        },
         "when_applies": "When applicable.",
-        "tradeoffs": "Tradeoffs.",
-        "disposition": disposition,
-        "rationale": "Rationale.",
+        "tradeoffs": {
+            "pros": ["Benefit."],
+            "cons": ["Cost."],
+        },
+        "disposition": {
+            "choice": disposition,
+            "why": "Rationale.",
+        },
+        "traces_to": ["normalized_problem.problem"],
     }
 
 
