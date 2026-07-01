@@ -453,12 +453,13 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
     return candidates
 
 
-def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def expand(term: str, context: Mapping[str, Any] | None = None, force: bool = False) -> dict[str, Any]:
     """Fetch, filter, annotate, and persist implementation and design knowledge for term."""
     context = dict(context or {})
-    recent_entry = _recent_research_entry(term)
-    if recent_entry is not None:
-        return copy.deepcopy(recent_entry)
+    if not force and not _reference_force_enabled():
+        recent_entry = _recent_research_entry(term)
+        if recent_entry is not None:
+            return copy.deepcopy(recent_entry)
 
     baseline = _codex_baseline(term, context)
     search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
@@ -568,7 +569,11 @@ def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any
     return copy.deepcopy(entry)
 
 
-def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def build_from_rfc(
+    rfc_view: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     """Build reference entries for implementation-bearing terms found in an RFC-shaped view."""
     context = dict(context or {})
     text = _rfc_text(rfc_view)
@@ -582,10 +587,10 @@ def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | Non
     parallelism = _reference_parallelism(len(terms))
     if parallelism <= 1:
         for term in terms:
-            outcomes[term] = _build_rfc_term(term, context)
+            outcomes[term] = _build_rfc_term(term, context, force)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
-            futures = {executor.submit(_build_rfc_term, term, context): term for term in terms}
+            futures = {executor.submit(_build_rfc_term, term, context, force): term for term in terms}
             for future in concurrent.futures.as_completed(futures):
                 term = futures[future]
                 try:
@@ -613,12 +618,12 @@ def build_from_rfc(rfc_view: Mapping[str, Any], context: Mapping[str, Any] | Non
     }
 
 
-def _build_rfc_term(term: str, context: Mapping[str, Any]) -> dict[str, Any]:
+def _build_rfc_term(term: str, context: Mapping[str, Any], force: bool = False) -> dict[str, Any]:
     try:
         existing = lookup(term, context)
         if existing is not None:
             return {"status": "hit", "entry": existing}
-        return {"status": "expanded", "entry": expand(term, context)}
+        return {"status": "expanded", "entry": expand(term, context, force=force)}
     except Exception as exc:
         return {"status": "failed", "error": _format_term_error(exc)}
 
@@ -646,6 +651,11 @@ def _reference_research_ttl_seconds() -> float:
     except ValueError:
         return float(REFERENCE_RESEARCH_TTL_SECONDS)
     return max(0.0, ttl)
+
+
+def _reference_force_enabled() -> bool:
+    raw = os.environ.get("AI_ORG_REFERENCE_FORCE")
+    return raw is not None and raw.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _recent_research_entry(term: str) -> dict[str, Any] | None:

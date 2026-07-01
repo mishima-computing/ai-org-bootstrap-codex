@@ -21,6 +21,7 @@ ORIGINAL_FETCH_DESIGN_CANDIDATES = reference.fetch_design_candidates
 @pytest.fixture(autouse=True)
 def default_no_design_lane(monkeypatch):
     monkeypatch.delenv("AI_ORG_REFERENCE_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("AI_ORG_REFERENCE_FORCE", raising=False)
     monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: [])
 
 
@@ -810,6 +811,68 @@ def test_expand_skips_recent_empty_research_without_searching(monkeypatch, tmp_p
     assert [attempt["last_searched_at"] for attempt in second["research"]] == [2000.0]
 
 
+def test_expand_force_bypasses_recent_research_and_runs_search_lanes(monkeypatch, tmp_path):
+    now = {"value": 2500.0}
+    calls = []
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation-fetch") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design-fetch") or [])
+
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 2510.0
+    entry = reference.expand("PKCE verifier rotation", {"language": "TypeScript"}, force=True)
+
+    assert entry["candidates"] == []
+    assert calls == [
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+    ]
+    assert [attempt["attempt"] for attempt in reference.audit("PKCE verifier rotation")["research"]] == [1, 2]
+    assert [attempt["last_searched_at"] for attempt in reference.audit("PKCE verifier rotation")["research"]] == [
+        2500.0,
+        2510.0,
+    ]
+
+
+def test_expand_env_force_bypasses_recent_research(monkeypatch, tmp_path):
+    now = {"value": 2600.0}
+    calls = []
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation-fetch") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design-fetch") or [])
+
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 2610.0
+    monkeypatch.setenv("AI_ORG_REFERENCE_FORCE", "1")
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    entry = reference.audit("PKCE verifier rotation")
+
+    assert entry is not None
+    assert calls == [
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+    ]
+    assert [attempt["last_searched_at"] for attempt in entry["research"]] == [2600.0, 2610.0]
+
+
 def test_expand_runs_when_research_is_older_than_ttl_or_never_searched(monkeypatch, tmp_path):
     now = {"value": 3000.0}
     calls = []
@@ -1380,7 +1443,7 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
             ]
         }
 
-    def expand(term, context):
+    def expand(term, context, force=False):
         expanded.append(term)
         return {"term": term, "candidates": [], "notes": "expanded"}
 
@@ -1406,6 +1469,24 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
     assert "members towns castles" not in expanded
 
 
+def test_build_from_rfc_propagates_force_to_expand(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    calls = []
+    monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: ["oauth verifier"])
+    monkeypatch.setattr(reference, "lookup", lambda term, context: None)
+
+    def expand(term, context, force=False):
+        calls.append((term, force))
+        return {"term": term, "candidates": [], "notes": "expanded"}
+
+    monkeypatch.setattr(reference, "expand", expand)
+
+    result = reference.build_from_rfc({"proposal": "Implement OAuth verifier."}, {"language": "TypeScript"}, force=True)
+
+    assert calls == [("oauth verifier", True)]
+    assert result["expanded"] == ["oauth verifier"]
+
+
 def test_build_from_rfc_uses_bounded_pool_and_isolates_term_failures(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "3")
@@ -1424,7 +1505,7 @@ def test_build_from_rfc_uses_bounded_pool_and_isolates_term_failures(monkeypatch
     max_active = 0
     active_lock = threading.Lock()
 
-    def expand(term, context):
+    def expand(term, context, force=False):
         nonlocal active, max_active
         with active_lock:
             active += 1
