@@ -255,6 +255,47 @@ PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+CANDIDATE_APPROACH_KINDS = (
+    "minimal_local",
+    "repo_native",
+    "general_architectural",
+    "do_nothing_defer",
+)
+CANDIDATE_APPROACH_FIELDS = (
+    "name",
+    "kind",
+    "summary",
+    "key_decisions",
+    "draws_on",
+)
+GENERATE_CANDIDATES_FIELDS = ("candidates",)
+
+GENERATE_CANDIDATES_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(GENERATE_CANDIDATES_FIELDS),
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(CANDIDATE_APPROACH_FIELDS),
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(CANDIDATE_APPROACH_KINDS)},
+                    "summary": {"type": "string"},
+                    "key_decisions": {"type": "array", "items": {"type": "string"}},
+                    "draws_on": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -521,6 +562,31 @@ def _build_prior_art_map(
     return _parse_prior_art_map(run["raw"])
 
 
+def _generate_candidates(
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    prior_art_map: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 4 of the documented 10-step Technical Approach procedure."""
+    # Step 4 of 10: generate candidate approaches from the already-normalized problem, constraints, and prior art.
+    if not all(isinstance(value, Mapping) for value in (normalized_problem, constraints, prior_art_map)):
+        return _candidate_generation_error("generate_candidates requires outputs from steps 1-3")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=GENERATE_CANDIDATES_SCHEMA,
+        prompt=_generate_candidates_prompt(normalized_problem, constraints, prior_art_map, context),
+        schema_filename="rfc-generate-candidates.schema.json",
+        output_filename="rfc-candidate-approaches.json",
+        failure_label="Codex candidate generation",
+    )
+    if not run["ok"]:
+        return _candidate_generation_error(run["error"])
+    return _parse_candidate_approaches(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -743,6 +809,47 @@ def _prior_art_map_prompt(
         + f"\nContext:\n{context_text}\n"
         + f"\nReference key concepts queried:\n{concepts_text}\n"
         + f"\nReference facets read before this call:\n{reference_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _generate_candidates_prompt(
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    prior_art_map: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 4 of AI Org's 10-step Technical Approach procedure: generate candidate "
+        "approaches.\n"
+        "Use only the outputs of steps 1 through 3 plus read-only repository inspection from the configured "
+        "repo root. Do not select a winner, evaluate candidates in a matrix, write an implementation strategy, "
+        "create a patch plan, or perform later Technical Approach steps. Do not modify files.\n\n"
+        "Generate candidate approaches that are distinct enough for later trade-off evaluation:\n"
+        "- Always include one minimal_local candidate: the smallest local change that can plausibly satisfy "
+        "the normalized problem and hard constraints.\n"
+        "- Always include one repo_native candidate: a reference-aligned approach that follows the repository's "
+        "existing architecture and the prior-art map.\n"
+        "- Include one general_architectural candidate only when a broader design is plausible under the "
+        "constraints and prior art.\n"
+        "- Optionally include do_nothing_defer when requirements are weak, ambiguous, blocked, or better "
+        "deferred; this defer candidate does not count toward the 2 to 3 substantive candidates.\n"
+        "- Produce 2 to 3 substantive candidates, excluding do_nothing_defer. Do not return more than one "
+        "candidate of the same kind.\n\n"
+        "For each candidate:\n"
+        "- name: concise approach name.\n"
+        "- kind: exactly one of minimal_local, repo_native, general_architectural, do_nothing_defer.\n"
+        "- summary: what this approach would do and why it is materially different.\n"
+        "- key_decisions: the main design choices this approach commits to or postpones.\n"
+        "- draws_on: prior-art pattern names, repository references, or Reference entries this candidate builds on.\n\n"
+        f"Normalized problem:\n{normalized_problem_text}\n"
+        f"\nConstraints:\n{constraints_text}\n"
+        f"\nPrior-art map:\n{prior_art_text}\n"
+        f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1004,6 +1111,65 @@ def _parse_prior_art_map(raw: str) -> dict[str, Any]:
 
 
 def _prior_art_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_candidate_approaches(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _candidate_generation_error(f"Codex candidate generation returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _candidate_generation_error("Codex candidate generation returned non-object JSON")
+    if set(parsed) != set(GENERATE_CANDIDATES_FIELDS):
+        return _candidate_generation_error("Codex candidate generation returned invalid fields")
+
+    candidates = parsed.get("candidates")
+    if not isinstance(candidates, list) or not 2 <= len(candidates) <= 4:
+        return _candidate_generation_error("Codex candidate generation returned invalid candidates")
+
+    parsed_candidates: list[dict[str, Any]] = []
+    seen_kinds: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return _candidate_generation_error("Codex candidate generation returned invalid candidate item")
+        if set(candidate) != set(CANDIDATE_APPROACH_FIELDS):
+            return _candidate_generation_error("Codex candidate generation returned invalid candidate fields")
+        if not all(isinstance(candidate[field], str) for field in ("name", "kind", "summary")):
+            return _candidate_generation_error("Codex candidate generation returned invalid candidate string fields")
+        if candidate["kind"] not in CANDIDATE_APPROACH_KINDS:
+            return _candidate_generation_error("Codex candidate generation returned invalid candidate kind")
+        if candidate["kind"] in seen_kinds:
+            return _candidate_generation_error("Codex candidate generation returned duplicate candidate kind")
+        for field in ("key_decisions", "draws_on"):
+            value = candidate.get(field)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                return _candidate_generation_error(f"Codex candidate generation returned invalid {field}")
+        seen_kinds.add(candidate["kind"])
+        parsed_candidates.append(
+            {
+                "name": candidate["name"],
+                "kind": candidate["kind"],
+                "summary": candidate["summary"],
+                "key_decisions": list(candidate["key_decisions"]),
+                "draws_on": list(candidate["draws_on"]),
+            }
+        )
+
+    if "minimal_local" not in seen_kinds:
+        return _candidate_generation_error("Codex candidate generation returned no minimal_local candidate")
+    if "repo_native" not in seen_kinds:
+        return _candidate_generation_error("Codex candidate generation returned no repo_native candidate")
+
+    substantive_count = sum(candidate["kind"] != "do_nothing_defer" for candidate in parsed_candidates)
+    if not 2 <= substantive_count <= 3:
+        return _candidate_generation_error("Codex candidate generation returned invalid substantive candidate count")
+
+    return {"candidates": parsed_candidates}
+
+
+def _candidate_generation_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 

@@ -362,6 +362,128 @@ def test_prior_art_map_schema_is_codex_valid():
     assert schema["properties"]["patterns"]["maxItems"] == 6
 
 
+def test_generate_candidates_returns_parsed_candidates(monkeypatch, tmp_path):
+    expected = {
+        "candidates": [
+            {
+                "name": "Local Parser Guard",
+                "kind": "minimal_local",
+                "summary": "Add the smallest RFC-local helper and parser needed for this formation step.",
+                "key_decisions": [
+                    "Reuse the existing codex_exec.run_json path.",
+                    "Keep validation private to receive.py.",
+                ],
+                "draws_on": ["Repo-native read-only inspection"],
+            },
+            {
+                "name": "Reference-Aligned Receive Step",
+                "kind": "repo_native",
+                "summary": "Mirror the prior receive step helpers with a schema, prompt, parser, and tests.",
+                "key_decisions": [
+                    "Follow the step 1 through 3 helper layout.",
+                    "Use prior-art pattern names in draws_on.",
+                ],
+                "draws_on": ["Reference-first prior-art synthesis", "Repo-native read-only inspection"],
+            },
+            {
+                "name": "Approach Strategy Layer",
+                "kind": "general_architectural",
+                "summary": "Introduce a broader strategy boundary only if later approach steps need reuse.",
+                "key_decisions": [
+                    "Keep the layer conceptual at candidate generation time.",
+                    "Defer selection to later steps.",
+                ],
+                "draws_on": ["Frequency-based framework selection"],
+            },
+        ]
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert result == expected
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.GENERATE_CANDIDATES_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-generate-candidates.schema.json"
+    assert kwargs["output_filename"] == "rfc-candidate-approaches.json"
+    assert kwargs["failure_label"] == "Codex candidate generation"
+    assert "step 4" in kwargs["prompt"]
+    assert "Always include one minimal_local candidate" in kwargs["prompt"]
+    assert "Always include one repo_native candidate" in kwargs["prompt"]
+    assert "general_architectural" in kwargs["prompt"]
+    assert "do_nothing_defer" in kwargs["prompt"]
+    assert "does not count toward the 2 to 3 substantive candidates" in kwargs["prompt"]
+    assert "Do not select a winner" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+
+
+def test_generate_candidates_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid_minimal = _candidate("Minimal", "minimal_local")
+    valid_repo = _candidate("Repo Native", "repo_native")
+    valid_general = _candidate("General", "general_architectural")
+    valid_defer = _candidate("Defer", "do_nothing_defer")
+    invalid_outputs = [
+        {"candidates": [valid_minimal]},
+        {"candidates": [valid_minimal, valid_repo], "extra": "not allowed"},
+        {"candidates": [{**valid_minimal, "extra": "not allowed"}, valid_repo]},
+        {"candidates": [{**valid_minimal, "kind": "unknown"}, valid_repo]},
+        {"candidates": [{**valid_minimal, "key_decisions": [42]}, valid_repo]},
+        {"candidates": [valid_minimal, {**valid_repo, "draws_on": "Reference"}]},
+        {"candidates": [valid_minimal, _candidate("Duplicate", "minimal_local")]},
+        {"candidates": [valid_minimal, valid_general]},
+        {"candidates": [valid_defer, valid_minimal]},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._generate_candidates(
+            _normalized_problem(),
+            _constraints(),
+            _prior_art_map(),
+            {"repo": tmp_path},
+        )
+
+        assert result["ok"] is False
+        assert "Codex candidate generation returned" in result["error"]
+
+
+def test_generate_candidates_schema_is_codex_valid():
+    schema = receive_module.GENERATE_CANDIDATES_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    candidate = schema["properties"]["candidates"]["items"]
+    assert candidate["properties"]["kind"]["enum"] == [
+        "minimal_local",
+        "repo_native",
+        "general_architectural",
+        "do_nothing_defer",
+    ]
+    assert schema["properties"]["candidates"]["minItems"] == 2
+    assert schema["properties"]["candidates"]["maxItems"] == 4
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -401,4 +523,53 @@ def _prior_art_pattern(name: str, disposition: str) -> dict[str, object]:
         "tradeoffs": "Tradeoffs.",
         "disposition": disposition,
         "rationale": "Rationale.",
+    }
+
+
+def _normalized_problem() -> dict[str, object]:
+    return {
+        "problem": "RFC formation needs candidate approaches.",
+        "affected": "RFC reviewers and implementation agents.",
+        "current_inadequacy": "Prior-art evidence exists but no approach options are generated.",
+        "success_criteria": ["Generate distinct candidate approaches."],
+        "non_goals": ["Do not select a candidate in step 4."],
+    }
+
+
+def _constraints() -> dict[str, object]:
+    return {
+        "hard_constraints": [
+            {
+                "constraint": "Keep RFC receive isolated from patch and merge modules.",
+                "source": "repo",
+                "why": "RFC formation must not import later phases.",
+            }
+        ],
+        "soft_preferences": [
+            {
+                "preference": "Reuse existing RFC Codex helper patterns.",
+                "source": "repo",
+                "why": "Steps 1 through 3 already use codex_exec.run_json.",
+            }
+        ],
+    }
+
+
+def _prior_art_map() -> dict[str, object]:
+    return {
+        "patterns": [
+            _prior_art_pattern("Reference-first prior-art synthesis", "adopt"),
+            _prior_art_pattern("Repo-native read-only inspection", "adapt"),
+            _prior_art_pattern("Frequency-based framework selection", "reject"),
+        ]
+    }
+
+
+def _candidate(name: str, kind: str) -> dict[str, object]:
+    return {
+        "name": name,
+        "kind": kind,
+        "summary": "Summary.",
+        "key_decisions": ["Decision."],
+        "draws_on": ["Reference-first prior-art synthesis"],
     }
