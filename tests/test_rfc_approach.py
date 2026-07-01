@@ -484,6 +484,146 @@ def test_generate_candidates_schema_is_codex_valid():
     assert schema["properties"]["candidates"]["maxItems"] == 4
 
 
+def test_evaluate_candidates_returns_parsed_matrix(monkeypatch, tmp_path):
+    candidates = _candidates()
+    expected = {
+        "evaluations": [
+            {
+                "candidate_name": "Minimal",
+                "scores": _evaluation_scores(
+                    problem_fit="medium - solves the core problem with narrow scope.",
+                    repo_fit="high - follows existing receive.py helper boundaries.",
+                ),
+                "summary": "Lowest implementation cost, with limited architectural improvement.",
+            },
+            {
+                "candidate_name": "Repo Native",
+                "scores": _evaluation_scores(
+                    problem_fit="high - covers the normalized problem directly.",
+                    repo_fit="high - mirrors the established RFC approach formation pattern.",
+                ),
+                "summary": "Best repository fit while keeping the step isolated.",
+            },
+        ]
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._evaluate_candidates(
+        candidates,
+        _normalized_problem(),
+        _constraints(),
+        {"repo": tmp_path},
+    )
+
+    assert result == expected
+    assert len(result["evaluations"]) == len(candidates["candidates"])
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.EVALUATE_CANDIDATES_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-evaluate-candidates.schema.json"
+    assert kwargs["output_filename"] == "rfc-candidate-evaluations.json"
+    assert kwargs["failure_label"] == "Codex candidate evaluation"
+    assert "step 5" in kwargs["prompt"]
+    assert "compact matrix" in kwargs["prompt"]
+    assert "Do not select a winner" in kwargs["prompt"]
+    assert "Return one evaluation per candidate" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+    for evaluation in result["evaluations"]:
+        assert set(evaluation["scores"]) == set(receive_module.CANDIDATE_EVALUATION_SCORE_FIELDS)
+
+
+def test_evaluate_candidates_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid = {
+        "evaluations": [
+            {
+                "candidate_name": "Minimal",
+                "scores": _evaluation_scores(),
+                "summary": "Summary.",
+            },
+            {
+                "candidate_name": "Repo Native",
+                "scores": _evaluation_scores(),
+                "summary": "Summary.",
+            },
+        ]
+    }
+    invalid_outputs = [
+        {"evaluations": [valid["evaluations"][0]]},
+        {"evaluations": valid["evaluations"], "extra": "not allowed"},
+        {"evaluations": [{**valid["evaluations"][0], "extra": "not allowed"}, valid["evaluations"][1]]},
+        {"evaluations": [{**valid["evaluations"][0], "candidate_name": "Unknown"}, valid["evaluations"][1]]},
+        {"evaluations": [valid["evaluations"][0], {**valid["evaluations"][1], "summary": 42}]},
+        {"evaluations": [{**valid["evaluations"][0], "scores": "bad"}, valid["evaluations"][1]]},
+        {
+            "evaluations": [
+                {
+                    **valid["evaluations"][0],
+                    "scores": {**_evaluation_scores(), "extra": "not allowed"},
+                },
+                valid["evaluations"][1],
+            ]
+        },
+        {
+            "evaluations": [
+                {
+                    **valid["evaluations"][0],
+                    "scores": {field: "high - reason." for field in receive_module.CANDIDATE_EVALUATION_SCORE_FIELDS[:-1]},
+                },
+                valid["evaluations"][1],
+            ]
+        },
+        {
+            "evaluations": [
+                {
+                    **valid["evaluations"][0],
+                    "scores": {**_evaluation_scores(), "risk": 42},
+                },
+                valid["evaluations"][1],
+            ]
+        },
+        {"evaluations": [valid["evaluations"][0], {**valid["evaluations"][1], "candidate_name": "Minimal"}]},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._evaluate_candidates(
+            _candidates(),
+            _normalized_problem(),
+            _constraints(),
+            {"repo": tmp_path},
+        )
+
+        assert result["ok"] is False
+        assert "Codex candidate evaluation returned" in result["error"]
+
+
+def test_evaluate_candidates_schema_is_codex_valid():
+    schema = receive_module.EVALUATE_CANDIDATES_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    evaluation = schema["properties"]["evaluations"]["items"]
+    scores = evaluation["properties"]["scores"]
+    assert scores["additionalProperties"] is False
+    assert sorted(scores["required"]) == sorted(receive_module.CANDIDATE_EVALUATION_SCORE_FIELDS)
+    assert sorted(scores["required"]) == sorted(scores["properties"])
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -573,3 +713,24 @@ def _candidate(name: str, kind: str) -> dict[str, object]:
         "key_decisions": ["Decision."],
         "draws_on": ["Reference-first prior-art synthesis"],
     }
+
+
+def _candidates() -> dict[str, object]:
+    return {"candidates": [_candidate("Minimal", "minimal_local"), _candidate("Repo Native", "repo_native")]}
+
+
+def _evaluation_scores(**overrides: str) -> dict[str, object]:
+    scores = {
+        "problem_fit": "high - fits the normalized problem.",
+        "repo_fit": "high - fits existing module boundaries.",
+        "complexity": "low - limited moving parts.",
+        "quality_attributes": "medium - preserves relevant quality attributes.",
+        "compat_migration": "high - no compatibility migration expected.",
+        "testability": "high - directly testable with existing unit tests.",
+        "operability": "medium - no operational burden expected.",
+        "reversibility": "high - easy to revise before later steps.",
+        "risk": "low - main risk is prompt ambiguity.",
+        "evidence": "high - supported by prior step outputs.",
+    }
+    scores.update(overrides)
+    return scores

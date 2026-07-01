@@ -296,6 +296,63 @@ GENERATE_CANDIDATES_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+CANDIDATE_EVALUATION_SCORE_FIELDS = (
+    "problem_fit",
+    "repo_fit",
+    "complexity",
+    "quality_attributes",
+    "compat_migration",
+    "testability",
+    "operability",
+    "reversibility",
+    "risk",
+    "evidence",
+)
+CANDIDATE_EVALUATION_FIELDS = (
+    "candidate_name",
+    "scores",
+    "summary",
+)
+EVALUATE_CANDIDATES_FIELDS = ("evaluations",)
+
+EVALUATE_CANDIDATES_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(EVALUATE_CANDIDATES_FIELDS),
+    "properties": {
+        "evaluations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(CANDIDATE_EVALUATION_FIELDS),
+                "properties": {
+                    "candidate_name": {"type": "string"},
+                    "scores": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(CANDIDATE_EVALUATION_SCORE_FIELDS),
+                        "properties": {
+                            "problem_fit": {"type": "string"},
+                            "repo_fit": {"type": "string"},
+                            "complexity": {"type": "string"},
+                            "quality_attributes": {"type": "string"},
+                            "compat_migration": {"type": "string"},
+                            "testability": {"type": "string"},
+                            "operability": {"type": "string"},
+                            "reversibility": {"type": "string"},
+                            "risk": {"type": "string"},
+                            "evidence": {"type": "string"},
+                        },
+                    },
+                    "summary": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -587,6 +644,35 @@ def _generate_candidates(
     return _parse_candidate_approaches(run["raw"])
 
 
+def _evaluate_candidates(
+    candidates: Mapping[str, Any],
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 5 of the documented 10-step Technical Approach procedure."""
+    # Step 5 of 10: evaluate candidate approaches on the compact decision matrix without selecting one.
+    if not all(isinstance(value, Mapping) for value in (candidates, normalized_problem, constraints)):
+        return _candidate_evaluation_error("evaluate_candidates requires outputs from steps 1, 2, and 4")
+
+    candidate_names = _candidate_names(candidates)
+    if not candidate_names:
+        return _candidate_evaluation_error("evaluate_candidates requires named candidates from step 4")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=EVALUATE_CANDIDATES_SCHEMA,
+        prompt=_evaluate_candidates_prompt(candidates, normalized_problem, constraints, context),
+        schema_filename="rfc-evaluate-candidates.schema.json",
+        output_filename="rfc-candidate-evaluations.json",
+        failure_label="Codex candidate evaluation",
+    )
+    if not run["ok"]:
+        return _candidate_evaluation_error(run["error"])
+    return _parse_candidate_evaluations(run["raw"], candidate_names)
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -849,6 +935,44 @@ def _generate_candidates_prompt(
         f"Normalized problem:\n{normalized_problem_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nPrior-art map:\n{prior_art_text}\n"
+        f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _evaluate_candidates_prompt(
+    candidates: Mapping[str, Any],
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    candidates_text = json.dumps(candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 5 of AI Org's 10-step Technical Approach procedure: evaluate candidates.\n"
+        "Use only the candidate approaches from step 4, the normalized problem from step 1, the constraints "
+        "from step 2, and read-only repository inspection from the configured repo root. Do not select a "
+        "winner, write an implementation strategy, create a patch plan, or perform later Technical Approach "
+        "steps. Do not modify files.\n\n"
+        "Evaluate every candidate exactly once on this compact matrix:\n"
+        "- problem_fit: how directly the candidate satisfies the normalized problem and success criteria.\n"
+        "- repo_fit: how well it fits existing module boundaries, conventions, and ownership.\n"
+        "- complexity: implementation and maintenance complexity.\n"
+        "- quality_attributes: performance, security, reliability, usability, or other relevant qualities.\n"
+        "- compat_migration: compatibility, migration, schema, API, data, and configuration impact.\n"
+        "- testability: how directly the candidate can be verified with the repository's test style.\n"
+        "- operability: runtime, rollout, observability, support, or operational impact where relevant.\n"
+        "- reversibility: how easy the choice is to undo, narrow, or replace later.\n"
+        "- risk: main uncertainty, failure mode, or delivery risk.\n"
+        "- evidence: strongest supporting or opposing evidence from the RFC, constraints, repository, or context.\n\n"
+        "Each score must be a short assessment with a rating and one-line reason, such as "
+        "'high - fits existing module boundaries'. The summary must briefly state the candidate's overall "
+        "trade-off profile. Return one evaluation per candidate and use the candidate name exactly as given.\n\n"
+        f"Candidate approaches:\n{candidates_text}\n"
+        f"\nNormalized problem:\n{normalized_problem_text}\n"
+        f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
     )
@@ -1170,6 +1294,82 @@ def _parse_candidate_approaches(raw: str) -> dict[str, Any]:
 
 
 def _candidate_generation_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _candidate_names(candidates: Mapping[str, Any]) -> list[str]:
+    candidate_items = candidates.get("candidates")
+    if not isinstance(candidate_items, list):
+        return []
+
+    names: list[str] = []
+    for candidate in candidate_items:
+        if not isinstance(candidate, Mapping):
+            return []
+        name = candidate.get("name")
+        if not isinstance(name, str):
+            return []
+        names.append(name)
+    if len(names) != len(set(names)):
+        return []
+    return names
+
+
+def _parse_candidate_evaluations(raw: str, candidate_names: list[str]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _candidate_evaluation_error(f"Codex candidate evaluation returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _candidate_evaluation_error("Codex candidate evaluation returned non-object JSON")
+    if set(parsed) != set(EVALUATE_CANDIDATES_FIELDS):
+        return _candidate_evaluation_error("Codex candidate evaluation returned invalid fields")
+
+    evaluations = parsed.get("evaluations")
+    if not isinstance(evaluations, list) or len(evaluations) != len(candidate_names):
+        return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluations")
+
+    parsed_evaluations: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for evaluation in evaluations:
+        if not isinstance(evaluation, dict):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation item")
+        if set(evaluation) != set(CANDIDATE_EVALUATION_FIELDS):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation fields")
+        if not isinstance(evaluation["candidate_name"], str) or not isinstance(evaluation["summary"], str):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation strings")
+
+        candidate_name = evaluation["candidate_name"]
+        if candidate_name not in candidate_names:
+            return _candidate_evaluation_error("Codex candidate evaluation returned unknown candidate_name")
+        if candidate_name in seen_names:
+            return _candidate_evaluation_error("Codex candidate evaluation returned duplicate candidate_name")
+
+        scores = evaluation.get("scores")
+        if not isinstance(scores, dict):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid scores")
+        if set(scores) != set(CANDIDATE_EVALUATION_SCORE_FIELDS):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid score fields")
+        if not all(isinstance(scores[field], str) for field in CANDIDATE_EVALUATION_SCORE_FIELDS):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid score values")
+
+        seen_names.add(candidate_name)
+        parsed_evaluations.append(
+            {
+                "candidate_name": candidate_name,
+                "scores": {field: scores[field] for field in CANDIDATE_EVALUATION_SCORE_FIELDS},
+                "summary": evaluation["summary"],
+            }
+        )
+
+    if seen_names != set(candidate_names):
+        return _candidate_evaluation_error("Codex candidate evaluation returned incomplete candidate coverage")
+
+    return {"evaluations": parsed_evaluations}
+
+
+def _candidate_evaluation_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
