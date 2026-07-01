@@ -30,14 +30,16 @@
 # CANONICAL RECEIVE FLOW — ①②③④ (terum 2026-07-02, CONFIRMED). Read this before touching the Reference wiring.
 # This block is a "Memento tattoo": the correct flow lives HERE, in the code, because ADR/notes get missed.
 #   ① validate + ground        -> grounded RFC (what to build: problem + proposal).
-#   ② reference.build_from_rfc  -> POPULATE the single org-level Reference with THIS RFC's concepts
-#                                  (implementation AND design facets). ==> This is the PREREQUISITE for ③.
+#   ② reference.build_from_rfc  -> POPULATE the single org-level Reference with THIS RFC's concepts.
+#                                  DESIGN facets are synchronous: the RFC WAITS because ③ consumes them.
+#                                  IMPLEMENTATION facets are background: the RFC does NOT wait; this warms patch.
 #   ③ form_technical_approach   -> CONSUME the Reference by lookup to propose HOW to build it
 #                                  (Reference patterns + repo context + requester approach).
 #   ④ promote RFC (with Technical Approach) -> review.
 #
-# WHY ② PRECEDES ③ (do not reorder): ③'s prior-art map READS the Reference. If ② has not populated it, ③
-# reads an empty well and every prior_art node degrades to facet_kind='none'. ② fills the well first, ③ drinks.
+# WHY DESIGN ② PRECEDES ③ (do not reorder): ③'s prior-art map READS the Reference. If design ② has not
+# populated it, ③ reads an empty well and every prior_art node degrades to facet_kind='none'. Design ② fills
+# the well first, ③ drinks. Implementation ② runs in the background for the later Contributor/patch stage.
 #
 # THE 0/6 BUG THIS PREVENTS (root cause — do NOT reintroduce): ② and ③ must key off the SAME concept list.
 # The old code ran neither ② here NOR shared keys: build_from_rfc extracted terms from _rfc_text(rfc_view),
@@ -51,10 +53,12 @@
 # whole pipeline. reference search subprocess calls are bounded by AI_ORG_REFERENCE_SEARCH_TIMEOUT (default 180s);
 # on timeout that one concept degrades to empty/failed and the build CONTINUES — a hung search can never wedge ③.
 #
-# COST NOTE (deferred by terum — flow first, speed later): ② is heavy and synchronous (~25 min for DQ's ~30
-# concepts). Running the full build on every RFC is slow; the intended future is async/incremental/cache. The
-# hooks are already here — pass reference_terms=<prebuilt> (skip the internal build) or skip_reference_build=True
-# — so async ② can be added later WITHOUT changing ③. Do not add async now.
+# COST NOTE (implemented timing split): ② is heavy, so only DESIGN research is synchronous. IMPLEMENTATION
+# research is fired through reference.start_background_build(..., kinds=("implementation",)) and is not awaited
+# by receive; it warms the same single append-only WAL SQLite Reference for Contributor/patch. Patch/tests can
+# drain it with reference.await_background_builds(), and patch still uses expand-on-miss for gaps. WAL plus short
+# write transactions keep concurrent foreground reads and background writes safe. The hooks remain: pass
+# reference_terms=<prebuilt> or skip_reference_build=True to skip the internal build entirely.
 # ==========================================================================================================
 #
 # TECHNICAL APPROACH — where the design is FORMED (BUILT: form_technical_approach; grounded in Linux/RFC review):
@@ -1508,9 +1512,10 @@ def form_technical_approach(
 
     prior_art_reference_terms = reference_terms
     if prior_art_reference_terms is None and not skip_reference_build:
-        reference_build = reference.build_from_rfc(rfc_view, approach_context)
-        prior_art_reference_terms = _reference_terms_from_build_result(reference_build)
-        steps["build_reference_from_rfc"] = _json_safe(reference_build)
+        design_build = reference.build_from_rfc(rfc_view, approach_context, kinds=("design",))
+        prior_art_reference_terms = _reference_terms_from_build_result(design_build)
+        steps["build_reference_from_rfc"] = _json_safe(design_build)
+        reference.start_background_build(rfc_view, approach_context, kinds=("implementation",))
 
     started_at = start_step()
     prior_art = _build_prior_art_map(

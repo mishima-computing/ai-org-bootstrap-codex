@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import concurrent.futures
+from concurrent.futures.thread import _threads_queues, _worker
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -18,8 +20,10 @@ import tempfile
 import threading
 import time
 from typing import Any, Mapping
+import weakref
 
 
+LOGGER = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STORE_PATH = Path("~/.ai-org/reference/reference.sqlite3")
 
@@ -52,6 +56,8 @@ DESIGN_CANDIDATE_FIELDS = (
     "lang_env_version",
 )
 CANDIDATE_KINDS = {"implementation", "design"}
+REFERENCE_KIND_ORDER = ("implementation", "design")
+REFERENCE_RESEARCH_KINDS_PREFIX = "[reference-kinds:"
 EXAMINED_FIELDS = ("repo", "language", "outcome", "found_via")
 EXAMINED_OUTCOMES = {
     "kept",
@@ -351,10 +357,44 @@ WEB_SEARCH_PER_MIN = _env_int("AI_ORG_WEB_SEARCH_PER_MIN", 12)
 GH_SEARCH_RETRY_BACKOFF_SECONDS = 2.0
 
 _REFERENCE_DB_WRITE_LOCK = threading.Lock()
+_BACKGROUND_BUILD_LOCK = threading.Lock()
+_BACKGROUND_BUILD_FUTURES: set[concurrent.futures.Future[Any]] = set()
 _GH_SEARCH_LOCK = threading.Lock()
 _GH_SEARCH_TIMESTAMPS: list[float] = []
 _WEB_SEARCH_LOCK = threading.Lock()
 _WEB_SEARCH_TIMESTAMPS: list[float] = []
+
+
+class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            thread = threading.Thread(
+                name=thread_name,
+                target=_worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._create_worker_context(),
+                    self._work_queue,
+                ),
+                daemon=True,
+            )
+            thread.start()
+            self._threads.add(thread)
+            _threads_queues[thread] = self._work_queue
+
+
+_BACKGROUND_BUILD_EXECUTOR = _DaemonThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="ai-org-reference-background",
+)
 
 
 def lookup(term: str, context: Mapping[str, Any] | None = None, kind: str | None = None) -> dict[str, Any] | None:
@@ -377,7 +417,10 @@ def lookup(term: str, context: Mapping[str, Any] | None = None, kind: str | None
 
 def audit(term: str) -> dict[str, Any] | None:
     """Read the full maintenance record, including audit and provenance fields."""
-    return _read_entry(term)
+    entry = _read_entry(term)
+    if entry is None:
+        return None
+    return _public_research_entry(entry)
 
 
 def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
@@ -457,35 +500,47 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
     return candidates
 
 
-def expand(term: str, context: Mapping[str, Any] | None = None, force: bool = False) -> dict[str, Any]:
-    """Fetch, filter, annotate, and persist implementation and design knowledge for term."""
+def expand(
+    term: str,
+    context: Mapping[str, Any] | None = None,
+    force: bool = False,
+    kinds: Any | None = None,
+) -> dict[str, Any]:
+    """Fetch, filter, annotate, and persist selected knowledge lanes for term."""
+    requested_kinds = _reference_kinds(kinds)
     context = dict(context or {})
     context.setdefault("_reference_codex_timeouts", [])
     if not force and not _reference_force_enabled():
-        recent_entry = _recent_research_entry(term)
+        recent_entry = _recent_research_entry(term, requested_kinds)
         if recent_entry is not None:
             return copy.deepcopy(recent_entry)
 
-    baseline = _codex_baseline(term, context)
-    search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
     examined: list[dict[str, str]] = []
-    implementation_fetched = fetch_candidates(
-        term,
-        {
-            **context,
-            "_reference_search_keywords": search_keywords,
-            "_reference_examined": examined,
-        },
-    )
+    baseline = ""
+    search_keywords: list[str] = []
+    implementation_fetched: list[dict[str, Any]] = []
+    if "implementation" in requested_kinds:
+        baseline = _codex_baseline(term, context)
+        search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
+        implementation_fetched = fetch_candidates(
+            term,
+            {
+                **context,
+                "_reference_search_keywords": search_keywords,
+                "_reference_examined": examined,
+            },
+        )
     design_keywords: list[str] = []
-    design_fetched = fetch_design_candidates(
-        term,
-        {
-            **context,
-            "_reference_design_search_keywords": design_keywords,
-            "_reference_examined": examined,
-        },
-    )
+    design_fetched: list[dict[str, Any]] = []
+    if "design" in requested_kinds:
+        design_fetched = fetch_design_candidates(
+            term,
+            {
+                **context,
+                "_reference_design_search_keywords": design_keywords,
+                "_reference_examined": examined,
+            },
+        )
     fetched = implementation_fetched + design_fetched
 
     kept: list[dict[str, Any]] = []
@@ -571,18 +626,20 @@ def expand(term: str, context: Mapping[str, Any] | None = None, force: bool = Fa
         "search_keywords": search_keywords,
         "examined": _clean_examined(examined),
         "candidates": kept,
-        "notes": notes,
+        "notes": _notes_with_research_kinds(notes, requested_kinds),
     }
     _write_entry(entry)
-    return copy.deepcopy(entry)
+    return _public_research_entry(copy.deepcopy(entry))
 
 
 def build_from_rfc(
     rfc_view: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
     force: bool = False,
+    kinds: Any | None = None,
 ) -> dict[str, Any]:
     """Build reference entries for implementation-bearing terms found in an RFC-shaped view."""
+    requested_kinds = _reference_kinds(kinds)
     context = dict(context or {})
     text = _rfc_text(rfc_view)
     built: dict[str, Any] = {}
@@ -605,10 +662,13 @@ def build_from_rfc(
     parallelism = _reference_parallelism(len(terms))
     if parallelism <= 1:
         for term in terms:
-            outcomes[term] = _build_rfc_term(term, context, force)
+            outcomes[term] = _build_rfc_term(term, context, force, requested_kinds)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
-            futures = {executor.submit(_build_rfc_term, term, context, force): term for term in terms}
+            futures = {
+                executor.submit(_build_rfc_term, term, context, force, requested_kinds): term
+                for term in terms
+            }
             for future in concurrent.futures.as_completed(futures):
                 term = futures[future]
                 try:
@@ -637,14 +697,120 @@ def build_from_rfc(
     }
 
 
-def _build_rfc_term(term: str, context: Mapping[str, Any], force: bool = False) -> dict[str, Any]:
+def _build_rfc_term(
+    term: str,
+    context: Mapping[str, Any],
+    force: bool = False,
+    kinds: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     try:
-        existing = lookup(term, context)
+        requested_kinds = _reference_kinds(kinds)
+        existing = _lookup_term_for_kinds(term, context, requested_kinds)
         if existing is not None:
             return {"status": "hit", "entry": existing}
-        return {"status": "expanded", "entry": expand(term, context, force=force)}
+        return {"status": "expanded", "entry": expand(term, context, force=force, kinds=requested_kinds)}
     except Exception as exc:
         return {"status": "failed", "error": _format_term_error(exc)}
+
+
+def start_background_build(
+    rfc_view: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+    force: bool = False,
+    kinds: Any | None = ("implementation",),
+) -> concurrent.futures.Future[Any]:
+    """Start a non-blocking Reference build and return its Future."""
+    build_context = dict(context or {})
+    requested_kinds = _reference_kinds(kinds)
+    future = _BACKGROUND_BUILD_EXECUTOR.submit(
+        _background_build_from_rfc,
+        dict(rfc_view),
+        build_context,
+        force,
+        requested_kinds,
+    )
+    with _BACKGROUND_BUILD_LOCK:
+        _BACKGROUND_BUILD_FUTURES.add(future)
+    return future
+
+
+def await_background_builds(timeout: float | None = None) -> None:
+    """Wait for currently outstanding background Reference builds to finish."""
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    while True:
+        with _BACKGROUND_BUILD_LOCK:
+            futures = list(_BACKGROUND_BUILD_FUTURES)
+        if not futures:
+            return
+
+        wait_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        done, _pending = concurrent.futures.wait(futures, timeout=wait_timeout)
+        with _BACKGROUND_BUILD_LOCK:
+            _BACKGROUND_BUILD_FUTURES.difference_update(done)
+        for future in done:
+            future.result()
+        if deadline is not None and time.monotonic() >= deadline:
+            return
+
+
+def _background_build_from_rfc(
+    rfc_view: Mapping[str, Any],
+    context: Mapping[str, Any],
+    force: bool,
+    kinds: tuple[str, ...],
+) -> dict[str, Any]:
+    try:
+        return build_from_rfc(rfc_view, context, force=force, kinds=kinds)
+    except Exception as exc:
+        error = _format_term_error(exc)
+        LOGGER.exception("background Reference build failed: %s", error)
+        return {"ok": False, "error": error, "failed": {"__background_build__": error}}
+
+
+def _reference_kinds(kinds: Any | None) -> tuple[str, ...]:
+    if kinds is None:
+        return REFERENCE_KIND_ORDER
+    raw_values = [kinds] if isinstance(kinds, str) else list(kinds)
+    cleaned: set[str] = set()
+    for value in raw_values:
+        kind = str(value or "").strip().lower()
+        if kind not in CANDIDATE_KINDS:
+            raise ValueError(f"invalid reference kind: {value!r}")
+        cleaned.add(kind)
+    if not cleaned:
+        raise ValueError("reference kinds must not be empty")
+    return tuple(kind for kind in REFERENCE_KIND_ORDER if kind in cleaned)
+
+
+def _lookup_term_for_kinds(
+    term: str,
+    context: Mapping[str, Any],
+    kinds: tuple[str, ...],
+) -> dict[str, Any] | None:
+    entry = _read_entry(term)
+    if entry is None or not _entry_has_researched_kinds(entry, kinds):
+        return None
+    return {
+        "term": entry["term"],
+        "candidates": [
+            _consumption_candidate(candidate)
+            for candidate in entry["candidates"]
+            if _candidate_kind(candidate) in kinds and _candidate_matches_context(candidate, context)
+        ],
+    }
+
+
+def _entry_has_researched_kinds(entry: Mapping[str, Any], kinds: tuple[str, ...]) -> bool:
+    researched: set[str] = set()
+    research_history = entry.get("research")
+    if isinstance(research_history, list):
+        for attempt in research_history:
+            if isinstance(attempt, Mapping):
+                researched.update(_research_attempt_kinds(attempt))
+    for candidate in entry.get("candidates", []):
+        if isinstance(candidate, Mapping):
+            researched.add(_candidate_kind(candidate))
+    return set(kinds).issubset(researched)
 
 
 def _reference_parallelism(term_count: int) -> int:
@@ -696,7 +862,7 @@ def _record_reference_timeout(context: Mapping[str, Any], exc: BaseException) ->
         timeouts.append(str(exc))
 
 
-def _recent_research_entry(term: str) -> dict[str, Any] | None:
+def _recent_research_entry(term: str, kinds: tuple[str, ...]) -> dict[str, Any] | None:
     ttl = _reference_research_ttl_seconds()
     if ttl <= 0:
         return None
@@ -705,10 +871,15 @@ def _recent_research_entry(term: str) -> dict[str, Any] | None:
     if entry is None:
         return None
 
-    latest = entry["research"][-1]
-    elapsed = time.time() - float(latest["last_searched_at"])
-    if elapsed < ttl:
-        return entry
+    researched: set[str] = set()
+    now = time.time()
+    for attempt in reversed(entry["research"]):
+        elapsed = now - float(attempt["last_searched_at"])
+        if elapsed >= ttl:
+            continue
+        researched.update(_research_attempt_kinds(attempt))
+        if set(kinds).issubset(researched):
+            return _public_research_entry(entry)
     return None
 
 
@@ -2147,6 +2318,7 @@ def _row_get(row: Mapping[str, Any], key: str) -> Any:
 
 
 def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    notes, kinds = _split_research_kind_note(str(row["notes"] or ""))
     attempt = {
         "term": str(row["term"] or ""),
         "attempt": int(row["attempt"]),
@@ -2154,11 +2326,55 @@ def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "last_searched_at": float(row["last_searched_at"]),
         "search_keywords": json.loads(str(row["search_keywords"] or "[]")),
         "examined": json.loads(str(row["examined"] or "[]")),
-        "notes": str(row["notes"] or ""),
+        "notes": notes,
+        "_reference_kinds": kinds,
     }
     if not _valid_research_attempt(attempt):
         raise ValueError("invalid research attempt")
     return attempt
+
+
+def _notes_with_research_kinds(notes: str, kinds: tuple[str, ...]) -> str:
+    marker = f"{REFERENCE_RESEARCH_KINDS_PREFIX}{','.join(kinds)}]"
+    clean_notes = str(notes or "").strip()
+    return f"{marker} {clean_notes}".strip()
+
+
+def _split_research_kind_note(notes: str) -> tuple[str, tuple[str, ...]]:
+    text = str(notes or "")
+    if not text.startswith(REFERENCE_RESEARCH_KINDS_PREFIX):
+        return text, REFERENCE_KIND_ORDER
+    marker_end = text.find("]")
+    if marker_end < 0:
+        return text, REFERENCE_KIND_ORDER
+    raw_kinds = text[len(REFERENCE_RESEARCH_KINDS_PREFIX):marker_end].split(",")
+    try:
+        kinds = _reference_kinds([value for value in raw_kinds if value])
+    except ValueError:
+        kinds = REFERENCE_KIND_ORDER
+    return text[marker_end + 1 :].lstrip(), kinds
+
+
+def _research_attempt_kinds(attempt: Mapping[str, Any]) -> tuple[str, ...]:
+    kinds = attempt.get("_reference_kinds")
+    if isinstance(kinds, tuple) and all(kind in CANDIDATE_KINDS for kind in kinds):
+        return kinds
+    if isinstance(kinds, list) and all(kind in CANDIDATE_KINDS for kind in kinds):
+        return tuple(kind for kind in REFERENCE_KIND_ORDER if kind in set(kinds))
+    notes = str(attempt.get("notes") or "")
+    return _split_research_kind_note(notes)[1]
+
+
+def _public_research_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
+    public = copy.deepcopy(dict(entry))
+    public["notes"] = _split_research_kind_note(str(public.get("notes") or ""))[0]
+    research_history = public.get("research")
+    if isinstance(research_history, list):
+        for attempt in research_history:
+            if isinstance(attempt, dict):
+                attempt.pop("_reference_kinds", None)
+                attempt["notes"] = _split_research_kind_note(str(attempt.get("notes") or ""))[0]
+    return public
 
 
 def _consumption_candidate(candidate: Mapping[str, Any]) -> dict[str, str]:
@@ -2272,9 +2488,14 @@ def _valid_research_attempt(value: Any) -> bool:
         "search_keywords",
         "examined",
         "notes",
+        "_reference_kinds",
     }:
         return False
     if not isinstance(value["term"], str) or not isinstance(value["notes"], str):
+        return False
+    if not isinstance(value["_reference_kinds"], tuple) or not all(
+        kind in CANDIDATE_KINDS for kind in value["_reference_kinds"]
+    ):
         return False
     if not isinstance(value["attempt"], int) or value["attempt"] < 1:
         return False

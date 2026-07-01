@@ -1443,7 +1443,7 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
             ]
         }
 
-    def expand(term, context, force=False):
+    def expand(term, context, force=False, **kwargs):
         expanded.append(term)
         return {"term": term, "candidates": [], "notes": "expanded"}
 
@@ -1469,13 +1469,49 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
     assert "members towns castles" not in expanded
 
 
+def test_expand_kinds_restricts_research_lanes(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    calls = []
+
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "basic")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or [])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design") or [])
+
+    reference.expand("lane split design", {}, kinds=("design",))
+    assert calls == ["design"]
+
+    calls.clear()
+    reference.expand("lane split implementation", {}, kinds=("implementation",))
+    assert calls == ["baseline", "keywords", "implementation"]
+
+
+def test_build_from_rfc_passes_kinds_to_expand(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "1")
+    monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: ["design term", "implementation term"])
+    monkeypatch.setattr(reference, "lookup", lambda term, context, kind=None: None)
+    calls = []
+
+    def expand(term, context, force=False, kinds=None):
+        calls.append((term, kinds))
+        return {"term": term, "candidates": [], "notes": "expanded"}
+
+    monkeypatch.setattr(reference, "expand", expand)
+
+    result = reference.build_from_rfc({"proposal": "Build split lanes."}, {}, kinds=("design",))
+
+    assert calls == [("design term", ("design",)), ("implementation term", ("design",))]
+    assert result["processed_terms"] == ["design term", "implementation term"]
+
+
 def test_build_from_rfc_propagates_force_to_expand(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     calls = []
     monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: ["oauth verifier"])
     monkeypatch.setattr(reference, "lookup", lambda term, context: None)
 
-    def expand(term, context, force=False):
+    def expand(term, context, force=False, **kwargs):
         calls.append((term, force))
         return {"term": term, "candidates": [], "notes": "expanded"}
 
@@ -1505,7 +1541,7 @@ def test_build_from_rfc_uses_bounded_pool_and_isolates_term_failures(monkeypatch
     max_active = 0
     active_lock = threading.Lock()
 
-    def expand(term, context, force=False):
+    def expand(term, context, force=False, **kwargs):
         nonlocal active, max_active
         with active_lock:
             active += 1
@@ -1533,6 +1569,23 @@ def test_build_from_rfc_uses_bounded_pool_and_isolates_term_failures(monkeypatch
 
     monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "8")
     assert reference._reference_parallelism(10) == 8
+
+
+def test_background_build_failure_is_captured_in_future(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+
+    def fail_build(*args, **kwargs):
+        raise RuntimeError("background failed")
+
+    monkeypatch.setattr(reference, "build_from_rfc", fail_build)
+
+    future = reference.start_background_build({"proposal": "Build async."}, {}, kinds=("implementation",))
+    reference.await_background_builds(timeout=5)
+
+    assert future.done()
+    assert future.exception() is None
+    assert future.result()["ok"] is False
+    assert "RuntimeError: background failed" in future.result()["error"]
 
 
 def test_build_from_rfc_parallel_expand_writes_all_sqlite_rows(monkeypatch, tmp_path):
@@ -1591,6 +1644,71 @@ def test_build_from_rfc_parallel_expand_writes_all_sqlite_rows(monkeypatch, tmp_
     assert [row["term"] for row in candidate_rows] == sorted(terms)
     assert all(json.loads(row["search_keywords"]) == [f"{row['term']} implementation"] for row in research_rows)
     assert all(row["snippet"].startswith("def ") for row in candidate_rows)
+
+
+def test_background_implementation_write_and_foreground_design_build_share_wal_store(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    impl_started = threading.Event()
+    release_impl = threading.Event()
+
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "1")
+    monkeypatch.setattr(reference, "_extract_reference_terms", lambda text, context: ["concurrent term"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic concurrent term")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["concurrent term implementation"])
+    monkeypatch.setattr(reference, "_codex_delta_inclusion", lambda term, context, baseline, candidate: {"keep": True, "reason": "real delta"})
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, reason: {
+            "snippet": "def concurrent_term(): pass",
+            "summary": "Useful implementation detail for concurrent term.",
+            "lang_env_version": "Python 3.12",
+            "pitfalls": "Keep the write short.",
+        },
+    )
+    monkeypatch.setattr(reference, "_codex_author_level", lambda term, context, candidate: {"author_level": "high", "reason": "clear"})
+    monkeypatch.setattr(reference, "_codex_design_delta_inclusion", lambda term, context, candidate: {"keep": True, "reason": "real design"})
+    monkeypatch.setattr(reference, "_codex_design_competence", lambda term, context, candidate: {"keep": True, "author_level": "high", "reason": "clear"})
+
+    def fetch_candidates(term, context):
+        impl_started.set()
+        assert release_impl.wait(5)
+        return [
+            {
+                "kind": "implementation",
+                "snippet": "raw concurrent term",
+                "summary": "Raw implementation summary.",
+                "source_url": "https://github.com/example/concurrent/blob/HEAD/main.py",
+                "lang_env_version": "Python 3.12",
+                "author_level": "unknown",
+                "pitfalls": "Raw pitfall.",
+                "found_via": "concurrent term implementation",
+            }
+        ]
+
+    def fetch_design_candidates(term, context):
+        assert impl_started.wait(5)
+        return [_design_candidate("https://example.com/concurrent-design")]
+
+    monkeypatch.setattr(reference, "fetch_candidates", fetch_candidates)
+    monkeypatch.setattr(reference, "fetch_design_candidates", fetch_design_candidates)
+
+    future = reference.start_background_build({"proposal": "Build concurrent term."}, {}, kinds=("implementation",))
+    design_result = reference.build_from_rfc({"proposal": "Build concurrent term."}, {}, kinds=("design",))
+    release_impl.set()
+    reference.await_background_builds(timeout=5)
+
+    assert future.done()
+    assert future.exception() is None
+    assert design_result["expanded"] == ["concurrent term"]
+    assert future.result()["expanded"] == ["concurrent term"]
+    with sqlite3.connect(db_path) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        kinds = [row[0] for row in connection.execute("SELECT kind FROM candidates ORDER BY kind").fetchall()]
+
+    assert journal_mode == "wal"
+    assert kinds == ["design", "implementation"]
 
 
 def test_reference_store_rejects_work_repo_paths(monkeypatch):

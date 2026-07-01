@@ -7,7 +7,19 @@ import subprocess
 import threading
 import time
 
+import pytest
+
 from ai_org.rfc import receive as receive_module
+
+
+ORIGINAL_START_BACKGROUND_BUILD = receive_module.reference.start_background_build
+
+
+@pytest.fixture(autouse=True)
+def default_no_background_reference_build(monkeypatch):
+    future: concurrent.futures.Future[dict[str, object]] = concurrent.futures.Future()
+    future.set_result({"terms": {}, "processed_terms": [], "expanded": [], "hits": [], "failed": {}})
+    monkeypatch.setattr(receive_module.reference, "start_background_build", lambda *args, **kwargs: future)
 
 
 def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
@@ -19,12 +31,12 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         "_normalize_problem",
         lambda rfc_view, context=None: calls.append("normalize_problem") or _normalized_problem(),
     )
-    monkeypatch.setattr(
-        receive_module.reference,
-        "build_from_rfc",
-        lambda rfc_view, context=None: calls.append("build_from_rfc")
-        or {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
-    )
+    def fake_build_from_rfc(rfc_view, context=None, **kwargs):
+        assert kwargs == {"kinds": ("design",)}
+        calls.append("build_from_rfc")
+        return {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}}
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
 
     def fake_constraints(rfc_view, repo, context=None, approach=None):
         calls.append(("extract_constraints", approach))
@@ -474,7 +486,8 @@ def test_form_technical_approach_builds_reference_then_prior_art_uses_same_terms
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("prior art must not re-extract terms")),
     )
 
-    def fake_build_from_rfc(rfc_view, context=None):
+    def fake_build_from_rfc(rfc_view, context=None, **kwargs):
+        assert kwargs == {"kinds": ("design",)}
         calls.append("build_from_rfc")
         return {
             "terms": {"C1": {}, "C2": {}},
@@ -518,6 +531,95 @@ def test_form_technical_approach_builds_reference_then_prior_art_uses_same_terms
     assert patterns[1]["reference_facets"]["design"][0]["rationale"] == "C2 design rationale"
 
 
+def test_form_technical_approach_waits_for_design_build(monkeypatch, tmp_path):
+    design_started = threading.Event()
+    release_design = threading.Event()
+    form_done = threading.Event()
+    used_terms = []
+
+    _patch_successful_approach_steps(monkeypatch)
+
+    def fake_build_from_rfc(rfc_view, context=None, **kwargs):
+        assert kwargs == {"kinds": ("design",)}
+        design_started.set()
+        assert release_design.wait(5)
+        return {
+            "terms": {"design concept": {}},
+            "processed_terms": ["design concept"],
+            "expanded": ["design concept"],
+            "hits": [],
+            "failed": {},
+        }
+
+    def fake_prior_art(rfc_view, repo, context=None, approach=None, reference_terms=None):
+        used_terms.extend(reference_terms)
+        return _prior_art_map_with_facet("design concept", "design")
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", fake_prior_art)
+
+    result_holder = {}
+
+    def run_form():
+        result_holder["result"] = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+        form_done.set()
+
+    worker = threading.Thread(target=run_form)
+    worker.start()
+    assert design_started.wait(1)
+    assert not form_done.is_set()
+    release_design.set()
+    worker.join(5)
+
+    assert form_done.is_set()
+    assert result_holder["result"]["ok"] is True
+    assert used_terms == ["design concept"]
+    assert result_holder["result"]["steps"]["build_prior_art_map"]["patterns"][0]["source"]["facet_kind"] == "design"
+
+
+def test_form_technical_approach_starts_implementation_build_without_awaiting(monkeypatch, tmp_path):
+    implementation_started = threading.Event()
+    release_implementation = threading.Event()
+    implementation_done = threading.Event()
+    calls = []
+
+    receive_module.reference.await_background_builds(timeout=5)
+    _patch_successful_approach_steps(monkeypatch)
+    monkeypatch.setattr(receive_module.reference, "start_background_build", ORIGINAL_START_BACKGROUND_BUILD)
+
+    def fake_build_from_rfc(rfc_view, context=None, force=False, kinds=None):
+        calls.append(kinds)
+        if kinds == ("implementation",):
+            implementation_started.set()
+            assert release_implementation.wait(5)
+            implementation_done.set()
+        return {
+            "terms": {"design concept": {}},
+            "processed_terms": ["design concept"],
+            "expanded": ["design concept"],
+            "hits": [],
+            "failed": {},
+        }
+
+    def fake_prior_art(rfc_view, repo, context=None, approach=None, reference_terms=None):
+        assert reference_terms == ["design concept"]
+        return _prior_art_map_with_facet("design concept", "design")
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", fake_prior_art)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+
+    assert result["ok"] is True
+    assert implementation_started.wait(1)
+    assert not implementation_done.is_set()
+    assert calls[0] == ("design",)
+    assert ("implementation",) in calls
+    release_implementation.set()
+    receive_module.reference.await_background_builds(timeout=5)
+    assert implementation_done.is_set()
+
+
 def test_form_technical_approach_reference_terms_skip_internal_build(monkeypatch, tmp_path):
     used_terms = []
 
@@ -526,6 +628,11 @@ def test_form_technical_approach_reference_terms_skip_internal_build(monkeypatch
         receive_module.reference,
         "build_from_rfc",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build_from_rfc should be skipped")),
+    )
+    monkeypatch.setattr(
+        receive_module.reference,
+        "start_background_build",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("background build should be skipped")),
     )
 
     def fake_prior_art(rfc_view, repo, context=None, approach=None, reference_terms=None):
