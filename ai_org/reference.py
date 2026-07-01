@@ -329,6 +329,7 @@ REFERENCE_TERMS_SCHEMA = {
 MAX_REFERENCE_TERMS = 30
 REFERENCE_MAX_PARALLEL = 6
 REFERENCE_SQLITE_BUSY_TIMEOUT_MS = 30000
+REFERENCE_RESEARCH_TTL_SECONDS = 86400
 GH_SEARCH_WINDOW_SECONDS = 60.0
 WEB_SEARCH_WINDOW_SECONDS = 60.0
 
@@ -455,6 +456,10 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
 def expand(term: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Fetch, filter, annotate, and persist implementation and design knowledge for term."""
     context = dict(context or {})
+    recent_entry = _recent_research_entry(term)
+    if recent_entry is not None:
+        return copy.deepcopy(recent_entry)
+
     baseline = _codex_baseline(term, context)
     search_keywords = _clean_search_keywords(_codex_search_keywords(term, context))
     examined: list[dict[str, str]] = []
@@ -630,6 +635,33 @@ def _reference_parallelism(term_count: int) -> int:
         except ValueError:
             requested = REFERENCE_MAX_PARALLEL
     return max(1, min(term_count, requested))
+
+
+def _reference_research_ttl_seconds() -> float:
+    raw = os.environ.get("AI_ORG_REFERENCE_TTL_SECONDS")
+    if raw is None or not raw.strip():
+        return float(REFERENCE_RESEARCH_TTL_SECONDS)
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return float(REFERENCE_RESEARCH_TTL_SECONDS)
+    return max(0.0, ttl)
+
+
+def _recent_research_entry(term: str) -> dict[str, Any] | None:
+    ttl = _reference_research_ttl_seconds()
+    if ttl <= 0:
+        return None
+
+    entry = _read_entry(term)
+    if entry is None:
+        return None
+
+    latest = entry["research"][-1]
+    elapsed = time.time() - float(latest["last_searched_at"])
+    if elapsed < ttl:
+        return entry
+    return None
 
 
 def _format_term_error(exc: BaseException) -> str:
@@ -1605,6 +1637,7 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
             _ensure_schema(connection)
             with connection:
                 term = str(entry["term"])
+                searched_at = time.time()
                 attempt = int(
                     connection.execute(
                         "SELECT COALESCE(MAX(attempt), 0) + 1 FROM research WHERE lower(term) = lower(?)",
@@ -1613,13 +1646,14 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                 )
                 connection.execute(
                     """
-                    INSERT INTO research(term, attempt, captured_at, notes, search_keywords, examined)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO research(term, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         term,
                         attempt,
-                        time.time(),
+                        searched_at,
+                        searched_at,
                         str(entry["notes"]),
                         json.dumps(entry["search_keywords"], sort_keys=True),
                         json.dumps(entry["examined"], sort_keys=True),
@@ -1695,7 +1729,7 @@ def _read_entry(term: str) -> dict[str, Any] | None:
         with _connect_existing_database(path) as connection:
             research_rows = connection.execute(
                 """
-                SELECT term, attempt, captured_at, notes, search_keywords, examined
+                SELECT term, attempt, captured_at, last_searched_at, notes, search_keywords, examined
                 FROM research
                 WHERE lower(term) = lower(?)
                 ORDER BY attempt, id
@@ -1759,8 +1793,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
         if research_columns and "attempt" not in research_columns:
             _migrate_research_to_history(connection)
+            research_columns = _table_columns(connection, "research")
         elif not research_columns:
             _create_research_table(connection)
+            research_columns = _table_columns(connection, "research")
+
+        _add_missing_research_columns(connection, research_columns)
 
         if candidate_columns and candidate_foreign_keys:
             _migrate_candidates_without_foreign_key(connection)
@@ -1799,12 +1837,19 @@ def _create_research_table(connection: sqlite3.Connection) -> None:
             term TEXT NOT NULL,
             attempt INTEGER NOT NULL,
             captured_at REAL NOT NULL,
+            last_searched_at REAL NOT NULL,
             notes TEXT NOT NULL,
             search_keywords TEXT NOT NULL,
             examined TEXT NOT NULL
         )
         """
     )
+
+
+def _add_missing_research_columns(connection: sqlite3.Connection, research_columns: set[str]) -> None:
+    if "last_searched_at" not in research_columns:
+        connection.execute("ALTER TABLE research ADD COLUMN last_searched_at REAL NOT NULL DEFAULT 0")
+        connection.execute("UPDATE research SET last_searched_at = captured_at WHERE last_searched_at = 0")
 
 
 def _create_candidates_table(connection: sqlite3.Connection) -> None:
@@ -1861,12 +1906,12 @@ def _migrate_research_to_history(connection: sqlite3.Connection) -> None:
     _create_research_table(connection)
     connection.execute(
         """
-        INSERT INTO research(term, attempt, captured_at, notes, search_keywords, examined)
-        SELECT term, 1, ?, notes, search_keywords, examined
+        INSERT INTO research(term, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
+        SELECT term, 1, ?, ?, notes, search_keywords, examined
         FROM research_legacy
         ORDER BY lower(term)
         """,
-        (captured_at,),
+        (captured_at, captured_at),
     )
     connection.execute("DROP TABLE research_legacy")
 
@@ -1991,6 +2036,7 @@ def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "term": str(row["term"] or ""),
         "attempt": int(row["attempt"]),
         "captured_at": float(row["captured_at"]),
+        "last_searched_at": float(row["last_searched_at"]),
         "search_keywords": json.loads(str(row["search_keywords"] or "[]")),
         "examined": json.loads(str(row["examined"] or "[]")),
         "notes": str(row["notes"] or ""),
@@ -2107,6 +2153,7 @@ def _valid_research_attempt(value: Any) -> bool:
         "term",
         "attempt",
         "captured_at",
+        "last_searched_at",
         "search_keywords",
         "examined",
         "notes",
@@ -2117,6 +2164,8 @@ def _valid_research_attempt(value: Any) -> bool:
     if not isinstance(value["attempt"], int) or value["attempt"] < 1:
         return False
     if not isinstance(value["captured_at"], float) or value["captured_at"] < 0:
+        return False
+    if not isinstance(value["last_searched_at"], float) or value["last_searched_at"] < 0:
         return False
     if not isinstance(value["search_keywords"], list) or not all(
         isinstance(item, str) for item in value["search_keywords"]

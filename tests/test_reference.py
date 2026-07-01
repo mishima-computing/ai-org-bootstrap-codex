@@ -20,6 +20,7 @@ ORIGINAL_FETCH_DESIGN_CANDIDATES = reference.fetch_design_candidates
 
 @pytest.fixture(autouse=True)
 def default_no_design_lane(monkeypatch):
+    monkeypatch.delenv("AI_ORG_REFERENCE_TTL_SECONDS", raising=False)
     monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: [])
 
 
@@ -748,8 +749,136 @@ def test_expand_records_empty_search_keywords_when_nothing_fetched(monkeypatch, 
     assert reference.audit("PKCE verifier rotation")["search_keywords"] == ["oauth pkce verifier"]
 
 
+def test_expand_skips_recent_research_and_returns_stored_candidates(monkeypatch, tmp_path):
+    now = {"value": 1000.0}
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["react state update"],
+            "examined": [
+                {"repo": "example/react", "language": "JavaScript", "outcome": "kept", "found_via": "react state update"},
+            ],
+            "candidates": [
+                {
+                    "snippet": "setState(prev => prev + 1)",
+                    "summary": "Functional update.",
+                    "source_url": "https://github.com/example/react/blob/HEAD/state.jsx",
+                    "lang_env_version": "React 18 hooks",
+                    "author_level": "medium",
+                    "pitfalls": "Avoid stale closures.",
+                    "found_via": "react state update",
+                },
+            ],
+            "notes": "stored result",
+        }
+    )
+
+    now["value"] = 1100.0
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: pytest.fail("baseline should be skipped"))
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: pytest.fail("keywords should be skipped"))
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: pytest.fail("implementation fetch should be skipped"))
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: pytest.fail("design fetch should be skipped"))
+
+    entry = reference.expand("state update", {"language": "React", "environment": "hooks", "version": "18"})
+
+    assert entry["notes"] == "stored result"
+    assert entry["candidates"][0]["snippet"] == "setState(prev => prev + 1)"
+    assert [attempt["last_searched_at"] for attempt in entry["research"]] == [1000.0]
+    assert [attempt["attempt"] for attempt in entry["research"]] == [1]
+
+
+def test_expand_skips_recent_empty_research_without_searching(monkeypatch, tmp_path):
+    now = {"value": 2000.0}
+    calls = []
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation-fetch") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design-fetch") or [])
+
+    first = reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 2010.0
+    second = reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+
+    assert first["candidates"] == []
+    assert second["candidates"] == []
+    assert second["notes"] == "nothing-fetched: no public repository candidates were fetched."
+    assert calls == ["baseline", "keywords", "implementation-fetch", "design-fetch"]
+    assert [attempt["last_searched_at"] for attempt in second["research"]] == [2000.0]
+
+
+def test_expand_runs_when_research_is_older_than_ttl_or_never_searched(monkeypatch, tmp_path):
+    now = {"value": 3000.0}
+    calls = []
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation-fetch") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design-fetch") or [])
+
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 3000.0 + reference.REFERENCE_RESEARCH_TTL_SECONDS + 1
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    entry = reference.audit("PKCE verifier rotation")
+
+    assert entry is not None
+    assert calls == [
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+    ]
+    assert [attempt["attempt"] for attempt in entry["research"]] == [1, 2]
+    assert [attempt["last_searched_at"] for attempt in entry["research"]] == [
+        3000.0,
+        3000.0 + reference.REFERENCE_RESEARCH_TTL_SECONDS + 1,
+    ]
+
+
+def test_reference_research_ttl_is_env_configurable(monkeypatch, tmp_path):
+    now = {"value": 4000.0}
+    calls = []
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_TTL_SECONDS", "5")
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: calls.append("baseline") or "use a basic verifier")
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: calls.append("keywords") or ["oauth pkce verifier"])
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: calls.append("implementation-fetch") or [])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: calls.append("design-fetch") or [])
+
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 4004.0
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    now["value"] = 4006.0
+    reference.expand("PKCE verifier rotation", {"language": "TypeScript"})
+    entry = reference.audit("PKCE verifier rotation")
+
+    assert entry is not None
+    assert reference._reference_research_ttl_seconds() == 5.0
+    assert calls == [
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+        "baseline",
+        "keywords",
+        "implementation-fetch",
+        "design-fetch",
+    ]
+    assert [attempt["last_searched_at"] for attempt in entry["research"]] == [4000.0, 4006.0]
+
+
 def test_reexpand_appends_new_candidates_dedups_identical_and_preserves_on_empty_fetch(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_TTL_SECONDS", "0")
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic implementation")
     monkeypatch.setattr(
         reference,
@@ -1208,6 +1337,7 @@ def test_lookup_and_query_filter_by_kind_and_design_append_only(monkeypatch, tmp
 def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch, tmp_path):
     db_path = tmp_path / "reference.sqlite3"
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    monkeypatch.setenv("AI_ORG_REFERENCE_TTL_SECONDS", "0")
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "use a basic verifier")
     monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: ["oauth pkce verifier"])
     monkeypatch.setattr(reference, "_search_repositories", lambda keywords, context: [])
