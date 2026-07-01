@@ -353,6 +353,40 @@ EVALUATE_CANDIDATES_SCHEMA: dict[str, Any] = {
         },
     },
 }
+REJECTED_APPROACH_FIELDS = (
+    "candidate_name",
+    "why_not",
+)
+SELECT_APPROACH_FIELDS = (
+    "chosen",
+    "decision",
+    "accepted_tradeoffs",
+    "rejected",
+)
+
+SELECT_APPROACH_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(SELECT_APPROACH_FIELDS),
+    "properties": {
+        "chosen": {"type": "string"},
+        "decision": {"type": "string"},
+        "accepted_tradeoffs": {"type": "array", "items": {"type": "string"}},
+        "rejected": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(REJECTED_APPROACH_FIELDS),
+                "properties": {
+                    "candidate_name": {"type": "string"},
+                    "why_not": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -673,6 +707,39 @@ def _evaluate_candidates(
     return _parse_candidate_evaluations(run["raw"], candidate_names)
 
 
+def _select_approach(
+    candidates: Mapping[str, Any],
+    evaluations: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 6 of the documented 10-step Technical Approach procedure."""
+    # Step 6 of 10: select the best evaluated candidate with rationale and explicit trade-offs.
+    if not all(isinstance(value, Mapping) for value in (candidates, evaluations, constraints)):
+        return _approach_selection_error("select_approach requires outputs from steps 2, 4, and 5")
+
+    candidate_names = _candidate_names(candidates)
+    if not candidate_names:
+        return _approach_selection_error("select_approach requires named candidates from step 4")
+
+    evaluation_names = _evaluation_names(evaluations)
+    if set(evaluation_names) != set(candidate_names):
+        return _approach_selection_error("select_approach requires one evaluation per candidate from step 5")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=SELECT_APPROACH_SCHEMA,
+        prompt=_select_approach_prompt(candidates, evaluations, constraints, context),
+        schema_filename="rfc-select-approach.schema.json",
+        output_filename="rfc-selected-approach.json",
+        failure_label="Codex approach selection",
+    )
+    if not run["ok"]:
+        return _approach_selection_error(run["error"])
+    return _parse_approach_selection(run["raw"], candidate_names)
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -972,6 +1039,40 @@ def _evaluate_candidates_prompt(
         "trade-off profile. Return one evaluation per candidate and use the candidate name exactly as given.\n\n"
         f"Candidate approaches:\n{candidates_text}\n"
         f"\nNormalized problem:\n{normalized_problem_text}\n"
+        f"\nConstraints:\n{constraints_text}\n"
+        f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _select_approach_prompt(
+    candidates: Mapping[str, Any],
+    evaluations: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    candidates_text = json.dumps(candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    evaluations_text = json.dumps(evaluations, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 6 of AI Org's 10-step Technical Approach procedure: select the approach.\n"
+        "Use only the candidate approaches from step 4, the compact evaluation matrix from step 5, the "
+        "constraints from step 2, and read-only repository inspection from the configured repo root. Choose "
+        "one candidate. Do not write an implementation strategy, create a patch plan, surface open questions, "
+        "emit the final Technical Approach section, or perform later Technical Approach steps. Do not modify "
+        "files.\n\n"
+        "The decision must be a reasoned selection from the matrix, not a one-shot claim. The decision string "
+        "must explicitly reference the constraints and the evaluation matrix, following this shape: "
+        "'Choose X because ... under constraints ..., accepting tradeoff F.' Reject every non-chosen candidate "
+        "with a concrete why_not tied to the matrix or constraints.\n\n"
+        "Return these fields:\n"
+        "- chosen: the exact name of the selected candidate.\n"
+        "- decision: one concise rationale sentence that references constraints and the evaluation matrix.\n"
+        "- accepted_tradeoffs: trade-offs accepted by choosing the selected candidate.\n"
+        "- rejected: one item for each non-chosen candidate with candidate_name and why_not.\n\n"
+        f"Candidate approaches:\n{candidates_text}\n"
+        f"\nEvaluation matrix:\n{evaluations_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
@@ -1315,6 +1416,24 @@ def _candidate_names(candidates: Mapping[str, Any]) -> list[str]:
     return names
 
 
+def _evaluation_names(evaluations: Mapping[str, Any]) -> list[str]:
+    evaluation_items = evaluations.get("evaluations")
+    if not isinstance(evaluation_items, list):
+        return []
+
+    names: list[str] = []
+    for evaluation in evaluation_items:
+        if not isinstance(evaluation, Mapping):
+            return []
+        name = evaluation.get("candidate_name")
+        if not isinstance(name, str):
+            return []
+        names.append(name)
+    if len(names) != len(set(names)):
+        return []
+    return names
+
+
 def _parse_candidate_evaluations(raw: str, candidate_names: list[str]) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
@@ -1370,6 +1489,70 @@ def _parse_candidate_evaluations(raw: str, candidate_names: list[str]) -> dict[s
 
 
 def _candidate_evaluation_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_approach_selection(raw: str, candidate_names: list[str]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _approach_selection_error(f"Codex approach selection returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _approach_selection_error("Codex approach selection returned non-object JSON")
+    if set(parsed) != set(SELECT_APPROACH_FIELDS):
+        return _approach_selection_error("Codex approach selection returned invalid fields")
+    if not isinstance(parsed["chosen"], str) or not isinstance(parsed["decision"], str):
+        return _approach_selection_error("Codex approach selection returned invalid selection strings")
+
+    chosen = parsed["chosen"]
+    if chosen not in candidate_names:
+        return _approach_selection_error("Codex approach selection returned unknown chosen candidate")
+
+    decision_lower = parsed["decision"].lower()
+    if "constraint" not in decision_lower or ("matrix" not in decision_lower and "evaluation" not in decision_lower):
+        return _approach_selection_error("Codex approach selection returned decision without constraints and matrix")
+
+    accepted_tradeoffs = parsed.get("accepted_tradeoffs")
+    if not isinstance(accepted_tradeoffs, list) or not all(isinstance(item, str) for item in accepted_tradeoffs):
+        return _approach_selection_error("Codex approach selection returned invalid accepted_tradeoffs")
+
+    rejected = parsed.get("rejected")
+    if not isinstance(rejected, list):
+        return _approach_selection_error("Codex approach selection returned invalid rejected list")
+
+    parsed_rejected: list[dict[str, str]] = []
+    rejected_names: set[str] = set()
+    for rejection in rejected:
+        if not isinstance(rejection, dict):
+            return _approach_selection_error("Codex approach selection returned invalid rejected item")
+        if set(rejection) != set(REJECTED_APPROACH_FIELDS):
+            return _approach_selection_error("Codex approach selection returned invalid rejected fields")
+        if not all(isinstance(rejection[field], str) for field in REJECTED_APPROACH_FIELDS):
+            return _approach_selection_error("Codex approach selection returned invalid rejected values")
+
+        candidate_name = rejection["candidate_name"]
+        if candidate_name not in candidate_names:
+            return _approach_selection_error("Codex approach selection returned unknown rejected candidate")
+        if candidate_name == chosen:
+            return _approach_selection_error("Codex approach selection returned rejection for the chosen candidate")
+        if candidate_name in rejected_names:
+            return _approach_selection_error("Codex approach selection returned duplicate rejected candidate")
+        rejected_names.add(candidate_name)
+        parsed_rejected.append({"candidate_name": candidate_name, "why_not": rejection["why_not"]})
+
+    if rejected_names != (set(candidate_names) - {chosen}):
+        return _approach_selection_error("Codex approach selection returned incomplete rejected candidates")
+
+    return {
+        "chosen": chosen,
+        "decision": parsed["decision"],
+        "accepted_tradeoffs": list(accepted_tradeoffs),
+        "rejected": parsed_rejected,
+    }
+
+
+def _approach_selection_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 

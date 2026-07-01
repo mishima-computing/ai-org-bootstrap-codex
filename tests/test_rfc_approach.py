@@ -624,6 +624,117 @@ def test_evaluate_candidates_schema_is_codex_valid():
     assert sorted(scores["required"]) == sorted(scores["properties"])
 
 
+def test_select_approach_returns_parsed_selection(monkeypatch, tmp_path):
+    expected = {
+        "chosen": "Repo Native",
+        "decision": (
+            "Choose Repo Native because the evaluation matrix gives it the strongest problem fit and repo fit "
+            "under constraints that keep RFC receive isolated, accepting tradeoff of slightly more prompt detail."
+        ),
+        "accepted_tradeoffs": ["Slightly more prompt and parser surface than the minimal local option."],
+        "rejected": [
+            {
+                "candidate_name": "Minimal",
+                "why_not": "The matrix shows weaker problem coverage despite low complexity.",
+            }
+        ],
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._select_approach(
+        _candidates(),
+        _evaluations(),
+        _constraints(),
+        {"repo": tmp_path},
+    )
+
+    assert result == expected
+    assert result["chosen"] == "Repo Native"
+    assert "evaluation matrix" in result["decision"]
+    assert "constraints" in result["decision"]
+    assert result["accepted_tradeoffs"] == ["Slightly more prompt and parser surface than the minimal local option."]
+    assert result["rejected"] == [
+        {
+            "candidate_name": "Minimal",
+            "why_not": "The matrix shows weaker problem coverage despite low complexity.",
+        }
+    ]
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.SELECT_APPROACH_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-select-approach.schema.json"
+    assert kwargs["output_filename"] == "rfc-selected-approach.json"
+    assert kwargs["failure_label"] == "Codex approach selection"
+    assert "step 6" in kwargs["prompt"]
+    assert "select the approach" in kwargs["prompt"]
+    assert "evaluation matrix" in kwargs["prompt"]
+    assert "constraints" in kwargs["prompt"]
+    assert "Do not write an implementation strategy" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+
+
+def test_select_approach_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid = {
+        "chosen": "Repo Native",
+        "decision": (
+            "Choose Repo Native because the evaluation matrix is strongest under constraints that isolate RFC "
+            "receive, accepting tradeoff of added prompt detail."
+        ),
+        "accepted_tradeoffs": ["Added prompt detail."],
+        "rejected": [{"candidate_name": "Minimal", "why_not": "The matrix shows weaker problem fit."}],
+    }
+    invalid_outputs = [
+        {key: value for key, value in valid.items() if key != "chosen"},
+        {**valid, "extra": "not allowed"},
+        {**valid, "chosen": "Unknown"},
+        {**valid, "decision": "Choose Repo Native because it is best."},
+        {**valid, "accepted_tradeoffs": ["Added prompt detail.", 42]},
+        {**valid, "rejected": "Minimal"},
+        {**valid, "rejected": [{"candidate_name": "Minimal"}]},
+        {**valid, "rejected": [{"candidate_name": "Unknown", "why_not": "Not a candidate."}]},
+        {**valid, "rejected": [{"candidate_name": "Repo Native", "why_not": "Rejects chosen."}]},
+        {**valid, "rejected": []},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._select_approach(
+            _candidates(),
+            _evaluations(),
+            _constraints(),
+            {"repo": tmp_path},
+        )
+
+        assert result["ok"] is False
+        assert "Codex approach selection returned" in result["error"]
+
+
+def test_select_approach_schema_is_codex_valid():
+    schema = receive_module.SELECT_APPROACH_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    rejected = schema["properties"]["rejected"]["items"]
+    assert rejected["additionalProperties"] is False
+    assert sorted(rejected["required"]) == sorted(receive_module.REJECTED_APPROACH_FIELDS)
+    assert sorted(rejected["required"]) == sorted(rejected["properties"])
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -717,6 +828,29 @@ def _candidate(name: str, kind: str) -> dict[str, object]:
 
 def _candidates() -> dict[str, object]:
     return {"candidates": [_candidate("Minimal", "minimal_local"), _candidate("Repo Native", "repo_native")]}
+
+
+def _evaluations() -> dict[str, object]:
+    return {
+        "evaluations": [
+            {
+                "candidate_name": "Minimal",
+                "scores": _evaluation_scores(
+                    problem_fit="medium - solves the core problem with narrow scope.",
+                    repo_fit="high - follows existing receive.py helper boundaries.",
+                ),
+                "summary": "Lowest implementation cost, with limited architectural improvement.",
+            },
+            {
+                "candidate_name": "Repo Native",
+                "scores": _evaluation_scores(
+                    problem_fit="high - covers the normalized problem directly.",
+                    repo_fit="high - mirrors the established RFC approach formation pattern.",
+                ),
+                "summary": "Best repository fit while keeping the step isolated.",
+            },
+        ]
+    }
 
 
 def _evaluation_scores(**overrides: str) -> dict[str, object]:
