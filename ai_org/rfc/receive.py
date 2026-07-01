@@ -85,6 +85,7 @@ import subprocess
 import tempfile
 from typing import Any, Mapping
 
+import ai_org.reference as reference
 import ai_org.rfc.codex_exec as codex_exec
 
 
@@ -215,6 +216,79 @@ EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
             },
         },
     },
+}
+
+PRIOR_ART_PATTERN_FIELDS = (
+    "pattern",
+    "where_seen",
+    "when_applies",
+    "tradeoffs",
+    "disposition",
+    "rationale",
+)
+PRIOR_ART_DISPOSITIONS = ("adopt", "adapt", "reject")
+PRIOR_ART_MAP_FIELDS = ("patterns",)
+
+PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(PRIOR_ART_MAP_FIELDS),
+    "properties": {
+        "patterns": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 6,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(PRIOR_ART_PATTERN_FIELDS),
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "where_seen": {"type": "string"},
+                    "when_applies": {"type": "string"},
+                    "tradeoffs": {"type": "string"},
+                    "disposition": {"type": "string", "enum": list(PRIOR_ART_DISPOSITIONS)},
+                    "rationale": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+_PRIOR_ART_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "into",
+    "before",
+    "after",
+    "only",
+    "must",
+    "should",
+    "would",
+    "could",
+    "needs",
+    "need",
+    "use",
+    "uses",
+    "using",
+    "rfc",
+    "view",
+    "step",
+    "common",
+    "problem",
+    "proposal",
+    "context",
+    "impact",
+    "users",
+    "area",
+    "approach",
+    "technical",
+    "formation",
 }
 
 MAX_REGROUNDS = 2
@@ -417,6 +491,36 @@ def _extract_constraints(
     return _parse_constraints(run["raw"])
 
 
+def _build_prior_art_map(
+    rfc_view: dict[str, Any],
+    repo: str | Path,
+    context: Mapping[str, Any] | None = None,
+    normalized_problem: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 3 of the documented 10-step Technical Approach procedure."""
+    # Step 3 of 10: read Reference facets and repo context to map prior art before candidate generation.
+    if not _is_rfc_view(rfc_view):
+        return _prior_art_error("build_prior_art_map requires a grounded common-8 RFC view")
+
+    repo_path = Path(repo).resolve()
+    concepts = _prior_art_key_concepts(rfc_view, context, normalized_problem)
+    try:
+        reference_facets = _read_prior_art_reference_facets(concepts, context)
+    except Exception as exc:
+        return _prior_art_error(f"Reference prior-art read failed: {exc}")
+    run = codex_exec.run_json(
+        repo_path,
+        schema=PRIOR_ART_MAP_SCHEMA,
+        prompt=_prior_art_map_prompt(rfc_view, repo_path, concepts, reference_facets, context, normalized_problem),
+        schema_filename="rfc-prior-art-map.schema.json",
+        output_filename="rfc-prior-art-map.json",
+        failure_label="Codex prior-art mapping",
+    )
+    if not run["ok"]:
+        return _prior_art_error(run["error"])
+    return _parse_prior_art_map(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -604,6 +708,173 @@ def _extract_constraints_prompt(
     )
 
 
+def _prior_art_map_prompt(
+    rfc_view: dict[str, Any],
+    repo: Path,
+    concepts: list[str],
+    reference_facets: list[dict[str, Any]],
+    context: Mapping[str, Any] | None = None,
+    normalized_problem: Mapping[str, Any] | None = None,
+) -> str:
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    normalized_problem_text = json.dumps(normalized_problem or {}, indent=2, sort_keys=True, default=str)
+    concepts_text = json.dumps(concepts, indent=2, ensure_ascii=True)
+    reference_text = json.dumps(reference_facets, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 3 of AI Org's 10-step Technical Approach procedure: build a prior-art map.\n"
+        "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
+        "RFC view, normalized problem if provided, Reference design facets, Reference implementation facets, "
+        "and repository context to synthesize 3 to 6 prior-art patterns. Do not generate candidate approaches, "
+        "select an approach, create a patch plan, or perform later Technical Approach steps.\n\n"
+        "Each pattern must identify a real design or implementation pattern visible in the Reference facets, "
+        "the repository, or both. Treat frameworks, engines, and libraries as candidates judged on fit; do not "
+        "favor them merely because they appeared often. A candidate such as Godot belongs here only when the "
+        "evidence makes it relevant, and its disposition must be adopt, adapt, or reject on merit.\n\n"
+        "For each pattern:\n"
+        "- pattern: concise name of the prior-art pattern or candidate.\n"
+        "- where_seen: Reference source, repo location, or both; say when evidence is absent or weak.\n"
+        "- when_applies: conditions that make the pattern appropriate.\n"
+        "- tradeoffs: concrete benefits, costs, and failure modes.\n"
+        "- disposition: exactly adopt, adapt, or reject for this RFC.\n"
+        "- rationale: why that disposition follows from the RFC, Reference, and repo context.\n\n"
+        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nRepository root:\n{repo}\n"
+        + f"\nNormalized problem:\n{normalized_problem_text}\n"
+        + f"\nContext:\n{context_text}\n"
+        + f"\nReference key concepts queried:\n{concepts_text}\n"
+        + f"\nReference facets read before this call:\n{reference_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _prior_art_key_concepts(
+    rfc_view: dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+    normalized_problem: Mapping[str, Any] | None = None,
+) -> list[str]:
+    concepts: list[str] = []
+    context = context or {}
+    for field in ("reference_terms", "key_concepts", "concepts", "terms"):
+        _extend_concepts(concepts, context.get(field))
+
+    _add_concept(concepts, rfc_view.get("title", ""))
+    _add_concept(concepts, rfc_view.get("affected_area", ""))
+    _extend_concepts(concepts, _explicit_terms(_rfc_text(rfc_view)))
+    if normalized_problem:
+        _extend_concepts(concepts, _explicit_terms(json.dumps(normalized_problem, sort_keys=True, default=str)))
+
+    if len(concepts) < 6:
+        _extend_concepts(concepts, _important_phrases(_rfc_text(rfc_view)))
+    return concepts[:12]
+
+
+def _extend_concepts(concepts: list[str], values: Any) -> None:
+    if isinstance(values, str):
+        _add_concept(concepts, values)
+    elif isinstance(values, list | tuple | set):
+        for value in values:
+            _add_concept(concepts, value)
+
+
+def _add_concept(concepts: list[str], value: Any) -> None:
+    concept = re.sub(r"\s+", " ", str(value or "").strip())
+    if not concept or len(concept) > 120:
+        return
+    lowered = concept.lower()
+    if lowered not in {existing.lower() for existing in concepts}:
+        concepts.append(concept)
+
+
+def _explicit_terms(text: str) -> list[str]:
+    terms = re.findall(r"`([^`]{2,80})`", text)
+    terms.extend(re.findall(r'"([^"]{2,80})"', text))
+    terms.extend(re.findall(r"'([^']{2,80})'", text))
+    return terms
+
+
+def _important_phrases(text: str) -> list[str]:
+    words = [
+        word.lower()
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_.-]*", text)
+        if len(word) > 2 and word.lower() not in _PRIOR_ART_STOPWORDS
+    ]
+    phrases: list[str] = []
+    for size in (3, 2):
+        for index in range(0, max(0, len(words) - size + 1)):
+            phrase = " ".join(words[index : index + size])
+            if not any(part in _PRIOR_ART_STOPWORDS for part in phrase.split()):
+                phrases.append(phrase)
+    phrases.extend(words)
+    return phrases
+
+
+def _read_prior_art_reference_facets(
+    concepts: list[str],
+    context: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    reference_context = dict(context or {})
+    facets: list[dict[str, Any]] = []
+    for term in concepts:
+        term_facets: dict[str, Any] = {"term": term, "design": [], "implementation": []}
+        for kind in ("design", "implementation"):
+            lookup = reference.lookup(term, reference_context, kind=kind)
+            candidates = lookup.get("candidates", []) if isinstance(lookup, dict) else []
+            if not candidates:
+                candidates = reference.query({"term": term, "kind": kind})
+            term_facets[kind] = _trim_reference_candidates(candidates)
+        if term_facets["design"] or term_facets["implementation"]:
+            facets.append(term_facets)
+    return facets
+
+
+def _trim_reference_candidates(candidates: Any) -> list[dict[str, str]]:
+    if not isinstance(candidates, list):
+        return []
+    trimmed: list[dict[str, str]] = []
+    for candidate in candidates[:4]:
+        if isinstance(candidate, Mapping):
+            trimmed.append(
+                {
+                    str(key): str(value)
+                    for key, value in candidate.items()
+                    if key
+                    in {
+                        "kind",
+                        "term",
+                        "summary",
+                        "snippet",
+                        "pitfalls",
+                        "structure",
+                        "rationale",
+                        "when_to_use",
+                        "when_not_to_use",
+                        "tradeoffs",
+                        "alternatives",
+                        "implementation_hooks",
+                        "quality_attributes",
+                        "evidence",
+                        "delta_claim",
+                        "lang_env_version",
+                        "author_level",
+                        "source_url",
+                        "found_via",
+                    }
+                }
+            )
+    return trimmed
+
+
+def _rfc_text(rfc_view: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for field in RFC_VIEW_FIELDS:
+        value = rfc_view.get(field)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        else:
+            parts.append(str(value or ""))
+    return "\n".join(parts)
+
+
 def _parse_normalized_problem(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
@@ -699,6 +970,40 @@ def _parse_constraint_items(
 
 
 def _constraints_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_prior_art_map(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _prior_art_error(f"Codex prior-art mapping returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _prior_art_error("Codex prior-art mapping returned non-object JSON")
+    if set(parsed) != set(PRIOR_ART_MAP_FIELDS):
+        return _prior_art_error("Codex prior-art mapping returned invalid fields")
+
+    patterns = parsed.get("patterns")
+    if not isinstance(patterns, list) or not 3 <= len(patterns) <= 6:
+        return _prior_art_error("Codex prior-art mapping returned invalid patterns")
+
+    parsed_patterns: list[dict[str, str]] = []
+    for pattern in patterns:
+        if not isinstance(pattern, dict):
+            return _prior_art_error("Codex prior-art mapping returned invalid pattern item")
+        if set(pattern) != set(PRIOR_ART_PATTERN_FIELDS):
+            return _prior_art_error("Codex prior-art mapping returned invalid pattern fields")
+        if not all(isinstance(pattern[field], str) for field in PRIOR_ART_PATTERN_FIELDS):
+            return _prior_art_error("Codex prior-art mapping returned invalid pattern values")
+        if pattern["disposition"] not in PRIOR_ART_DISPOSITIONS:
+            return _prior_art_error("Codex prior-art mapping returned invalid disposition")
+        parsed_patterns.append({field: pattern[field] for field in PRIOR_ART_PATTERN_FIELDS})
+
+    return {"patterns": parsed_patterns}
+
+
+def _prior_art_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
