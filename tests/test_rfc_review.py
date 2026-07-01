@@ -379,9 +379,11 @@ def test_rfc_schemas_use_registry_and_codex_valid_required_properties():
     assert tuple(schema_rfc["required"]) == review.RFC_VIEW_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
     assert schema_rfc["properties"]["tech_stack"]["type"] == "object"
-    assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
-        "content consumed downstream as product requirement nouns"
-    )
+    # Registry semantics reach the codex schema as a STRING description; the structured dict
+    # form is prompt-only (codex/OpenAI reject a non-string `description` with HTTP 400).
+    provenance_desc = schema_rfc["properties"]["grounding_provenance"]["description"]
+    assert isinstance(provenance_desc, str)
+    assert "must_not=content consumed downstream as product requirement nouns" in provenance_desc
 
 
 def test_missing_rfc_on_rfc_branch_fail_closed_nak(tmp_path):

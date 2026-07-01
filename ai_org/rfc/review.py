@@ -109,7 +109,9 @@ AUFHEBEN_SCHEMA: dict[str, Any] = {
     "properties": {
         "verdict": {"enum": ["proceed", "escalate"]},
         "revised_rfc": rfc_view_schema(),
-        "situation_read": {"type": "string", "maxLength": 1000},
+        # The 1000-char cap is a codex-schema-forbidden keyword (maxLength); it is instructed
+        # in the prompt and enforced deterministically in _parse_aufheben below.
+        "situation_read": {"type": "string"},
         "escalation_reason": {"type": "string"},
     },
 }

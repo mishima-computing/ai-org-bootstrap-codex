@@ -603,9 +603,12 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
     assert schema_rfc["properties"]["tech_stack"]["required"] == list(receive_module.TECH_STACK_FIELDS)
-    assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
-        "content consumed downstream as product requirement nouns"
-    )
+    # The registry semantics reach the schema as a STRING description (codex/OpenAI Structured
+    # Outputs reject a non-string `description` with HTTP 400 "... is not of type 'string'").
+    # The structured dict form lives only in the prompt (REQUEST_SCHEMA/_field_registry_prompt).
+    provenance_desc = schema_rfc["properties"]["grounding_provenance"]["description"]
+    assert isinstance(provenance_desc, str)
+    assert "must_not=content consumed downstream as product requirement nouns" in provenance_desc
 
 
 def _init_repo(tmp_path: Path) -> Path:

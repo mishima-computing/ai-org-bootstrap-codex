@@ -33,6 +33,10 @@ class FieldRegistryEntry:
 
     @property
     def description(self) -> dict[str, str]:
+        # Structured registry semantics for prompt/documentation use (REQUEST_SCHEMA,
+        # _field_registry_prompt). This is NOT a JSON-Schema description: codex --output-schema
+        # (OpenAI Structured Outputs) rejects a non-string `description` with HTTP 400
+        # "... is not of type 'string'". Schema builders must use schema_description() instead.
         return {
             "role": self.role,
             "belongs": self.belongs,
@@ -40,6 +44,14 @@ class FieldRegistryEntry:
             "owner": self.owner,
             "required_at": self.required_at,
         }
+
+    def schema_description(self) -> str:
+        # Flattened, string-valued form of the registry semantics, safe to embed as a
+        # JSON-Schema `description` in a codex --output-schema.
+        return (
+            f"role={self.role}; belongs={self.belongs}; must_not={self.must_not}; "
+            f"owner={self.owner}; required_at={self.required_at}"
+        )
 
 
 FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
@@ -190,13 +202,13 @@ STRING_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.value_type
 
 def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
     if entry.value_type == "string_array":
-        return {"type": "array", "items": {"type": "string"}, "description": entry.description}
+        return {"type": "array", "items": {"type": "string"}, "description": entry.schema_description()}
     if entry.value_type == "tech_stack":
         return {
             "type": "object",
             "additionalProperties": False,
             "required": list(TECH_STACK_FIELDS),
-            "description": entry.description,
+            "description": entry.schema_description(),
             "properties": {
                 "build_strategy": {"type": "string", "enum": list(TECH_STACK_BUILD_STRATEGIES)},
                 "engine": {"type": "string"},
@@ -207,7 +219,7 @@ def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
                 "provenance": {"type": "string", "enum": list(TECH_STACK_PROVENANCE)},
             },
         }
-    return {"type": "string", "description": entry.description}
+    return {"type": "string", "description": entry.schema_description()}
 
 
 def rfc_view_schema() -> dict[str, Any]:
