@@ -533,6 +533,104 @@ def test_expand_records_empty_search_keywords_when_nothing_fetched(monkeypatch, 
     assert reference.audit("PKCE verifier rotation")["search_keywords"] == ["oauth pkce verifier"]
 
 
+def test_reexpand_appends_new_candidates_dedups_identical_and_preserves_on_empty_fetch(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "basic implementation")
+    monkeypatch.setattr(
+        reference,
+        "_codex_delta_inclusion",
+        lambda term, context, baseline, candidate: {"keep": True, "reason": "real implementation detail"},
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_distill_candidate",
+        lambda term, context, baseline, candidate, delta_reason: {
+            "snippet": candidate["snippet"],
+            "summary": candidate["summary"],
+            "lang_env_version": candidate["lang_env_version"],
+            "pitfalls": candidate["pitfalls"],
+        },
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_author_level",
+        lambda term, context, candidate: {"author_level": "expert", "reason": "clear implementation"},
+    )
+
+    calls = {"count": 0}
+
+    def search_keywords(term, context):
+        if calls["count"] == 0:
+            return ["first durable pattern"]
+        if calls["count"] == 1:
+            return ["first durable pattern", "second durable pattern"]
+        return ["source disappeared pattern"]
+
+    def fetch_candidates(term, context):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return [
+                {
+                    "snippet": "first durable snippet",
+                    "summary": "First durable summary.",
+                    "source_url": "https://github.com/example/first/blob/HEAD/main.py",
+                    "lang_env_version": "Python 3.12",
+                    "pitfalls": "First durable pitfall.",
+                    "found_via": "first durable pattern",
+                }
+            ]
+        if calls["count"] == 2:
+            return [
+                {
+                    "snippet": "first durable snippet",
+                    "summary": "Changed summary that must not overwrite the stored candidate.",
+                    "source_url": "https://github.com/example/first/blob/HEAD/main.py",
+                    "lang_env_version": "Python 3.12",
+                    "pitfalls": "Changed pitfall.",
+                    "found_via": "first durable pattern",
+                },
+                {
+                    "snippet": "second durable snippet",
+                    "summary": "Second durable summary.",
+                    "source_url": "https://github.com/example/second/blob/HEAD/main.py",
+                    "lang_env_version": "Python 3.12",
+                    "pitfalls": "Second durable pitfall.",
+                    "found_via": "second durable pattern",
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(reference, "_codex_search_keywords", search_keywords)
+    monkeypatch.setattr(reference, "fetch_candidates", fetch_candidates)
+
+    reference.expand("durable reference", {"language": "Python", "version": "3.12"})
+    reference.expand("durable reference", {"language": "Python", "version": "3.12"})
+    entry = reference.audit("durable reference")
+
+    assert entry is not None
+    assert [candidate["snippet"] for candidate in entry["candidates"]] == [
+        "first durable snippet",
+        "second durable snippet",
+    ]
+    assert entry["candidates"][0]["summary"] == "First durable summary."
+    assert [attempt["attempt"] for attempt in entry["research"]] == [1, 2]
+    assert [attempt["search_keywords"] for attempt in entry["research"]] == [
+        ["first durable pattern"],
+        ["first durable pattern", "second durable pattern"],
+    ]
+
+    reference.expand("durable reference", {"language": "Python", "version": "3.12"})
+    preserved = reference.audit("durable reference")
+
+    assert preserved is not None
+    assert [candidate["snippet"] for candidate in preserved["candidates"]] == [
+        "first durable snippet",
+        "second durable snippet",
+    ]
+    assert [attempt["attempt"] for attempt in preserved["research"]] == [1, 2, 3]
+    assert preserved["research"][2]["notes"] == "nothing-fetched: no public repository candidates were fetched."
+
+
 def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage")
@@ -676,6 +774,87 @@ def test_audit_returns_management_fields(monkeypatch, tmp_path):
     assert entry["notes"] == "maintenance note"
 
 
+def test_legacy_cascade_schema_migrates_to_candidate_independent_history(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE research (
+                term TEXT PRIMARY KEY,
+                notes TEXT NOT NULL,
+                search_keywords TEXT NOT NULL,
+                examined TEXT NOT NULL
+            );
+            CREATE TABLE candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL,
+                snippet TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                pitfalls TEXT NOT NULL,
+                lang_env_version TEXT NOT NULL,
+                author_level TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                found_via TEXT NOT NULL,
+                FOREIGN KEY(term) REFERENCES research(term) ON DELETE CASCADE
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO research(term, notes, search_keywords, examined) VALUES (?, ?, ?, ?)",
+            ("state update", "legacy note", json.dumps(["react state update"]), json.dumps([])),
+        )
+        connection.execute(
+            """
+            INSERT INTO candidates(
+                term,
+                snippet,
+                summary,
+                pitfalls,
+                lang_env_version,
+                author_level,
+                source_url,
+                found_via
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "state update",
+                "setState(prev => prev + 1)",
+                "Functional update.",
+                "Avoid stale closures.",
+                "React 18 hooks",
+                "medium",
+                "https://github.com/example/react/blob/HEAD/state.jsx",
+                "react state update",
+            ),
+        )
+
+    migrated = reference.audit("state update")
+
+    assert migrated is not None
+    assert [attempt["attempt"] for attempt in migrated["research"]] == [1]
+    assert migrated["candidates"][0]["snippet"] == "setState(prev => prev + 1)"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA foreign_key_list(candidates)").fetchall() == []
+
+    reference._write_entry(
+        {
+            "term": "state update",
+            "search_keywords": ["source disappeared pattern"],
+            "examined": [],
+            "candidates": [],
+            "notes": "nothing-fetched: no public repository candidates were fetched.",
+        }
+    )
+    preserved = reference.audit("state update")
+
+    assert preserved is not None
+    assert [attempt["attempt"] for attempt in preserved["research"]] == [1, 2]
+    assert [candidate["snippet"] for candidate in preserved["candidates"]] == ["setState(prev => prev + 1)"]
+
+
 def test_query_filters_candidates_by_term_lang_author_and_keyword(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     reference._write_entry(
@@ -736,7 +915,7 @@ def test_query_filters_candidates_by_term_lang_author_and_keyword(monkeypatch, t
     assert results[0]["found_via"] == "python state update"
 
 
-def test_empty_research_rows_are_stored_and_reexpand_upserts(monkeypatch, tmp_path):
+def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch, tmp_path):
     db_path = tmp_path / "reference.sqlite3"
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "use a basic verifier")
@@ -751,12 +930,17 @@ def test_empty_research_rows_are_stored_and_reexpand_upserts(monkeypatch, tmp_pa
     assert entry["search_keywords"] == ["oauth pkce verifier"]
     assert entry["candidates"] == []
     assert entry["notes"] == "nothing-fetched: no public repository candidates were fetched."
+    assert [attempt["attempt"] for attempt in entry["research"]] == [1, 2]
+    assert [attempt["search_keywords"] for attempt in entry["research"]] == [
+        ["oauth pkce verifier"],
+        ["oauth pkce verifier"],
+    ]
 
     with sqlite3.connect(db_path) as connection:
         research_count = connection.execute("SELECT count(*) FROM research").fetchone()[0]
         candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
 
-    assert research_count == 1
+    assert research_count == 2
     assert candidate_count == 0
     assert reference.query({"term": "PKCE verifier rotation", "keyword": "oauth pkce verifier"}) == []
 

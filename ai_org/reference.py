@@ -300,7 +300,13 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
         where.append(
             "("
             + " OR ".join(
-                "(lower(c.found_via) LIKE lower(?) OR lower(r.search_keywords) LIKE lower(?))"
+                "("
+                "lower(c.found_via) LIKE lower(?) "
+                "OR EXISTS ("
+                "SELECT 1 FROM research r "
+                "WHERE lower(r.term) = lower(c.term) AND lower(r.search_keywords) LIKE lower(?)"
+                ")"
+                ")"
                 for _value in search_values
             )
             + ")"
@@ -312,7 +318,7 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
     sql = (
         "SELECT c.term, c.snippet, c.summary, c.pitfalls, c.lang_env_version, "
         "c.author_level, c.source_url, c.found_via "
-        "FROM candidates c JOIN research r ON r.term = c.term"
+        "FROM candidates c"
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -1079,40 +1085,55 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
         with _connect_database(path) as connection:
             _ensure_schema(connection)
             with connection:
+                term = str(entry["term"])
+                attempt = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM research WHERE lower(term) = lower(?)",
+                        (term,),
+                    ).fetchone()[0]
+                )
                 connection.execute(
                     """
-                    INSERT INTO research(term, notes, search_keywords, examined)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(term) DO UPDATE SET
-                        notes = excluded.notes,
-                        search_keywords = excluded.search_keywords,
-                        examined = excluded.examined
+                    INSERT INTO research(term, attempt, captured_at, notes, search_keywords, examined)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        str(entry["term"]),
+                        term,
+                        attempt,
+                        time.time(),
                         str(entry["notes"]),
                         json.dumps(entry["search_keywords"], sort_keys=True),
                         json.dumps(entry["examined"], sort_keys=True),
                     ),
                 )
-                connection.execute("DELETE FROM candidates WHERE term = ?", (str(entry["term"]),))
-                connection.executemany(
-                    """
-                    INSERT INTO candidates(
-                        term,
-                        snippet,
-                        summary,
-                        pitfalls,
-                        lang_env_version,
-                        author_level,
-                        source_url,
-                        found_via
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
+                for candidate in entry["candidates"]:
+                    existing = connection.execute(
+                        """
+                        SELECT 1
+                        FROM candidates
+                        WHERE lower(term) = lower(?) AND source_url = ? AND snippet = ?
+                        LIMIT 1
+                        """,
+                        (term, candidate["source_url"], candidate["snippet"]),
+                    ).fetchone()
+                    if existing is not None:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO candidates(
+                            term,
+                            snippet,
+                            summary,
+                            pitfalls,
+                            lang_env_version,
+                            author_level,
+                            source_url,
+                            found_via
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
                         (
-                            str(entry["term"]),
+                            term,
                             candidate["snippet"],
                             candidate["summary"],
                             candidate["pitfalls"],
@@ -1120,10 +1141,8 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                             candidate["author_level"],
                             candidate["source_url"],
                             candidate["found_via"],
-                        )
-                        for candidate in entry["candidates"]
-                    ],
-                )
+                        ),
+                    )
 
 
 def _read_entry(term: str) -> dict[str, Any] | None:
@@ -1132,11 +1151,16 @@ def _read_entry(term: str) -> dict[str, Any] | None:
         return None
     try:
         with _connect_existing_database(path) as connection:
-            research = connection.execute(
-                "SELECT term, notes, search_keywords, examined FROM research WHERE lower(term) = lower(?)",
+            research_rows = connection.execute(
+                """
+                SELECT term, attempt, captured_at, notes, search_keywords, examined
+                FROM research
+                WHERE lower(term) = lower(?)
+                ORDER BY attempt, id
+                """,
                 (str(term),),
-            ).fetchone()
-            if research is None:
+            ).fetchall()
+            if not research_rows:
                 return None
             candidate_rows = connection.execute(
                 """
@@ -1147,21 +1171,24 @@ def _read_entry(term: str) -> dict[str, Any] | None:
                 """,
                 (str(term),),
             ).fetchall()
-    except (sqlite3.Error, json.JSONDecodeError):
+    except sqlite3.Error:
         return None
 
     try:
+        research_history = [_research_attempt_from_row(row) for row in research_rows]
+        latest = research_history[-1]
         entry = {
-            "term": str(research["term"]),
-            "search_keywords": json.loads(str(research["search_keywords"] or "[]")),
-            "examined": json.loads(str(research["examined"] or "[]")),
+            "term": str(latest["term"]),
+            "search_keywords": latest["search_keywords"],
+            "examined": latest["examined"],
             "candidates": [_candidate_from_row(row) for row in candidate_rows],
-            "notes": str(research["notes"] or ""),
+            "notes": str(latest["notes"]),
         }
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if not _valid_entry(entry):
+    if not _valid_persisted_entry(entry, research_history):
         return None
+    entry["research"] = research_history
     return entry
 
 
@@ -1180,17 +1207,60 @@ def _connect_existing_database(path: Path) -> sqlite3.Connection:
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys = OFF")
+    with connection:
+        research_columns = _table_columns(connection, "research")
+        candidate_columns = _table_columns(connection, "candidates")
+        candidate_foreign_keys = connection.execute("PRAGMA foreign_key_list(candidates)").fetchall()
+
+        if research_columns and "attempt" not in research_columns:
+            _migrate_research_to_history(connection)
+        elif not research_columns:
+            _create_research_table(connection)
+
+        if candidate_columns and candidate_foreign_keys:
+            _migrate_candidates_without_foreign_key(connection)
+        elif not candidate_columns:
+            _create_candidates_table(connection)
+
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reference_research_term ON research(term);
+            CREATE INDEX IF NOT EXISTS idx_reference_research_term_attempt ON research(term, attempt);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_term ON candidates(term);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_lang_env_version ON candidates(lang_env_version);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_author_level ON candidates(author_level);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_found_via ON candidates(found_via);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_dedup ON candidates(term, source_url, snippet);
+            """
+        )
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.executescript(
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _create_research_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS research (
-            term TEXT PRIMARY KEY,
+        CREATE TABLE research (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            captured_at REAL NOT NULL,
             notes TEXT NOT NULL,
             search_keywords TEXT NOT NULL,
             examined TEXT NOT NULL
-        );
+        )
+        """
+    )
 
-        CREATE TABLE IF NOT EXISTS candidates (
+
+def _create_candidates_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             term TEXT NOT NULL,
             snippet TEXT NOT NULL,
@@ -1199,16 +1269,59 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             lang_env_version TEXT NOT NULL,
             author_level TEXT NOT NULL,
             source_url TEXT NOT NULL,
-            found_via TEXT NOT NULL,
-            FOREIGN KEY(term) REFERENCES research(term) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_reference_candidates_term ON candidates(term);
-        CREATE INDEX IF NOT EXISTS idx_reference_candidates_lang_env_version ON candidates(lang_env_version);
-        CREATE INDEX IF NOT EXISTS idx_reference_candidates_author_level ON candidates(author_level);
-        CREATE INDEX IF NOT EXISTS idx_reference_candidates_found_via ON candidates(found_via);
+            found_via TEXT NOT NULL
+        )
         """
     )
+
+
+def _migrate_research_to_history(connection: sqlite3.Connection) -> None:
+    captured_at = time.time()
+    connection.execute("ALTER TABLE research RENAME TO research_legacy")
+    _create_research_table(connection)
+    connection.execute(
+        """
+        INSERT INTO research(term, attempt, captured_at, notes, search_keywords, examined)
+        SELECT term, 1, ?, notes, search_keywords, examined
+        FROM research_legacy
+        ORDER BY lower(term)
+        """,
+        (captured_at,),
+    )
+    connection.execute("DROP TABLE research_legacy")
+
+
+def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE candidates RENAME TO candidates_legacy")
+    _create_candidates_table(connection)
+    connection.execute(
+        """
+        INSERT INTO candidates(
+            id,
+            term,
+            snippet,
+            summary,
+            pitfalls,
+            lang_env_version,
+            author_level,
+            source_url,
+            found_via
+        )
+        SELECT
+            id,
+            term,
+            snippet,
+            summary,
+            pitfalls,
+            lang_env_version,
+            author_level,
+            source_url,
+            found_via
+        FROM candidates_legacy
+        ORDER BY id
+        """
+    )
+    connection.execute("DROP TABLE candidates_legacy")
 
 
 def _database_path() -> Path:
@@ -1241,6 +1354,20 @@ def _candidate_from_row(row: Mapping[str, Any], *, include_term: bool = False) -
     if include_term:
         return {"term": str(row["term"] or ""), **candidate}
     return candidate
+
+
+def _research_attempt_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    attempt = {
+        "term": str(row["term"] or ""),
+        "attempt": int(row["attempt"]),
+        "captured_at": float(row["captured_at"]),
+        "search_keywords": json.loads(str(row["search_keywords"] or "[]")),
+        "examined": json.loads(str(row["examined"] or "[]")),
+        "notes": str(row["notes"] or ""),
+    }
+    if not _valid_research_attempt(attempt):
+        raise ValueError("invalid research attempt")
+    return attempt
 
 
 def _consumption_candidate(candidate: Mapping[str, Any]) -> dict[str, str]:
@@ -1290,6 +1417,64 @@ def _valid_entry(value: Any) -> bool:
         and all(_valid_candidate(candidate) for candidate in candidates)
         and all(candidate["found_via"].lower() in keyword_set for candidate in candidates)
     )
+
+
+def _valid_persisted_entry(entry: Any, research_history: Any) -> bool:
+    if not isinstance(entry, Mapping) or set(entry) != set(ENTRY_FIELDS):
+        return False
+    if not isinstance(research_history, list) or not research_history:
+        return False
+    if not all(_valid_research_attempt(attempt) for attempt in research_history):
+        return False
+    current_without_candidates = {
+        "term": entry["term"],
+        "search_keywords": entry["search_keywords"],
+        "examined": entry["examined"],
+        "candidates": [],
+        "notes": entry["notes"],
+    }
+    if not _valid_entry(current_without_candidates):
+        return False
+    keyword_set = {
+        keyword.lower()
+        for attempt in research_history
+        for keyword in attempt["search_keywords"]
+    }
+    candidates = entry["candidates"]
+    return (
+        isinstance(candidates, list)
+        and all(_valid_candidate(candidate) for candidate in candidates)
+        and all(candidate["found_via"].lower() in keyword_set for candidate in candidates)
+    )
+
+
+def _valid_research_attempt(value: Any) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "term",
+        "attempt",
+        "captured_at",
+        "search_keywords",
+        "examined",
+        "notes",
+    }:
+        return False
+    if not isinstance(value["term"], str) or not isinstance(value["notes"], str):
+        return False
+    if not isinstance(value["attempt"], int) or value["attempt"] < 1:
+        return False
+    if not isinstance(value["captured_at"], float) or value["captured_at"] < 0:
+        return False
+    if not isinstance(value["search_keywords"], list) or not all(
+        isinstance(item, str) for item in value["search_keywords"]
+    ):
+        return False
+    search_keywords = _clean_search_keywords(value["search_keywords"])
+    if search_keywords != value["search_keywords"]:
+        return False
+    if not isinstance(value["examined"], list) or not all(_valid_examined(item) for item in value["examined"]):
+        return False
+    keyword_set = {keyword.lower() for keyword in search_keywords}
+    return all(item["found_via"].lower() in keyword_set for item in value["examined"])
 
 
 def _valid_candidate(value: Any) -> bool:
