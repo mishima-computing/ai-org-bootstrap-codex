@@ -92,6 +92,7 @@ def test_receive_preserves_extra_keys():
 
 def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
+    monkeypatch.setenv("AI_ORG_REQUIRE_CONFIRMATION", "true")
     request = receive(
         {
             "raw_request": "Manual Intake: commit the validated registry RFC as rfc.json.",
@@ -224,8 +225,9 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
     assert calls == ["grounding", "verifier"]
 
 
-def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_path, monkeypatch):
+def test_intake_grounding_not_confident_promotes_by_default_with_uncertainty_preserved(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
+    monkeypatch.delenv("AI_ORG_REQUIRE_CONFIRMATION", raising=False)
     request = receive(
         {
             "raw_request": "Make it like that thing we discussed.",
@@ -248,27 +250,77 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
         "I assumed the first RFC should cover core loop and progression rather than art polish because the problem does not name a visual style.",
     ]
     questions = ["Can you name the exact prior reference if this inferred game is wrong?"]
+    notes = "The reference is ambiguous, but grounding inferred a likely RFC from repo context."
+    calls = []
 
-    def handler(cmd):
-        assert cmd[:4] == ["codex", "exec", "--sandbox", "read-only"]
-        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
-        if kind == "verifier":
-            return {
-                "faithful_specific": True,
-                "full_scope": True,
-                "non_legal": True,
-                "latest_default": True,
-                "reasons": [],
-            }
-        return {
-            "confident": False,
-            "proposed_rfc": proposed_rfc,
-            "assumptions": assumptions,
-            "questions": questions,
-            "grounding_notes": "The reference is ambiguous, but grounding inferred a likely RFC from repo context.",
+    monkeypatch.setattr(
+        receive_module,
+        "_ground_with_contract",
+        lambda repo, rfc: GroundingResult(proposed_rfc, notes, False, assumptions, questions),
+    )
+
+    def fake_build_from_rfc(rfc_view, context=None, **kwargs):
+        calls.append("build_from_rfc")
+        assert rfc_view["open_questions"] == questions
+        assert rfc_view["constraints_assumptions"] == assumptions
+        assert "Grounding was not fully confident" in rfc_view["grounding_provenance"]
+        assert assumptions[0] in rfc_view["grounding_provenance"]
+        assert kwargs == {"kinds": ("design",)}
+        return {"terms": {}, "processed_terms": ["dungeon automation"], "expanded": [], "hits": [], "failed": {}}
+
+    def fake_start_background_build(rfc_view, context=None, **kwargs):
+        calls.append("start_background_build")
+        assert rfc_view["open_questions"] == questions
+        assert kwargs == {"kinds": ("implementation",)}
+        return object()
+
+    def fake_form_technical_approach(rfc_view, repo_path, **kwargs):
+        calls.append("form_technical_approach")
+        assert rfc_view["open_questions"] == questions
+        assert rfc_view["constraints_assumptions"] == assumptions
+        assert kwargs["reference_terms"] == ["dungeon automation"]
+        return {"ok": True, "technical_approach": _approach_tree()}
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module.reference, "start_background_build", fake_start_background_build)
+    monkeypatch.setattr(receive_module, "form_technical_approach", fake_form_technical_approach)
+
+    result = intake(request, repo)
+
+    assert result["status"] == "promoted"
+    assert result["id"] == "conversation-inferred-dungeon-automation-game"
+    assert result["grounding_notes"] == notes
+    produced = json.loads(_git(repo, "show", "ai-org/rfc/conversation-inferred-dungeon-automation-game:rfc.json"))
+    assert produced["open_questions"] == questions
+    assert produced["constraints_assumptions"] == assumptions
+    assert "Grounding was not fully confident" in produced["grounding_provenance"]
+    assert assumptions[0] in produced["grounding_provenance"]
+    assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
+    assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
+
+
+def test_intake_grounding_not_confident_requires_confirmation_when_toggle_on(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    monkeypatch.setenv("AI_ORG_REQUIRE_CONFIRMATION", "yes")
+    request = receive(
+        {
+            "raw_request": "Make it like that thing we discussed.",
         }
+    )
+    proposed_rfc = _rfc_view(
+        "Conversation-Inferred Dungeon Automation Game",
+        raw_request=request["raw_request"],
+        grounding_provenance="Grounding inferred a likely game request from the available wording and repository game context.",
+    )
+    assumptions = ["I assumed the request refers to the earlier dungeon automation game."]
+    questions = ["Can you name the exact prior reference if this inferred game is wrong?"]
+    notes = "The reference is ambiguous."
 
-    _install_codex_fake(monkeypatch, handler)
+    monkeypatch.setattr(
+        receive_module,
+        "_ground_with_contract",
+        lambda repo, rfc: GroundingResult(proposed_rfc, notes, False, assumptions, questions),
+    )
     monkeypatch.setattr(
         receive_module.reference,
         "build_from_rfc",
@@ -287,13 +339,16 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
 
     result = intake(request, repo)
 
-    assert result["status"] == "needs_confirmation"
-    assert result["proposed_rfc"] == proposed_rfc
-    assert result["assumptions"] == assumptions
-    assert result["questions"] == questions
+    assert result == {
+        "status": "needs_confirmation",
+        "proposed_rfc": proposed_rfc,
+        "assumptions": assumptions,
+        "questions": questions,
+        "grounding_notes": notes,
+    }
     assert "branch" not in result
     missing_branch = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/ai-org/rfc/rough-game"],
+        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/ai-org/rfc/conversation-inferred-dungeon-automation-game"],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -356,6 +411,7 @@ def test_produce_rfc_approach_failure_does_not_promote_hollow_rfc(tmp_path, monk
 
 def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
+    monkeypatch.setenv("AI_ORG_REQUIRE_CONFIRMATION", "true")
     request = receive(
         {
             "raw_request": "Make Dragon Quest. Build Dragon Quest.",

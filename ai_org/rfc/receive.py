@@ -115,6 +115,7 @@ import concurrent.futures
 from dataclasses import dataclass, field
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -870,6 +871,42 @@ class GroundingResult:
     violations: list[str] = field(default_factory=list)
 
 
+def _require_confirmation() -> bool:
+    return os.environ.get("AI_ORG_REQUIRE_CONFIRMATION", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _rfc_with_non_blocking_grounding_uncertainty(grounding: GroundingResult) -> dict[str, Any]:
+    rfc = dict(grounding.rfc_view)
+    if grounding.questions:
+        rfc["open_questions"] = _append_unique_strings(rfc.get("open_questions"), grounding.questions)
+    if grounding.assumptions:
+        rfc["constraints_assumptions"] = _append_unique_strings(rfc.get("constraints_assumptions"), grounding.assumptions)
+
+    uncertainty_notes: list[str] = []
+    if not grounding.confident:
+        uncertainty_notes.append("Grounding was not fully confident; best-guess RFC promoted without blocking.")
+    if grounding.assumptions:
+        uncertainty_notes.append("Non-blocking assumptions: " + "; ".join(grounding.assumptions))
+    if grounding.questions:
+        uncertainty_notes.append("Non-blocking open questions are preserved in open_questions.")
+
+    if uncertainty_notes:
+        existing = str(rfc.get("grounding_provenance") or "").strip()
+        appended = " ".join(uncertainty_notes)
+        rfc["grounding_provenance"] = f"{existing}\n\n{appended}" if existing else appended
+    return rfc
+
+
+def _append_unique_strings(existing: Any, additions: list[str]) -> list[str]:
+    values = list(existing) if isinstance(existing, list) else []
+    seen = {value for value in values if isinstance(value, str)}
+    for addition in additions:
+        if addition and addition not in seen:
+            values.append(addition)
+            seen.add(addition)
+    return values
+
+
 def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     """Load and validate a raw request from a dict or a JSON file path."""
     if isinstance(source, Mapping):
@@ -922,7 +959,9 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
     raw_rfc = _entrance_request(validated_request)
     repo_path = Path(repo).resolve()
     grounding = _ground_with_contract(repo_path, raw_rfc)
-    if not grounding.confident:
+    # Memento: needs_confirmation is default-off because autonomy is the AI Org's differentiator; the
+    # confirm-back loop is deferred to the roadmap end. Preserve assumptions/open questions non-blocking.
+    if not grounding.confident and _require_confirmation():
         result = {
             "status": "needs_confirmation",
             "proposed_rfc": grounding.rfc_view,
@@ -934,7 +973,11 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
             result["violations"] = grounding.violations
         return result
 
-    rfc = grounding.rfc_view
+    rfc = (
+        grounding.rfc_view
+        if grounding.confident
+        else _rfc_with_non_blocking_grounding_uncertainty(grounding)
+    )
     approach_context = _technical_approach_context(None, repo_path)
     design_build = reference.build_from_rfc(rfc, approach_context, kinds=("design",))
     design_terms = _reference_terms_from_build_result(design_build)
