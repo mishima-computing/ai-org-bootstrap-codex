@@ -197,8 +197,8 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
             },
             {
                 "constraint": "Generated schemas must be accepted by Codex output schema validation.",
-                "source": "rfc",
-                "why": "The request requires no allOf, anyOf, or oneOf and required must list all properties.",
+                "source": "success_criteria",
+                "why": "The measurable success criteria require codex-valid schemas.",
             },
         ],
         "soft_preferences": [
@@ -222,7 +222,13 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
 
-    result = receive_module._extract_constraints(rfc_view, tmp_path, {"normalized": "problem"})
+    normalized_problem = _normalized_problem()
+    result = receive_module._extract_constraints(
+        rfc_view,
+        tmp_path,
+        {"normalized": "problem"},
+        normalized_problem,
+    )
 
     assert result == expected
     assert len(calls) == 1
@@ -236,6 +242,11 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
     assert "extract constraints" in kwargs["prompt"]
     assert "Inspect the repository read-only" in kwargs["prompt"]
     assert "Do not propose candidate approaches" in kwargs["prompt"]
+    assert "Step 1 normalized problem" in kwargs["prompt"]
+    assert normalized_problem["problem"] in kwargs["prompt"]
+    assert normalized_problem["success_criteria"][0]["verifiable_outcome"]["expected_state"] in kwargs["prompt"]
+    assert "verifiable_outcome and verification" in kwargs["prompt"]
+    assert "success_criteria" in kwargs["prompt"]
     assert "Return only JSON matching the provided schema." in kwargs["prompt"]
 
 
@@ -280,8 +291,8 @@ def test_extract_constraints_schema_is_codex_valid():
 
     hard_item = schema["properties"]["hard_constraints"]["items"]
     soft_item = schema["properties"]["soft_preferences"]["items"]
-    assert hard_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain"]
-    assert soft_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain"]
+    assert hard_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain", "success_criteria"]
+    assert soft_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain", "success_criteria"]
 
 
 def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, tmp_path):
@@ -1167,10 +1178,11 @@ def test_form_technical_approach_runs_full_generation_and_composes_section(monke
         assert context["repo"] == tmp_path.resolve()
         return _normalized_problem()
 
-    def fake_constraints(rfc_view, repo, context=None):
+    def fake_constraints(rfc_view, repo, context=None, normalized_problem=None):
         calls.append("extract_constraints")
         assert rfc_view == _rfc_view()
         assert repo == tmp_path.resolve()
+        assert normalized_problem == _normalized_problem()
         return _constraints()
 
     def fake_prior_art(rfc_view, repo, context=None, normalized_problem=None):
@@ -1294,7 +1306,9 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     monkeypatch.setattr(
         receive_module,
         "_extract_constraints",
-        lambda rfc_view, repo, context=None: calls.append("extract_constraints") or _constraints(),
+        lambda rfc_view, repo, context=None, normalized_problem=None: (
+            calls.append(("extract_constraints", normalized_problem)) or _constraints()
+        ),
     )
     monkeypatch.setattr(
         receive_module,
@@ -1347,7 +1361,7 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     assert result["ok"] is True
     assert calls == [
         "normalize_problem",
-        "extract_constraints",
+        ("extract_constraints", _normalized_problem()),
         "build_prior_art_map",
         "implementation_strategy",
         "right_size_patch_plan",
@@ -1375,7 +1389,10 @@ def test_form_technical_approach_fails_closed_when_a_step_errors(monkeypatch, tm
     monkeypatch.setattr(
         receive_module,
         "_extract_constraints",
-        lambda rfc_view, repo, context=None: {"ok": False, "error": "constraint extraction failed"},
+        lambda rfc_view, repo, context=None, normalized_problem=None: {
+            "ok": False,
+            "error": "constraint extraction failed",
+        },
     )
     monkeypatch.setattr(
         receive_module,

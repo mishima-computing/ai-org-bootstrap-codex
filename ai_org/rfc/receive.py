@@ -237,7 +237,7 @@ NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
     },
 }
 
-CONSTRAINT_SOURCE_VALUES = ("repo", "rfc", "domain")
+CONSTRAINT_SOURCE_VALUES = ("repo", "rfc", "domain", "success_criteria")
 CONSTRAINT_ITEM_FIELDS = ("constraint", "source", "why")
 PREFERENCE_ITEM_FIELDS = ("preference", "source", "why")
 EXTRACT_CONSTRAINTS_FIELDS = ("hard_constraints", "soft_preferences")
@@ -771,6 +771,7 @@ def _extract_constraints(
     rfc_view: dict[str, Any],
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
+    normalized_problem: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 2 of the documented 10-step Technical Approach procedure."""
     # Step 2 of 10: extract hard constraints and soft preferences before approach generation.
@@ -781,7 +782,7 @@ def _extract_constraints(
     run = codex_exec.run_json(
         repo_path,
         schema=EXTRACT_CONSTRAINTS_SCHEMA,
-        prompt=_extract_constraints_prompt(rfc_view, repo_path, context),
+        prompt=_extract_constraints_prompt(rfc_view, repo_path, context, normalized_problem),
         schema_filename="rfc-extract-constraints.schema.json",
         output_filename="rfc-extracted-constraints.json",
         failure_label="Codex constraint extraction",
@@ -1013,7 +1014,7 @@ def form_technical_approach(
         return failure
     steps["normalize_problem"] = normalized
 
-    constraints = _extract_constraints(rfc_view, repo_path, approach_context)
+    constraints = _extract_constraints(rfc_view, repo_path, approach_context, normalized)
     failure = _technical_approach_step_failure("extract_constraints", constraints)
     if failure:
         return failure
@@ -1266,14 +1267,29 @@ def _extract_constraints_prompt(
     rfc_view: dict[str, Any],
     repo: Path,
     context: Mapping[str, Any] | None = None,
+    normalized_problem: Mapping[str, Any] | None = None,
 ) -> str:
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    normalized_problem_text = json.dumps(
+        normalized_problem or {},
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    )
     return (
         "You are forming step 2 of AI Org's 10-step Technical Approach procedure: extract constraints.\n"
         "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
-        "RFC view, repository architecture, and supplied context to identify constraints only. Do not propose "
-        "candidate approaches, select an approach, create a patch plan, or perform later Technical Approach "
-        "steps.\n\n"
+        "RFC view, step 1 normalized problem, repository architecture, and supplied context to identify "
+        "constraints only. Do not propose candidate approaches, select an approach, create a patch plan, or "
+        "perform later Technical Approach steps.\n\n"
+        "This step must build on step 1. Derive constraints from the distilled normalized problem and from each "
+        "measurable success criterion, especially verifiable_outcome and verification. Treat a success criterion's "
+        "required observable result as a hard constraint when later approaches could violate it. For example, "
+        "a criterion that save reload restores identical state implies a serialization and versioning constraint; "
+        "a criterion that battle resolution follows commands and stats implies a deterministic battle-state "
+        "constraint. Use the raw RFC only as grounding and ambiguity context, not as an independent restart of "
+        "problem discovery.\n\n"
         "Extract two lists:\n"
         "- hard_constraints: must-satisfy constraints that later approaches cannot violate.\n"
         "- soft_preferences: nice-to-have preferences that should influence trade-offs but may be outweighed.\n\n"
@@ -1284,12 +1300,16 @@ def _extract_constraints_prompt(
         "- performance, security, reliability, operability, and migration requirements.\n"
         "- test constraints, existing coverage style, and verification expectations.\n"
         "- delivery scope, non-goals, rollout boundaries, and documentation expectations.\n\n"
-        "For each item, set source to exactly one of: repo, rfc, domain. Use repo for constraints observed in "
-        "code, tests, docs, or project structure; rfc for constraints stated or implied by the grounded RFC; "
-        "domain for generally applicable engineering, security, reliability, or compatibility constraints. "
-        "The why field must briefly explain the evidence or reason. Return an empty list when no defensible "
-        "items exist for a category; do not invent unsupported constraints.\n\n"
+        "For each item, set source to exactly one of: repo, rfc, domain, success_criteria. Use repo for "
+        "constraints observed in code, tests, docs, or project structure; rfc for constraints inherited from "
+        "the distilled normalized problem, non-goals, or grounded RFC context; success_criteria for constraints "
+        "derived from a measurable success criterion; and domain for generally applicable engineering, security, "
+        "reliability, or compatibility constraints. The why field must briefly explain the evidence or reason "
+        "and cite the normalized problem field or success criterion behind the constraint when applicable. "
+        "Return an empty list when no defensible items exist for a category; do not invent unsupported "
+        "constraints.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nStep 1 normalized problem:\n{normalized_problem_text}\n"
         + f"\nRepository root:\n{repo}\n"
         + f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
