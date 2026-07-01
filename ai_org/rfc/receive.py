@@ -410,6 +410,40 @@ IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
         "observability": {"type": "string"},
     },
 }
+PATCH_PLAN_DEFERRED_FIELDS = (
+    "item",
+    "why_safe_to_defer",
+)
+RIGHT_SIZE_PATCH_PLAN_FIELDS = (
+    "first_slice",
+    "follow_up_slices",
+    "deferred",
+    "yagni_note",
+)
+
+RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(RIGHT_SIZE_PATCH_PLAN_FIELDS),
+    "properties": {
+        "first_slice": {"type": "string"},
+        "follow_up_slices": {"type": "array", "items": {"type": "string"}},
+        "deferred": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(PATCH_PLAN_DEFERRED_FIELDS),
+                "properties": {
+                    "item": {"type": "string"},
+                    "why_safe_to_defer": {"type": "string"},
+                },
+            },
+        },
+        "yagni_note": {"type": "string"},
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -792,6 +826,31 @@ def _implementation_strategy(
     return _parse_implementation_strategy(run["raw"])
 
 
+def _right_size_patch_plan(
+    chosen: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 8 of the documented 10-step Technical Approach procedure."""
+    # Step 8 of 10: right-size the strategy into incremental slices without surfacing later-step risks.
+    if not all(isinstance(value, Mapping) for value in (chosen, implementation_strategy, constraints)):
+        return _right_size_patch_plan_error("right_size_patch_plan requires outputs from steps 2, 6, and 7")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=RIGHT_SIZE_PATCH_PLAN_SCHEMA,
+        prompt=_right_size_patch_plan_prompt(chosen, implementation_strategy, constraints, context),
+        schema_filename="rfc-right-size-patch-plan.schema.json",
+        output_filename="rfc-right-sized-patch-plan.json",
+        failure_label="Codex patch plan right-sizing",
+    )
+    if not run["ok"]:
+        return _right_size_patch_plan_error(run["error"])
+    return _parse_right_size_patch_plan(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -1165,6 +1224,39 @@ def _implementation_strategy_prompt(
         + f"\nPrior-art map:\n{prior_art_text}\n"
         + f"\nConstraints:\n{constraints_text}\n"
         + f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _right_size_patch_plan_prompt(
+    chosen: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 8 of AI Org's 10-step Technical Approach procedure: right-size the patch plan.\n"
+        "Use the selected approach from step 6, the implementation strategy from step 7, the constraints from "
+        "step 2, and read-only repository inspection from the configured repo root. Do not modify files.\n\n"
+        "Turn the implementation strategy into a right-sized, incremental patch plan. Every slice must leave "
+        "the system working and should enable behavior incrementally. The first_slice must be the first safe "
+        "walking skeleton slice. Apply YAGNI: defer speculative work unless a deferred decision is hard to "
+        "reverse or affects major quality attributes such as security, reliability, compatibility, performance, "
+        "operability, or maintainability. Do not surface risks and open questions, emit the final Technical "
+        "Approach section, or perform later Technical Approach steps.\n\n"
+        "Return these fields:\n"
+        "- first_slice: the first safe walking-skeleton slice that leaves the system working.\n"
+        "- follow_up_slices: later incremental slices, each leaving the system working.\n"
+        "- deferred: intentionally deferred work, each with item and why_safe_to_defer.\n"
+        "- yagni_note: what is intentionally not built now and why.\n\n"
+        f"Chosen approach:\n{chosen_text}\n"
+        f"\nImplementation strategy:\n{strategy_text}\n"
+        f"\nConstraints:\n{constraints_text}\n"
+        f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1677,6 +1769,49 @@ def _parse_implementation_strategy(raw: str) -> dict[str, Any]:
 
 
 def _implementation_strategy_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_right_size_patch_plan(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _right_size_patch_plan_error(f"Codex patch plan right-sizing returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned non-object JSON")
+    if set(parsed) != set(RIGHT_SIZE_PATCH_PLAN_FIELDS):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid fields")
+    if not isinstance(parsed["first_slice"], str) or not isinstance(parsed["yagni_note"], str):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid string fields")
+
+    follow_up_slices = parsed.get("follow_up_slices")
+    if not isinstance(follow_up_slices, list) or not all(isinstance(item, str) for item in follow_up_slices):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid follow_up_slices")
+
+    deferred = parsed.get("deferred")
+    if not isinstance(deferred, list):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid deferred")
+
+    parsed_deferred: list[dict[str, str]] = []
+    for item in deferred:
+        if not isinstance(item, dict):
+            return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid deferred item")
+        if set(item) != set(PATCH_PLAN_DEFERRED_FIELDS):
+            return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid deferred fields")
+        if not all(isinstance(item[field], str) for field in PATCH_PLAN_DEFERRED_FIELDS):
+            return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid deferred values")
+        parsed_deferred.append({"item": item["item"], "why_safe_to_defer": item["why_safe_to_defer"]})
+
+    return {
+        "first_slice": parsed["first_slice"],
+        "follow_up_slices": list(follow_up_slices),
+        "deferred": parsed_deferred,
+        "yagni_note": parsed["yagni_note"],
+    }
+
+
+def _right_size_patch_plan_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 

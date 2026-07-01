@@ -839,6 +839,113 @@ def test_implementation_strategy_schema_is_codex_valid():
         assert schema["properties"][field]["items"]["type"] == "string"
 
 
+def test_right_size_patch_plan_returns_parsed_plan(monkeypatch, tmp_path):
+    expected = {
+        "first_slice": "Add the private schema, helper, parser, and focused tests as one working walking skeleton.",
+        "follow_up_slices": [
+            "Wire the patch plan into the final Technical Approach emitter after steps 9 and 10 exist.",
+            "Refine slice wording once reviewer question surfacing is available.",
+        ],
+        "deferred": [
+            {
+                "item": "Automatic issue creation for deferred work.",
+                "why_safe_to_defer": "It is speculative workflow automation and does not affect the RFC formation contract.",
+            }
+        ],
+        "yagni_note": "Do not build orchestration for steps 9 and 10 in this slice because step 8 is additive and private.",
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._right_size_patch_plan(
+        _chosen(),
+        _implementation_strategy(),
+        _constraints(),
+        {"repo": tmp_path, "request_id": "rfc-step-8"},
+    )
+
+    assert result == expected
+    assert result["first_slice"] == expected["first_slice"]
+    assert result["follow_up_slices"] == expected["follow_up_slices"]
+    assert result["deferred"] == expected["deferred"]
+    assert result["yagni_note"] == expected["yagni_note"]
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.RIGHT_SIZE_PATCH_PLAN_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-right-size-patch-plan.schema.json"
+    assert kwargs["output_filename"] == "rfc-right-sized-patch-plan.json"
+    assert kwargs["failure_label"] == "Codex patch plan right-sizing"
+    assert "step 8" in kwargs["prompt"]
+    assert "right-size the patch plan" in kwargs["prompt"]
+    assert "read-only repository inspection" in kwargs["prompt"]
+    assert "Do not modify files" in kwargs["prompt"]
+    assert "Every slice must leave the system working" in kwargs["prompt"]
+    assert "Apply YAGNI" in kwargs["prompt"]
+    assert "hard to reverse" in kwargs["prompt"]
+    assert "quality attributes" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+
+
+def test_right_size_patch_plan_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid = {
+        "first_slice": "Add the helper and tests as a walking skeleton.",
+        "follow_up_slices": ["Wire into final approach emission later."],
+        "deferred": [{"item": "Automation.", "why_safe_to_defer": "Speculative."}],
+        "yagni_note": "Do not build later steps now.",
+    }
+    invalid_outputs = [
+        {key: value for key, value in valid.items() if key != "first_slice"},
+        {**valid, "extra": "not allowed"},
+        {**valid, "first_slice": ["Add helper."]},
+        {**valid, "follow_up_slices": "Wire later."},
+        {**valid, "follow_up_slices": ["Wire later.", 42]},
+        {**valid, "deferred": "None."},
+        {**valid, "deferred": [{"item": "Automation."}]},
+        {**valid, "deferred": [{"item": "Automation.", "why_safe_to_defer": "Speculative.", "extra": "no"}]},
+        {**valid, "deferred": [{"item": "Automation.", "why_safe_to_defer": 42}]},
+        {**valid, "yagni_note": None},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._right_size_patch_plan(
+            _chosen(),
+            _implementation_strategy(),
+            _constraints(),
+            {"repo": tmp_path},
+        )
+
+        assert result["ok"] is False
+        assert "Codex patch plan right-sizing returned" in result["error"]
+
+
+def test_right_size_patch_plan_schema_is_codex_valid():
+    schema = receive_module.RIGHT_SIZE_PATCH_PLAN_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    assert sorted(schema["required"]) == sorted(receive_module.RIGHT_SIZE_PATCH_PLAN_FIELDS)
+    assert schema["properties"]["follow_up_slices"]["items"]["type"] == "string"
+    deferred = schema["properties"]["deferred"]["items"]
+    assert deferred["additionalProperties"] is False
+    assert sorted(deferred["required"]) == sorted(receive_module.PATCH_PLAN_DEFERRED_FIELDS)
+    assert sorted(deferred["required"]) == sorted(deferred["properties"])
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -966,6 +1073,20 @@ def _chosen() -> dict[str, object]:
         ),
         "accepted_tradeoffs": ["Added prompt detail."],
         "rejected": [{"candidate_name": "Minimal", "why_not": "The matrix shows weaker problem fit."}],
+    }
+
+
+def _implementation_strategy() -> dict[str, object]:
+    return {
+        "main_changes": [
+            "Add a private right-size patch plan schema.",
+            "Add a read-only Codex helper and strict parser.",
+        ],
+        "affected_modules": ["ai_org.rfc.receive", "tests.test_rfc_approach"],
+        "data_api_config_changes": ["New private RFC formation JSON shape for patch plan sizing."],
+        "migration_compat": "No migration; additive private helper.",
+        "testing_plan": "Run pytest tests/.",
+        "observability": "n/a",
     }
 
 
