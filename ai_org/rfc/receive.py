@@ -1067,6 +1067,7 @@ def _generate_candidates(
     constraints: Mapping[str, Any],
     prior_art_map: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 4 of the documented 10-step Technical Approach procedure."""
     # Step 4 of 10: generate candidate approaches from the already-normalized problem, constraints, and prior art.
@@ -1092,6 +1093,7 @@ def _generate_candidates(
                     kind,
                     candidates,
                     context,
+                    accumulated_approach,
                     feedback if attempt else None,
                 ),
                 schema_filename=f"rfc-candidate-{kind}.schema.json",
@@ -1132,6 +1134,7 @@ def _evaluate_candidates(
     normalized_problem: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 5 of the documented 10-step Technical Approach procedure."""
     # Step 5 of 10: evaluate candidate approaches on the compact decision matrix without selecting one.
@@ -1159,6 +1162,7 @@ def _evaluate_candidates(
                     normalized_problem,
                     constraints,
                     context,
+                    accumulated_approach,
                     feedback if attempt else None,
                 ),
                 schema_filename=f"rfc-evaluate-candidate-{candidate_id}.schema.json",
@@ -1195,6 +1199,7 @@ def _select_approach(
     evaluations: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 6 of the documented 10-step Technical Approach procedure."""
     # Step 6 of 10: select the best evaluated candidate with rationale and explicit trade-offs.
@@ -1216,7 +1221,14 @@ def _select_approach(
         run = codex_exec.run_json(
             repo,
             schema=SELECT_APPROACH_SCHEMA,
-            prompt=_select_approach_prompt(candidates, evaluations, constraints, context, feedback if attempt else None),
+            prompt=_select_approach_prompt(
+                candidates,
+                evaluations,
+                constraints,
+                context,
+                accumulated_approach,
+                feedback if attempt else None,
+            ),
             schema_filename="rfc-select-approach.schema.json",
             output_filename="rfc-selected-approach.json",
             failure_label="Codex approach selection",
@@ -1247,6 +1259,7 @@ def _implementation_strategy(
     rfc_view: dict[str, Any],
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 7 of the documented 10-step Technical Approach procedure."""
     # Step 7 of 10: expand the selected approach into an implementation strategy without planning slices.
@@ -1269,6 +1282,7 @@ def _implementation_strategy(
                 rfc_view,
                 repo_path,
                 context,
+                accumulated_approach,
                 feedback if attempt else None,
             ),
             schema_filename="rfc-implementation-strategy.schema.json",
@@ -1299,6 +1313,7 @@ def _right_size_patch_plan(
     implementation_strategy: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 8 of the documented 10-step Technical Approach procedure."""
     # Step 8 of 10: right-size the strategy into incremental slices without surfacing later-step risks.
@@ -1317,6 +1332,7 @@ def _right_size_patch_plan(
                 implementation_strategy,
                 constraints,
                 context,
+                accumulated_approach,
                 feedback if attempt else None,
             ),
             schema_filename="rfc-right-size-patch-plan.schema.json",
@@ -1348,6 +1364,7 @@ def _surface_risks(
     patch_plan: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 9 of the documented 10-step Technical Approach procedure."""
     # Step 9 of 10: surface risk nodes and attach each one to its parent node.
@@ -1367,6 +1384,7 @@ def _surface_risks(
                 patch_plan,
                 constraints,
                 context,
+                accumulated_approach,
                 feedback if attempt else None,
             ),
             schema_filename="rfc-surface-risks.schema.json",
@@ -1433,23 +1451,48 @@ def form_technical_approach(
     partial_tree["problem"]["prior_art"] = _prior_art_tree_nodes(prior_art)
 
     if provided_approach is None:
-        candidates = _generate_candidates(normalized, constraints, prior_art, approach_context)
+        candidates = _generate_candidates(
+            normalized,
+            constraints,
+            prior_art,
+            approach_context,
+            _approach_snapshot(partial_tree),
+        )
         failure = _technical_approach_step_failure("generate_candidates", candidates)
         if failure:
             return failure
         steps["generate_candidates"] = candidates
+        partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates)
 
-        evaluations = _evaluate_candidates(candidates, normalized, constraints, approach_context)
+        evaluations = _evaluate_candidates(
+            candidates,
+            normalized,
+            constraints,
+            approach_context,
+            _approach_snapshot(partial_tree),
+        )
         failure = _technical_approach_step_failure("evaluate_candidates", evaluations)
         if failure:
             return failure
         steps["evaluate_candidates"] = evaluations
+        partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates, evaluations=evaluations)
 
-        selected = _select_approach(candidates, evaluations, constraints, approach_context)
+        selected = _select_approach(
+            candidates,
+            evaluations,
+            constraints,
+            approach_context,
+            _approach_snapshot(partial_tree),
+        )
         failure = _technical_approach_step_failure("select_approach", selected)
         if failure:
             return failure
         steps["select_approach"] = selected
+        partial_tree["problem"]["question"] = _partial_question_tree(
+            candidates=candidates,
+            evaluations=evaluations,
+            selected=selected,
+        )
         source = "generated"
     else:
         steps["provided_approach"] = _json_safe(provided_approach)
@@ -1457,21 +1500,61 @@ def form_technical_approach(
         evaluations = None
         selected = _provided_approach_selection(provided_approach)
         steps["select_approach"] = selected
+        partial_tree["problem"]["question"] = _partial_question_tree(
+            selected=selected,
+            provided_approach=provided_approach,
+        )
         source = "requester_provided_refined"
 
-    implementation = _implementation_strategy(selected, prior_art, constraints, rfc_view, repo_path, approach_context)
+    implementation = _implementation_strategy(
+        selected,
+        prior_art,
+        constraints,
+        rfc_view,
+        repo_path,
+        approach_context,
+        _approach_snapshot(partial_tree),
+    )
     failure = _technical_approach_step_failure("implementation_strategy", implementation)
     if failure:
         return failure
     steps["implementation_strategy"] = implementation
+    partial_tree["problem"]["question"] = _partial_question_tree(
+        candidates=candidates,
+        evaluations=evaluations,
+        selected=selected,
+        implementation=implementation,
+        provided_approach=provided_approach,
+    )
 
-    patch_plan = _right_size_patch_plan(selected, implementation, constraints, approach_context)
+    patch_plan = _right_size_patch_plan(
+        selected,
+        implementation,
+        constraints,
+        approach_context,
+        _approach_snapshot(partial_tree),
+    )
     failure = _technical_approach_step_failure("right_size_patch_plan", patch_plan)
     if failure:
         return failure
     steps["right_size_patch_plan"] = patch_plan
+    partial_tree["problem"]["question"] = _partial_question_tree(
+        candidates=candidates,
+        evaluations=evaluations,
+        selected=selected,
+        implementation=implementation,
+        patch_plan=patch_plan,
+        provided_approach=provided_approach,
+    )
 
-    risks = _surface_risks(selected, implementation, patch_plan, constraints, approach_context)
+    risks = _surface_risks(
+        selected,
+        implementation,
+        patch_plan,
+        constraints,
+        approach_context,
+        _approach_snapshot(partial_tree),
+    )
     failure = _technical_approach_step_failure("surface_risks", risks)
     if failure:
         return failure
@@ -1677,6 +1760,19 @@ def _normalize_problem_prompt(
     )
 
 
+def _root_success_criteria_text(accumulated_approach: Mapping[str, Any] | None) -> str:
+    criteria: Any = []
+    if isinstance(accumulated_approach, Mapping):
+        problem = accumulated_approach.get("problem")
+        if isinstance(problem, Mapping) and isinstance(problem.get("goals"), list):
+            criteria = problem["goals"]
+        else:
+            normalized = accumulated_approach.get("normalized_problem")
+            if isinstance(normalized, Mapping) and isinstance(normalized.get("success_criteria"), list):
+                criteria = normalized["success_criteria"]
+    return json.dumps(criteria, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+
+
 def _extract_constraints_prompt(
     rfc_view: dict[str, Any],
     repo: Path,
@@ -1692,6 +1788,7 @@ def _extract_constraints_prompt(
         ensure_ascii=True,
         default=str,
     )
+    goals_text = _root_success_criteria_text(approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -1734,6 +1831,7 @@ def _extract_constraints_prompt(
         "Return an empty list when no defensible items exist for a category; do not invent unsupported "
         "constraints.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nRepository root:\n{repo}\n"
         + f"\nContext:\n{context_text}\n"
@@ -1753,6 +1851,7 @@ def _prior_art_map_prompt(
 ) -> str:
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     approach_text = json.dumps(approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(approach)
     concepts_text = json.dumps(concepts, indent=2, ensure_ascii=True)
     reference_text = json.dumps(reference_facets, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     feedback_text = ""
@@ -1795,6 +1894,7 @@ def _prior_art_map_prompt(
         "or constraints.hard_constraints[0].\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
+        + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nContext:\n{context_text}\n"
         + f"\nReference key concepts queried:\n{concepts_text}\n"
@@ -1803,7 +1903,6 @@ def _prior_art_map_prompt(
         + "\nReturn only JSON matching the provided schema."
     )
 
-
 def _generate_candidate_prompt(
     normalized_problem: Mapping[str, Any],
     constraints: Mapping[str, Any],
@@ -1811,6 +1910,7 @@ def _generate_candidate_prompt(
     candidate_kind: str,
     existing_candidates: list[Mapping[str, Any]],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
@@ -1818,6 +1918,8 @@ def _generate_candidate_prompt(
     prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     existing_text = json.dumps(existing_candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -1828,8 +1930,8 @@ def _generate_candidate_prompt(
         )
     return (
         "You are forming step 4 of AI Org's Technical Approach derivation tree: generate one candidate node.\n"
-        "Use only the outputs of steps 1 through 3 plus read-only repository inspection from the configured "
-        "repo root. Do not select a winner, evaluate candidates, write an implementation strategy, "
+        "Use the accumulated approach tree containing the root goals, constraints, and prior-art ancestors, "
+        "plus read-only repository inspection from the configured repo root. Do not select a winner, evaluate candidates, write an implementation strategy, "
         "create a patch plan, or perform later Technical Approach steps. Do not modify files.\n\n"
         f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates.\n\n"
         "For each candidate:\n"
@@ -1845,6 +1947,8 @@ def _generate_candidate_prompt(
         f"\nConstraints:\n{constraints_text}\n"
         f"\nPrior-art map:\n{prior_art_text}\n"
         f"\nExisting candidates:\n{existing_text}\n"
+        f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -1857,6 +1961,7 @@ def _evaluate_candidate_prompt(
     normalized_problem: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     candidate_text = json.dumps(candidate, indent=2, sort_keys=True, ensure_ascii=True, default=str)
@@ -1864,6 +1969,8 @@ def _evaluate_candidate_prompt(
     normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -1874,8 +1981,8 @@ def _evaluate_candidate_prompt(
         )
     return (
         "You are forming step 5 of AI Org's Technical Approach derivation tree: evaluate one candidate node.\n"
-        "Use only the candidate from step 4, the full candidate set for comparison, the normalized problem from "
-        "step 1, the constraints from step 2, and read-only repository inspection from the configured repo root. Do not select a "
+        "Use the accumulated approach tree containing the root goals, constraints, prior-art ancestors, and candidate set, "
+        "plus read-only repository inspection from the configured repo root. Do not select a "
         "winner, write an implementation strategy, create a patch plan, or perform later Technical Approach "
         "steps. Do not modify files.\n\n"
         "Evaluate the single candidate on this compact matrix. Each score is an object with rating and reason:\n"
@@ -1893,6 +2000,8 @@ def _evaluate_candidate_prompt(
         f"\nAll candidate approaches:\n{candidates_text}\n"
         f"\nNormalized problem:\n{normalized_problem_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
+        f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -1904,12 +2013,15 @@ def _select_approach_prompt(
     evaluations: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     candidates_text = json.dumps(candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     evaluations_text = json.dumps(evaluations, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -1920,8 +2032,8 @@ def _select_approach_prompt(
         )
     return (
         "You are forming step 6 of AI Org's Technical Approach derivation tree: select the approach.\n"
-        "Use only the candidate approaches from step 4, the compact evaluation matrix from step 5, the "
-        "constraints from step 2, and read-only repository inspection from the configured repo root. Choose "
+        "Use the accumulated approach tree containing the root goals, constraints, prior-art, candidate, and evaluation ancestors, "
+        "plus read-only repository inspection from the configured repo root. Choose "
         "one candidate. Do not write an implementation strategy, create a patch plan, surface open questions, "
         "emit the final Technical Approach section, or perform later Technical Approach steps. Do not modify "
         "files.\n\n"
@@ -1936,6 +2048,8 @@ def _select_approach_prompt(
         f"Candidate approaches:\n{candidates_text}\n"
         f"\nEvaluation matrix:\n{evaluations_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
+        f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -1949,12 +2063,15 @@ def _implementation_strategy_prompt(
     rfc_view: dict[str, Any],
     repo: Path,
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -1965,21 +2082,23 @@ def _implementation_strategy_prompt(
         )
     return (
         "You are forming step 7 of AI Org's Technical Approach derivation tree: implementation strategy.\n"
-        "Use the selected approach from step 6, the prior-art map from step 3, the constraints from step 2, "
-        "the grounded common-8 RFC view, and read-only repository inspection from the configured repo root. "
+        "Use the accumulated approach tree containing the root goals, constraints, prior-art, candidates, "
+        "evaluations, and selected decision, the grounded common-8 RFC view, and read-only repository inspection from the configured repo root. "
         "You may inspect module structure and tests to make the strategy concrete. Do not modify files.\n\n"
         "Expand only the chosen approach into an implementation strategy. Do not generate or re-evaluate "
         "alternatives, create a patch slice plan, surface risks and open questions, emit the final Technical "
         "Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
         "- systems: each system has system_name, behavior_in_game, named_content with entities and "
-        "content_items, and key_modules.\n"
-        "- persistence: saved_fields that must survive reload or handoff; name the field or state explicitly.\n\n"
+        "content_items, and key_modules. Tie named content and system behavior to specific root goals where natural.\n"
+        "- persistence: saved_fields that must survive reload or handoff; name the field or state explicitly and align it with any success criterion that requires durable state.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
         + f"\nChosen approach:\n{chosen_text}\n"
         + f"\nPrior-art map:\n{prior_art_text}\n"
         + f"\nConstraints:\n{constraints_text}\n"
+        + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -1991,12 +2110,15 @@ def _right_size_patch_plan_prompt(
     implementation_strategy: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -2007,8 +2129,8 @@ def _right_size_patch_plan_prompt(
         )
     return (
         "You are forming step 8 of AI Org's Technical Approach derivation tree: right-size the patch plan.\n"
-        "Use the selected approach from step 6, the implementation strategy from step 7, the constraints from "
-        "step 2, and read-only repository inspection from the configured repo root. Do not modify files.\n\n"
+        "Use the accumulated approach tree containing the root goals, constraints, selected decision, and implementation strategy, "
+        "plus read-only repository inspection from the configured repo root. Do not modify files.\n\n"
         "Turn the implementation strategy into a right-sized, incremental patch plan. Every slice must leave "
         "the system working and should enable behavior incrementally. The first_playable node must be the first safe "
         "playable or inspectable slice. Apply YAGNI: defer speculative work unless a deferred decision is hard to "
@@ -2017,12 +2139,14 @@ def _right_size_patch_plan_prompt(
         "Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
         "- first_playable: player_can, named_content locations/enemies/items_or_spells, win_or_progress_condition, "
-        "and how_verified.\n"
+        "and how_verified. Include per-item trace text in how_verified where natural so each verification maps to a specific success criterion.\n"
         "- follow_ups: later additions, each with adds and named_content.\n"
         "- deferred: intentionally deferred work, each with item and why_safe_to_defer.\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
+        f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -2035,6 +2159,7 @@ def _surface_risks_prompt(
     patch_plan: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
@@ -2042,6 +2167,8 @@ def _surface_risks_prompt(
     patch_plan_text = json.dumps(patch_plan, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -2053,19 +2180,21 @@ def _surface_risks_prompt(
     return (
         "You are forming step 9 of AI Org's Technical Approach derivation tree: surface risks and open "
         "questions.\n"
-        "Use the selected approach from step 6, the implementation strategy from step 7, the right-sized patch "
-        "plan from step 8, the constraints from step 2, and read-only repository inspection from the configured "
+        "Use the accumulated approach tree containing the root goals, constraints, selected decision, implementation strategy, and right-sized patch "
+        "plan, plus read-only repository inspection from the configured "
         "repo root. Do not modify files.\n\n"
         "Surface only delivery or design risks that can be attached to a candidate, decision, or implementation "
         "node. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
         "slices, emit the final Technical Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
         "- risks: each risk node has id, risk, mitigation, attaches_to candidate|decision|implementation, and "
-        "target_id naming the node it attaches under.\n\n"
+        "target_id naming the node it attaches under. State which success criterion or decision the risk threatens where natural.\n\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
         f"\nPatch plan:\n{patch_plan_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
+        f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
@@ -3160,6 +3289,92 @@ def _assemble_technical_approach(
         _add_cross_link(cross_links, pattern["id"], "problem", "derived_from")
 
     return {"problem": problem, "cross_links": cross_links}
+
+
+def _approach_snapshot(approach: Mapping[str, Any]) -> dict[str, Any]:
+    safe = _json_safe(approach)
+    return safe if isinstance(safe, dict) else {}
+
+
+def _partial_question_tree(
+    *,
+    candidates: Mapping[str, Any] | None = None,
+    evaluations: Mapping[str, Any] | None = None,
+    selected: Mapping[str, Any] | None = None,
+    implementation: Mapping[str, Any] | None = None,
+    patch_plan: Mapping[str, Any] | None = None,
+    provided_approach: Any | None = None,
+) -> dict[str, Any]:
+    candidate_items = candidates.get("candidates", []) if isinstance(candidates, Mapping) else []
+    if not candidate_items and provided_approach is not None:
+        candidate_items = [
+            {
+                "id": "provided_approach",
+                "name": "Requester-provided Technical Approach",
+                "kind": "repo_native",
+                "summary": "Preserve and refine the requester-provided Technical Approach.",
+                "first_playable_moment": {
+                    "player_actions": ["Follow the requester-provided approach through implementation planning."],
+                    "named_content": {
+                        "locations": ["Requester-provided scope"],
+                        "enemies": ["Requester-provided conflicts"],
+                        "items_or_spells": ["Requester-provided mechanisms"],
+                    },
+                    "win_or_progress_condition": "The provided approach is grounded into implementation and patch-plan nodes.",
+                },
+                "core_systems": ["RFC receive Technical Approach refinement"],
+                "draws_on": ["Requester-provided Technical Approach"],
+            }
+        ]
+
+    evaluation_items = evaluations.get("evaluations", []) if isinstance(evaluations, Mapping) else []
+    evaluation_map = {
+        item["candidate_id"]: item
+        for item in evaluation_items
+        if isinstance(item, Mapping) and isinstance(item.get("candidate_id"), str)
+    }
+    argument_map: dict[str, list[dict[str, str]]] = {}
+    if isinstance(selected, Mapping):
+        for argument in selected.get("arguments", []):
+            if isinstance(argument, Mapping) and isinstance(argument.get("about_candidate_id"), str):
+                argument_map.setdefault(argument["about_candidate_id"], []).append(dict(argument))
+
+    candidate_nodes: list[dict[str, Any]] = []
+    for candidate in candidate_items:
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_id = str(candidate["id"])
+        node = dict(candidate)
+        if candidate_id in evaluation_map:
+            evaluation = dict(evaluation_map[candidate_id])
+            evaluation["id"] = f"evaluation:{candidate_id}"
+            evaluation["arguments"] = argument_map.get(candidate_id, [])
+            node["evaluation"] = evaluation
+        candidate_nodes.append(node)
+
+    decision: dict[str, Any] = {}
+    if isinstance(selected, Mapping) and isinstance(selected.get("selected_candidate_id"), str):
+        selected_id = str(selected["selected_candidate_id"])
+        decision = {
+            "id": f"decision:{selected_id}",
+            "selected_candidate_id": selected_id,
+            "arguments": [dict(item) for item in selected.get("arguments", []) if isinstance(item, Mapping)],
+            "rationale": dict(selected.get("rationale", {})) if isinstance(selected.get("rationale"), Mapping) else {},
+            "rejected": [dict(item) for item in selected.get("rejected", []) if isinstance(item, Mapping)],
+        }
+        if isinstance(implementation, Mapping):
+            implementation_node = dict(implementation)
+            implementation_node["id"] = f"implementation:{selected_id}"
+            if isinstance(patch_plan, Mapping):
+                implementation_node["patch_plan"] = _node_with_id(patch_plan, f"patch_plan:{selected_id}")
+            decision["implementation"] = implementation_node
+
+    return {
+        "id": "question:approach",
+        "text": "Which implementation approach best satisfies the problem under the derived constraints?",
+        "candidates": candidate_nodes,
+        "decision": decision,
+    }
 
 
 CROSS_LINK_TYPES = (

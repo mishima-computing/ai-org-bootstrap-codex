@@ -8,6 +8,7 @@ from ai_org.rfc import receive as receive_module
 
 def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     calls = []
+    approaches = {}
 
     monkeypatch.setattr(
         receive_module,
@@ -17,48 +18,76 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
 
     def fake_constraints(rfc_view, repo, context=None, approach=None):
         calls.append(("extract_constraints", approach))
+        approaches["extract_constraints"] = approach
         assert "problem" in approach
         assert "normalized_problem" not in approach
         return _constraints()
 
     def fake_prior_art(rfc_view, repo, context=None, approach=None):
         calls.append(("build_prior_art_map", approach))
+        approaches["build_prior_art_map"] = approach
         assert approach["problem"]["constraints"]["hard"][0]["id"] == "constraint:hard:1"
         return _prior_art_map()
 
+    def fake_generate_candidates(normalized, constraints, prior_art, context=None, accumulated_approach=None):
+        calls.append("generate_candidates")
+        approaches["generate_candidates"] = accumulated_approach
+        return _candidates()
+
+    def fake_evaluate_candidates(candidates, normalized, constraints, context=None, accumulated_approach=None):
+        calls.append("evaluate_candidates")
+        approaches["evaluate_candidates"] = accumulated_approach
+        return _evaluations()
+
+    def fake_select_approach(candidates, evaluations, constraints, context=None, accumulated_approach=None):
+        calls.append("select_approach")
+        approaches["select_approach"] = accumulated_approach
+        return _decision()
+
+    def fake_implementation_strategy(
+        chosen,
+        prior_art,
+        constraints,
+        rfc_view,
+        repo,
+        context=None,
+        accumulated_approach=None,
+    ):
+        calls.append("implementation_strategy")
+        approaches["implementation_strategy"] = accumulated_approach
+        return _implementation()
+
+    def fake_right_size_patch_plan(
+        chosen,
+        implementation,
+        constraints,
+        context=None,
+        accumulated_approach=None,
+    ):
+        calls.append("right_size_patch_plan")
+        approaches["right_size_patch_plan"] = accumulated_approach
+        return _patch_plan()
+
+    def fake_surface_risks(
+        chosen,
+        implementation,
+        patch_plan,
+        constraints,
+        context=None,
+        accumulated_approach=None,
+    ):
+        calls.append("surface_risks")
+        approaches["surface_risks"] = accumulated_approach
+        return _risks()
+
     monkeypatch.setattr(receive_module, "_extract_constraints", fake_constraints)
     monkeypatch.setattr(receive_module, "_build_prior_art_map", fake_prior_art)
-    monkeypatch.setattr(
-        receive_module,
-        "_generate_candidates",
-        lambda normalized, constraints, prior_art, context=None: calls.append("generate_candidates") or _candidates(),
-    )
-    monkeypatch.setattr(
-        receive_module,
-        "_evaluate_candidates",
-        lambda candidates, normalized, constraints, context=None: calls.append("evaluate_candidates") or _evaluations(),
-    )
-    monkeypatch.setattr(
-        receive_module,
-        "_select_approach",
-        lambda candidates, evaluations, constraints, context=None: calls.append("select_approach") or _decision(),
-    )
-    monkeypatch.setattr(
-        receive_module,
-        "_implementation_strategy",
-        lambda chosen, prior_art, constraints, rfc_view, repo, context=None: calls.append("implementation_strategy")
-        or _implementation(),
-    )
-    monkeypatch.setattr(
-        receive_module,
-        "_right_size_patch_plan",
-        lambda chosen, implementation, constraints, context=None: calls.append("right_size_patch_plan") or _patch_plan(),
-    )
-    monkeypatch.setattr(
-        receive_module,
-        "_surface_risks",
-        lambda chosen, implementation, patch_plan, constraints, context=None: calls.append("surface_risks") or _risks(),
-    )
+    monkeypatch.setattr(receive_module, "_generate_candidates", fake_generate_candidates)
+    monkeypatch.setattr(receive_module, "_evaluate_candidates", fake_evaluate_candidates)
+    monkeypatch.setattr(receive_module, "_select_approach", fake_select_approach)
+    monkeypatch.setattr(receive_module, "_implementation_strategy", fake_implementation_strategy)
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", fake_right_size_patch_plan)
+    monkeypatch.setattr(receive_module, "_surface_risks", fake_surface_risks)
 
     result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
 
@@ -66,6 +95,33 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     assert "approach" not in result
     assert calls[0] == "normalize_problem"
     assert calls[-1] == "surface_risks"
+    for step in (
+        "extract_constraints",
+        "build_prior_art_map",
+        "generate_candidates",
+        "evaluate_candidates",
+        "select_approach",
+        "implementation_strategy",
+        "right_size_patch_plan",
+        "surface_risks",
+    ):
+        assert approaches[step]["problem"]["goals"][0]["verification"]["check"] == (
+            "Assert Spark defeats Slime and sets meadow_gate_open true."
+        )
+    assert approaches["generate_candidates"]["problem"]["prior_art"][0]["id"] == (
+        "prior_art:reference-first-prior-art-synthesis"
+    )
+    assert approaches["evaluate_candidates"]["problem"]["question"]["candidates"][0]["id"] == "minimal"
+    assert approaches["select_approach"]["problem"]["question"]["candidates"][1]["evaluation"]["id"] == (
+        "evaluation:repo_native"
+    )
+    assert approaches["implementation_strategy"]["problem"]["question"]["decision"]["id"] == "decision:repo_native"
+    assert approaches["right_size_patch_plan"]["problem"]["question"]["decision"]["implementation"]["systems"][0][
+        "system_name"
+    ] == "Battle loop"
+    assert approaches["surface_risks"]["problem"]["question"]["decision"]["implementation"]["patch_plan"][
+        "first_playable"
+    ]["how_verified"] == "Run the battle-loop test and assert meadow_gate_open."
 
     tree = result["technical_approach"]
     assert set(tree) == {"problem", "cross_links"}
@@ -139,6 +195,91 @@ def test_empty_slot_regenerates_then_accepts(monkeypatch, tmp_path):
     assert result == _implementation()
     assert len(prompts) == 2
     assert "behavior_in_game is empty" in prompts[1]
+
+
+def test_step_prompts_render_accumulated_goals_and_direct_ancestors(tmp_path):
+    accumulated = _accumulated_approach_through_patch_plan()
+
+    prompts = {
+        "extract_constraints": receive_module._extract_constraints_prompt(
+            _rfc_view(),
+            tmp_path,
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "build_prior_art_map": receive_module._prior_art_map_prompt(
+            _rfc_view(),
+            tmp_path,
+            ["battle loop"],
+            [{"term": "battle loop", "design": [], "implementation": [], "status": "not_found"}],
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "generate_candidates": receive_module._generate_candidate_prompt(
+            _normalized_problem(),
+            _constraints(),
+            _prior_art_map(),
+            "repo_native",
+            [],
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "evaluate_candidates": receive_module._evaluate_candidate_prompt(
+            _candidate("repo_native", "repo_native", "Repo Native"),
+            _candidates(),
+            _normalized_problem(),
+            _constraints(),
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "select_approach": receive_module._select_approach_prompt(
+            _candidates(),
+            _evaluations(),
+            _constraints(),
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "implementation_strategy": receive_module._implementation_strategy_prompt(
+            _decision(),
+            _prior_art_map(),
+            _constraints(),
+            _rfc_view(),
+            tmp_path,
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "right_size_patch_plan": receive_module._right_size_patch_plan_prompt(
+            _decision(),
+            _implementation(),
+            _constraints(),
+            {"repo": tmp_path},
+            accumulated,
+        ),
+        "surface_risks": receive_module._surface_risks_prompt(
+            _decision(),
+            _implementation(),
+            _patch_plan(),
+            _constraints(),
+            {"repo": tmp_path},
+            accumulated,
+        ),
+    }
+
+    for prompt in prompts.values():
+        assert "Root success_criteria from step 1" in prompt
+        assert "Assert Spark defeats Slime and sets meadow_gate_open true." in prompt
+        assert "Accumulated approach so far" in prompt
+
+    assert "Prior-art map" in prompts["generate_candidates"]
+    assert "Reference-first prior-art synthesis" in prompts["generate_candidates"]
+    assert "Candidate to evaluate" in prompts["evaluate_candidates"]
+    assert "All candidate approaches" in prompts["evaluate_candidates"]
+    assert "Evaluation matrix" in prompts["select_approach"]
+    assert "evaluation:repo_native" in prompts["implementation_strategy"]
+    assert "decision:repo_native" in prompts["implementation_strategy"]
+    assert "Battle loop" in prompts["right_size_patch_plan"]
+    assert "Patch plan" in prompts["surface_risks"]
+    assert "Run the battle-loop test and assert meadow_gate_open." in prompts["surface_risks"]
 
 
 def test_empty_slot_fails_closed_after_bounded_regeneration(monkeypatch, tmp_path):
@@ -463,3 +604,17 @@ def _risks() -> dict[str, object]:
             },
         ]
     }
+
+
+def _accumulated_approach_through_patch_plan() -> dict[str, object]:
+    problem = receive_module._problem_root_from_normalized(_normalized_problem())
+    problem["constraints"] = receive_module._constraint_tree_nodes(_constraints())
+    problem["prior_art"] = receive_module._prior_art_tree_nodes(_prior_art_map())
+    problem["question"] = receive_module._partial_question_tree(
+        candidates=_candidates(),
+        evaluations=_evaluations(),
+        selected=_decision(),
+        implementation=_implementation(),
+        patch_plan=_patch_plan(),
+    )
+    return {"problem": problem}
