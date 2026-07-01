@@ -488,7 +488,7 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     assert "branch" not in result
 
 
-def test_grounding_empty_required_field_regrounds_before_promotion(tmp_path, monkeypatch):
+def test_grounding_empty_working_title_gets_deterministic_fallback_before_promotion(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive(
         {
@@ -498,13 +498,7 @@ def test_grounding_empty_required_field_regrounds_before_promotion(tmp_path, mon
     incomplete = _rfc_view(
         "",
         raw_request=request["raw_request"],
-        problem_or_motivation="RFC intake needs visible health signals.",
-        desired_outcomes_success="A dashboard summarizes intake health.",
-    )
-    complete = _rfc_view(
-        "RFC Intake Health Dashboard",
-        raw_request=request["raw_request"],
-        problem_or_motivation="RFC intake needs visible health signals.",
+        problem_or_motivation="RFC intake health dashboard is needed.",
         desired_outcomes_success="A dashboard summarizes intake health.",
     )
     grounding_calls = 0
@@ -526,7 +520,7 @@ def test_grounding_empty_required_field_regrounds_before_promotion(tmp_path, mon
         grounding_prompts.append(cmd[-1])
         return {
             "confident": True,
-            "proposed_rfc": incomplete if grounding_calls == 1 else complete,
+            "proposed_rfc": incomplete,
             "assumptions": [],
             "questions": [],
             "grounding_notes": "Grounded RFC intake health dashboard.",
@@ -539,10 +533,59 @@ def test_grounding_empty_required_field_regrounds_before_promotion(tmp_path, mon
 
     assert result["status"] == "promoted"
     assert result["id"] == "rfc-intake-health-dashboard"
-    assert grounding_calls == 2
-    assert "working_title" in grounding_prompts[1]
-    assert "rfc_handoff string fields must be non-empty" in grounding_prompts[1]
-    assert json.loads(_git(repo, "show", "ai-org/rfc/rfc-intake-health-dashboard:rfc.json")) == complete
+    assert grounding_calls == 1
+    assert "working_title" in grounding_prompts[0]
+    produced = json.loads(_git(repo, "show", "ai-org/rfc/rfc-intake-health-dashboard:rfc.json"))
+    assert produced == {**incomplete, "working_title": "RFC Intake Health Dashboard"}
+
+
+def test_grounding_other_empty_required_field_regrounds_and_fails_closed(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive(
+        {
+            "raw_request": "Add a dashboard for RFC intake health.",
+        }
+    )
+    incomplete = _rfc_view(
+        "RFC Intake Health Dashboard",
+        raw_request=request["raw_request"],
+        problem_or_motivation=" ",
+    )
+    grounding_calls = 0
+
+    def handler(cmd):
+        nonlocal grounding_calls
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+
+        grounding_calls += 1
+        return {
+            "confident": True,
+            "proposed_rfc": incomplete,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounded RFC intake health dashboard.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+    _install_successful_approach_pipeline(monkeypatch)
+
+    result = intake(request, repo)
+
+    assert result["ok"] is False
+    assert result["status"] == "needs_work"
+    assert result["failed_step"] == "grounding"
+    assert grounding_calls == 3
+    assert "branch" not in result
+    assert any("C0 required-field completeness lint" in violation for violation in result["violations"])
+    assert any("problem_or_motivation" in violation for violation in result["violations"])
 
 
 def test_grounding_and_verifier_schemas_are_codex_valid_registry():
@@ -551,6 +594,7 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
         assert "allOf" not in serialized
         assert "anyOf" not in serialized
         assert "oneOf" not in serialized
+        assert _schema_key_paths(schema, {"minLength", "pattern", "format"}) == []
         assert schema["additionalProperties"] is False
         assert sorted(schema["required"]) == sorted(schema["properties"])
 
@@ -559,8 +603,6 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
     assert schema_rfc["properties"]["tech_stack"]["required"] == list(receive_module.TECH_STACK_FIELDS)
-    assert schema_rfc["properties"]["working_title"]["minLength"] == 1
-    assert schema_rfc["properties"]["problem_or_motivation"]["minLength"] == 1
     assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
         "content consumed downstream as product requirement nouns"
     )
@@ -682,6 +724,20 @@ def _schema_kind(output_schema: str | Path) -> str:
     if schema == GROUNDING_VERDICT_SCHEMA:
         return "verifier"
     raise AssertionError(f"unexpected schema: {schema}")
+
+
+def _schema_key_paths(value: object, forbidden: set[str], path: str = "$") -> list[str]:
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if key in forbidden:
+                paths.append(child_path)
+            paths.extend(_schema_key_paths(child, forbidden, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(_schema_key_paths(child, forbidden, f"{path}[{index}]"))
+    return paths
 
 
 def _assert_prompt_preserves_named_thing_specificity(prompt: str) -> None:

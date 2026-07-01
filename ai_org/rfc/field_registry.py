@@ -207,10 +207,7 @@ def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
                 "provenance": {"type": "string", "enum": list(TECH_STACK_PROVENANCE)},
             },
         }
-    schema: dict[str, Any] = {"type": "string", "description": entry.description}
-    if entry.required_at == "rfc_handoff":
-        schema["minLength"] = 1
-    return schema
+    return {"type": "string", "description": entry.description}
 
 
 def rfc_view_schema() -> dict[str, Any]:

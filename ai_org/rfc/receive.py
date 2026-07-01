@@ -166,7 +166,7 @@ GROUNDING_SCHEMA: dict[str, Any] = {
         "proposed_rfc": rfc_view_schema(),
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "questions": {"type": "array", "items": {"type": "string"}},
-        "grounding_notes": {"type": "string", "maxLength": 2000},
+        "grounding_notes": {"type": "string"},
     },
 }
 
@@ -802,6 +802,43 @@ _PRIOR_ART_STOPWORDS = {
     "technical",
     "formation",
 }
+
+_WORKING_TITLE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "need",
+    "needed",
+    "needs",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "with",
+}
+_WORKING_TITLE_ABBREVIATIONS = {"ai", "api", "cli", "css", "html", "json", "rfc", "ui", "ux"}
+_WORKING_TITLE_VERBS = (
+    "add",
+    "build",
+    "create",
+    "fix",
+    "implement",
+    "improve",
+    "make",
+    "replace",
+    "support",
+    "update",
+)
 
 MAX_REGROUNDS = 2
 
@@ -4233,7 +4270,7 @@ def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> Grou
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned non-object JSON: {raw}")
 
     confident = parsed.get("confident")
-    proposed_rfc = parsed.get("proposed_rfc")
+    proposed_rfc = _with_working_title_fallback(parsed.get("proposed_rfc"), original_rfc_view)
     assumptions = parsed.get("assumptions")
     grounding_notes = parsed.get("grounding_notes")
     questions = parsed.get("questions")
@@ -4248,6 +4285,64 @@ def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> Grou
     if not isinstance(questions, list) or not all(isinstance(question, str) for question in questions):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid questions: {raw}")
     return GroundingResult(_rfc_to_view(proposed_rfc), grounding_notes, confident, assumptions, questions)
+
+
+def _with_working_title_fallback(value: Any, original_rfc_view: dict[str, Any]) -> Any:
+    if not isinstance(value, dict):
+        return value
+    title = value.get("working_title")
+    if not isinstance(title, str) or title.strip():
+        return value
+
+    repaired = dict(value)
+    repaired["working_title"] = _derive_working_title(repaired, original_rfc_view)
+    return repaired
+
+
+def _derive_working_title(rfc_view: Mapping[str, Any], original_rfc_view: Mapping[str, Any]) -> str:
+    raw_request = str(rfc_view.get("raw_request") or original_rfc_view.get("raw_request") or "")
+    candidates = [
+        rfc_view.get("problem_or_motivation"),
+        _named_subject_from_request(raw_request),
+        raw_request,
+    ]
+    for candidate in candidates:
+        title = _working_title_phrase(str(candidate or ""))
+        if title:
+            return title
+    return "Grounded RFC"
+
+
+def _named_subject_from_request(raw_request: str) -> str:
+    pattern = r"\b(?:" + "|".join(_WORKING_TITLE_VERBS) + r")\s+(?:a|an|the)?\s*([^.\n:;]+)"
+    match = re.search(pattern, raw_request, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _working_title_phrase(text: str) -> str:
+    words = [
+        word.strip("'")
+        for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9_'-]*", text.replace("_", " "))
+    ]
+    selected: list[str] = []
+    for word in words:
+        normalized = word.lower().strip("-'")
+        if not normalized or normalized in _WORKING_TITLE_STOPWORDS:
+            continue
+        selected.append(_working_title_word(normalized))
+        if len(selected) == 6:
+            break
+    return " ".join(selected)
+
+
+def _working_title_word(word: str) -> str:
+    if word in _WORKING_TITLE_ABBREVIATIONS:
+        return word.upper()
+    if any(char.isdigit() for char in word):
+        return word.upper()
+    return word.capitalize()
 
 
 def _verify_grounding(
