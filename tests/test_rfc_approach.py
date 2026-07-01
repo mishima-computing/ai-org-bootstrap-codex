@@ -946,6 +946,116 @@ def test_right_size_patch_plan_schema_is_codex_valid():
     assert sorted(deferred["required"]) == sorted(deferred["properties"])
 
 
+def test_surface_risks_returns_parsed_risks(monkeypatch, tmp_path):
+    expected = {
+        "assumptions": ["The existing RFC receive helper pattern remains the intended extension point."],
+        "risks": [
+            {
+                "risk": "The prompt may duplicate step 10 final-section wording.",
+                "mitigation": "Keep step 9 limited to raw risks, questions, spikes, and reviewer prompts.",
+            }
+        ],
+        "open_questions": ["Should empty risk lists be allowed for trivial RFCs?"],
+        "spikes": ["Run a mocked Codex response through the strict parser before wiring orchestration."],
+        "reviewer_questions": ["Do these risks capture the main uncertainty before final Technical Approach emission?"],
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._surface_risks(
+        _chosen(),
+        _implementation_strategy(),
+        _patch_plan(),
+        _constraints(),
+        {"repo": tmp_path, "request_id": "rfc-step-9"},
+    )
+
+    assert result == expected
+    assert result["assumptions"] == expected["assumptions"]
+    assert result["risks"] == expected["risks"]
+    assert result["open_questions"] == expected["open_questions"]
+    assert result["spikes"] == expected["spikes"]
+    assert result["reviewer_questions"] == expected["reviewer_questions"]
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.SURFACE_RISKS_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-surface-risks.schema.json"
+    assert kwargs["output_filename"] == "rfc-surfaced-risks.json"
+    assert kwargs["failure_label"] == "Codex risk surfacing"
+    assert "step 9" in kwargs["prompt"]
+    assert "surface risks and open questions" in kwargs["prompt"]
+    assert "read-only repository inspection" in kwargs["prompt"]
+    assert "Do not modify files" in kwargs["prompt"]
+    assert "prototypes or spikes" in kwargs["prompt"]
+    assert "reviewer or requester" in kwargs["prompt"]
+    assert "emit the final Technical Approach section" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+
+
+def test_surface_risks_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid = {
+        "assumptions": ["Existing helper pattern remains valid."],
+        "risks": [{"risk": "Prompt ambiguity.", "mitigation": "Constrain the step boundary."}],
+        "open_questions": ["Is reviewer wording sufficient?"],
+        "spikes": ["Mock parser path."],
+        "reviewer_questions": ["Are these the right reviewer questions?"],
+    }
+    invalid_outputs = [
+        {key: value for key, value in valid.items() if key != "assumptions"},
+        {**valid, "extra": "not allowed"},
+        {**valid, "assumptions": "Existing helper pattern remains valid."},
+        {**valid, "assumptions": ["Existing helper pattern remains valid.", 42]},
+        {**valid, "risks": "Prompt ambiguity."},
+        {**valid, "risks": [{"risk": "Prompt ambiguity."}]},
+        {**valid, "risks": [{"risk": "Prompt ambiguity.", "mitigation": "Constrain.", "extra": "no"}]},
+        {**valid, "risks": [{"risk": "Prompt ambiguity.", "mitigation": 42}]},
+        {**valid, "open_questions": [42]},
+        {**valid, "spikes": None},
+        {**valid, "reviewer_questions": ["Question?", 42]},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._surface_risks(
+            _chosen(),
+            _implementation_strategy(),
+            _patch_plan(),
+            _constraints(),
+            {"repo": tmp_path},
+        )
+
+        assert result["ok"] is False
+        assert "Codex risk surfacing returned" in result["error"]
+
+
+def test_surface_risks_schema_is_codex_valid():
+    schema = receive_module.SURFACE_RISKS_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    assert sorted(schema["required"]) == sorted(receive_module.SURFACE_RISKS_FIELDS)
+    for field in ("assumptions", "open_questions", "spikes", "reviewer_questions"):
+        assert schema["properties"][field]["items"]["type"] == "string"
+    risk = schema["properties"]["risks"]["items"]
+    assert risk["additionalProperties"] is False
+    assert sorted(risk["required"]) == sorted(receive_module.SURFACED_RISK_FIELDS)
+    assert sorted(risk["required"]) == sorted(risk["properties"])
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -1087,6 +1197,15 @@ def _implementation_strategy() -> dict[str, object]:
         "migration_compat": "No migration; additive private helper.",
         "testing_plan": "Run pytest tests/.",
         "observability": "n/a",
+    }
+
+
+def _patch_plan() -> dict[str, object]:
+    return {
+        "first_slice": "Add the private helper and focused tests as one working slice.",
+        "follow_up_slices": ["Wire step 9 into final approach emission after step 10 exists."],
+        "deferred": [{"item": "Automated reviewer routing.", "why_safe_to_defer": "Not needed for step 9."}],
+        "yagni_note": "Do not build final section emission in step 9.",
     }
 
 

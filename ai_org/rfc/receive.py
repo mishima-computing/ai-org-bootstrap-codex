@@ -444,6 +444,42 @@ RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
         "yagni_note": {"type": "string"},
     },
 }
+SURFACED_RISK_FIELDS = (
+    "risk",
+    "mitigation",
+)
+SURFACE_RISKS_FIELDS = (
+    "assumptions",
+    "risks",
+    "open_questions",
+    "spikes",
+    "reviewer_questions",
+)
+
+SURFACE_RISKS_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(SURFACE_RISKS_FIELDS),
+    "properties": {
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "risks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(SURFACED_RISK_FIELDS),
+                "properties": {
+                    "risk": {"type": "string"},
+                    "mitigation": {"type": "string"},
+                },
+            },
+        },
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "spikes": {"type": "array", "items": {"type": "string"}},
+        "reviewer_questions": {"type": "array", "items": {"type": "string"}},
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -851,6 +887,32 @@ def _right_size_patch_plan(
     return _parse_right_size_patch_plan(run["raw"])
 
 
+def _surface_risks(
+    chosen: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    patch_plan: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 9 of the documented 10-step Technical Approach procedure."""
+    # Step 9 of 10: surface assumptions, risks, unresolved questions, spikes, and reviewer questions.
+    if not all(isinstance(value, Mapping) for value in (chosen, implementation_strategy, patch_plan, constraints)):
+        return _surface_risks_error("surface_risks requires outputs from steps 2, 6, 7, and 8")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=SURFACE_RISKS_SCHEMA,
+        prompt=_surface_risks_prompt(chosen, implementation_strategy, patch_plan, constraints, context),
+        schema_filename="rfc-surface-risks.schema.json",
+        output_filename="rfc-surfaced-risks.json",
+        failure_label="Codex risk surfacing",
+    )
+    if not run["ok"]:
+        return _surface_risks_error(run["error"])
+    return _parse_surface_risks(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -1255,6 +1317,43 @@ def _right_size_patch_plan_prompt(
         "- yagni_note: what is intentionally not built now and why.\n\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
+        f"\nConstraints:\n{constraints_text}\n"
+        f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _surface_risks_prompt(
+    chosen: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    patch_plan: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    patch_plan_text = json.dumps(patch_plan, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 9 of AI Org's 10-step Technical Approach procedure: surface risks and open "
+        "questions.\n"
+        "Use the selected approach from step 6, the implementation strategy from step 7, the right-sized patch "
+        "plan from step 8, the constraints from step 2, and read-only repository inspection from the configured "
+        "repo root. Do not modify files.\n\n"
+        "Surface only unresolved assumptions, delivery or design risks, unknowns that require answers, "
+        "prototypes or spikes needed to resolve uncertainty, and questions to raise with reviewers or the "
+        "requester. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
+        "slices, emit the final Technical Approach section, or perform later Technical Approach steps.\n\n"
+        "Return these fields:\n"
+        "- assumptions: assumptions the plan currently depends on.\n"
+        "- risks: risks, each with risk and mitigation.\n"
+        "- open_questions: unresolved technical or product questions.\n"
+        "- spikes: prototypes or spikes needed to resolve unknowns.\n"
+        "- reviewer_questions: questions to raise for the reviewer or requester.\n\n"
+        f"Chosen approach:\n{chosen_text}\n"
+        f"\nImplementation strategy:\n{strategy_text}\n"
+        f"\nPatch plan:\n{patch_plan_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
@@ -1812,6 +1911,49 @@ def _parse_right_size_patch_plan(raw: str) -> dict[str, Any]:
 
 
 def _right_size_patch_plan_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_surface_risks(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _surface_risks_error(f"Codex risk surfacing returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _surface_risks_error("Codex risk surfacing returned non-object JSON")
+    if set(parsed) != set(SURFACE_RISKS_FIELDS):
+        return _surface_risks_error("Codex risk surfacing returned invalid fields")
+
+    for field in ("assumptions", "open_questions", "spikes", "reviewer_questions"):
+        value = parsed.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return _surface_risks_error(f"Codex risk surfacing returned invalid {field}")
+
+    risks = parsed.get("risks")
+    if not isinstance(risks, list):
+        return _surface_risks_error("Codex risk surfacing returned invalid risks")
+
+    parsed_risks: list[dict[str, str]] = []
+    for item in risks:
+        if not isinstance(item, dict):
+            return _surface_risks_error("Codex risk surfacing returned invalid risk item")
+        if set(item) != set(SURFACED_RISK_FIELDS):
+            return _surface_risks_error("Codex risk surfacing returned invalid risk fields")
+        if not all(isinstance(item[field], str) for field in SURFACED_RISK_FIELDS):
+            return _surface_risks_error("Codex risk surfacing returned invalid risk values")
+        parsed_risks.append({"risk": item["risk"], "mitigation": item["mitigation"]})
+
+    return {
+        "assumptions": list(parsed["assumptions"]),
+        "risks": parsed_risks,
+        "open_questions": list(parsed["open_questions"]),
+        "spikes": list(parsed["spikes"]),
+        "reviewer_questions": list(parsed["reviewer_questions"]),
+    }
+
+
+def _surface_risks_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
