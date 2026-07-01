@@ -334,6 +334,10 @@ GH_SEARCH_WINDOW_SECONDS = 60.0
 WEB_SEARCH_WINDOW_SECONDS = 60.0
 
 
+class ReferenceCodexTimeout(TimeoutError):
+    """Raised when a bounded Reference Codex subprocess exceeds its timeout."""
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         requested = int(os.environ.get(name, ""))
@@ -456,6 +460,7 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
 def expand(term: str, context: Mapping[str, Any] | None = None, force: bool = False) -> dict[str, Any]:
     """Fetch, filter, annotate, and persist implementation and design knowledge for term."""
     context = dict(context or {})
+    context.setdefault("_reference_codex_timeouts", [])
     if not force and not _reference_force_enabled():
         recent_entry = _recent_research_entry(term)
         if recent_entry is not None:
@@ -547,6 +552,9 @@ def expand(term: str, context: Mapping[str, Any] | None = None, force: bool = Fa
         notes = "baseline-sufficient-nothing-added: baseline already sufficient; nothing valuable to add."
     elif not fetched:
         notes = "nothing-fetched: no public repository candidates were fetched."
+    if context["_reference_codex_timeouts"]:
+        timeout_note = "timed-out: " + "; ".join(context["_reference_codex_timeouts"])
+        notes = f"{notes} {timeout_note}".strip()
 
     referenced_keywords = [
         str(item.get("found_via") or "")
@@ -583,6 +591,16 @@ def build_from_rfc(
     failed: dict[str, str] = {}
 
     terms = _extract_reference_terms(text, context)
+    if not terms and context.get("_reference_codex_timeouts"):
+        failed["__term_extraction__"] = "; ".join(context["_reference_codex_timeouts"])
+        return {
+            "terms": built,
+            "processed_terms": [],
+            "expanded": expanded,
+            "hits": hits,
+            "failed": failed,
+            "dropped_generic": [],
+        }
     outcomes: dict[str, dict[str, Any]] = {}
     parallelism = _reference_parallelism(len(terms))
     if parallelism <= 1:
@@ -611,6 +629,7 @@ def build_from_rfc(
 
     return {
         "terms": built,
+        "processed_terms": list(terms),
         "expanded": expanded,
         "hits": hits,
         "failed": failed,
@@ -656,6 +675,25 @@ def _reference_research_ttl_seconds() -> float:
 def _reference_force_enabled() -> bool:
     raw = os.environ.get("AI_ORG_REFERENCE_FORCE")
     return raw is not None and raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _reference_search_timeout_seconds() -> float:
+    raw = os.environ.get("AI_ORG_REFERENCE_SEARCH_TIMEOUT", "").strip()
+    if not raw:
+        return 180.0
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return 180.0
+    return max(1.0, timeout)
+
+
+def _record_reference_timeout(context: Mapping[str, Any], exc: BaseException) -> None:
+    if not isinstance(context, dict):
+        return
+    timeouts = context.setdefault("_reference_codex_timeouts", [])
+    if isinstance(timeouts, list):
+        timeouts.append(str(exc))
 
 
 def _recent_research_entry(term: str) -> dict[str, Any] | None:
@@ -820,11 +858,15 @@ def fetch_design_candidates(term: str, context: Mapping[str, Any] | None = None)
 
 
 def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
-    result = _codex_json(
-        _search_keywords_prompt(term, context),
-        SEARCH_KEYWORDS_SCHEMA,
-        "search-keywords.json",
-    )
+    try:
+        result = _codex_json(
+            _search_keywords_prompt(term, context),
+            SEARCH_KEYWORDS_SCHEMA,
+            "search-keywords.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return []
     raw_keywords = result.get("keywords")
     if not isinstance(raw_keywords, list):
         return []
@@ -841,11 +883,15 @@ def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
 
 
 def _codex_design_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
-    result = _codex_json(
-        _design_search_keywords_prompt(term, context),
-        DESIGN_SEARCH_KEYWORDS_SCHEMA,
-        "design-search-keywords.json",
-    )
+    try:
+        result = _codex_json(
+            _design_search_keywords_prompt(term, context),
+            DESIGN_SEARCH_KEYWORDS_SCHEMA,
+            "design-search-keywords.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return []
     raw_keywords = result.get("keywords")
     if not isinstance(raw_keywords, list):
         raw_keywords = _fallback_design_keywords(term)
@@ -1247,11 +1293,15 @@ def _run_gh(cmd: list[str]) -> subprocess.CompletedProcess[str] | None:
 
 
 def _codex_baseline(term: str, context: Mapping[str, Any]) -> str:
-    result = _codex_json(
-        _baseline_prompt(term, context),
-        BASELINE_SCHEMA,
-        "baseline.json",
-    )
+    try:
+        result = _codex_json(
+            _baseline_prompt(term, context),
+            BASELINE_SCHEMA,
+            "baseline.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return ""
     implementation = result.get("implementation")
     return implementation if isinstance(implementation, str) else ""
 
@@ -1262,11 +1312,15 @@ def _codex_delta_inclusion(
     baseline: str,
     candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
-    result = _codex_json(
-        _delta_prompt(term, context, baseline, candidate),
-        DELTA_SCHEMA,
-        "delta.json",
-    )
+    try:
+        result = _codex_json(
+            _delta_prompt(term, context, baseline, candidate),
+            DELTA_SCHEMA,
+            "delta.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"keep": False, "reason": "Reference Codex timed out"}
     if isinstance(result.get("keep"), bool) and isinstance(result.get("reason"), str):
         return result
     return {"keep": False, "reason": "invalid delta judgment"}
@@ -1279,11 +1333,15 @@ def _codex_extract_pattern(
     path: str,
     content: str,
 ) -> dict[str, Any]:
-    result = _codex_json(
-        _extract_prompt(term, context, repo, path, content),
-        EXTRACT_SCHEMA,
-        "extract.json",
-    )
+    try:
+        result = _codex_json(
+            _extract_prompt(term, context, repo, path, content),
+            EXTRACT_SCHEMA,
+            "extract.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"relevant": False, "snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
     if isinstance(result.get("relevant"), bool):
         return result
     return {"relevant": False, "snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
@@ -1296,22 +1354,30 @@ def _codex_distill_candidate(
     candidate: Mapping[str, Any],
     delta_reason: str,
 ) -> dict[str, Any]:
-    result = _codex_json(
-        _distill_prompt(term, context, baseline, candidate, delta_reason),
-        DISTILL_SCHEMA,
-        "distill.json",
-    )
+    try:
+        result = _codex_json(
+            _distill_prompt(term, context, baseline, candidate, delta_reason),
+            DISTILL_SCHEMA,
+            "distill.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
     if all(isinstance(result.get(field), str) for field in DISTILL_SCHEMA["properties"]):
         return result
     return {"snippet": "", "summary": "", "lang_env_version": "", "pitfalls": ""}
 
 
 def _codex_author_level(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
-    result = _codex_json(
-        _author_prompt(term, context, candidate),
-        AUTHOR_LEVEL_SCHEMA,
-        "author-level.json",
-    )
+    try:
+        result = _codex_json(
+            _author_prompt(term, context, candidate),
+            AUTHOR_LEVEL_SCHEMA,
+            "author-level.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"author_level": "unknown", "reason": "Reference Codex timed out"}
     if isinstance(result.get("author_level"), str) and isinstance(result.get("reason"), str):
         return result
     return {"author_level": "unknown", "reason": "invalid author-level judgment"}
@@ -1321,11 +1387,15 @@ def _codex_design_web_sources(keywords: list[str], context: Mapping[str, Any]) -
     if not keywords:
         return []
     _acquire_web_search_slot()
-    result = _codex_json(
-        _design_web_sources_prompt(keywords, context),
-        DESIGN_SOURCE_SCHEMA,
-        "design-web-sources.json",
-    )
+    try:
+        result = _codex_json(
+            _design_web_sources_prompt(keywords, context),
+            DESIGN_SOURCE_SCHEMA,
+            "design-web-sources.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return []
     raw_sources = result.get("sources")
     if not isinstance(raw_sources, list):
         return []
@@ -1355,11 +1425,28 @@ def _codex_extract_design(
     source_url: str,
     content: str,
 ) -> dict[str, Any]:
-    result = _codex_json(
-        _extract_design_prompt(term, context, source_url, content),
-        DESIGN_EXTRACT_SCHEMA,
-        "design-extract.json",
-    )
+    try:
+        result = _codex_json(
+            _extract_design_prompt(term, context, source_url, content),
+            DESIGN_EXTRACT_SCHEMA,
+            "design-extract.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {
+            "relevant": False,
+            "structure": "",
+            "rationale": "",
+            "when_to_use": "",
+            "when_not_to_use": "",
+            "tradeoffs": "",
+            "alternatives": "",
+            "implementation_hooks": "",
+            "quality_attributes": "",
+            "evidence": "",
+            "delta_claim": "",
+            "lang_env_version": "",
+        }
     if isinstance(result.get("relevant"), bool):
         return result
     return {
@@ -1383,22 +1470,30 @@ def _codex_design_delta_inclusion(
     context: Mapping[str, Any],
     candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
-    result = _codex_json(
-        _design_delta_prompt(term, context, candidate),
-        DELTA_SCHEMA,
-        "design-delta.json",
-    )
+    try:
+        result = _codex_json(
+            _design_delta_prompt(term, context, candidate),
+            DELTA_SCHEMA,
+            "design-delta.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"keep": False, "reason": "Reference Codex timed out"}
     if isinstance(result.get("keep"), bool) and isinstance(result.get("reason"), str):
         return result
     return {"keep": False, "reason": "invalid design delta judgment"}
 
 
 def _codex_design_competence(term: str, context: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
-    result = _codex_json(
-        _design_competence_prompt(term, context, candidate),
-        DESIGN_COMPETENCE_SCHEMA,
-        "design-competence.json",
-    )
+    try:
+        result = _codex_json(
+            _design_competence_prompt(term, context, candidate),
+            DESIGN_COMPETENCE_SCHEMA,
+            "design-competence.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return {"keep": False, "author_level": "unknown", "reason": "Reference Codex timed out"}
     if (
         isinstance(result.get("keep"), bool)
         and isinstance(result.get("author_level"), str)
@@ -1409,11 +1504,15 @@ def _codex_design_competence(term: str, context: Mapping[str, Any], candidate: M
 
 
 def _extract_reference_terms(text: str, context: Mapping[str, Any]) -> list[str]:
-    result = _codex_json(
-        _reference_terms_prompt(text, context),
-        REFERENCE_TERMS_SCHEMA,
-        "reference-terms.json",
-    )
+    try:
+        result = _codex_json(
+            _reference_terms_prompt(text, context),
+            REFERENCE_TERMS_SCHEMA,
+            "reference-terms.json",
+        )
+    except ReferenceCodexTimeout as exc:
+        _record_reference_timeout(context, exc)
+        return []
     return _clean_reference_terms(result.get("terms"))
 
 
@@ -1423,6 +1522,7 @@ def _codex_json(prompt: str, schema: Mapping[str, Any], output_name: str) -> dic
         schema_file = temp_dir / "schema.json"
         out_file = temp_dir / output_name
         schema_file.write_text(json.dumps(schema), encoding="utf-8")
+        timeout_seconds = _reference_search_timeout_seconds()
         cmd = [
             "codex",
             "exec",
@@ -1445,7 +1545,12 @@ def _codex_json(prompt: str, schema: Mapping[str, Any], output_name: str) -> dic
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                timeout=timeout_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise ReferenceCodexTimeout(
+                f"{output_name} timed out after {timeout_seconds:g} seconds"
+            ) from exc
         except OSError:
             return {}
         if completed.returncode != 0 or not out_file.exists():

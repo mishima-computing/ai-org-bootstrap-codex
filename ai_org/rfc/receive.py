@@ -26,14 +26,38 @@
 # Shape (to match the other stages): validate the request -> codex grounds it -> git-write the
 # promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
 #
-# REFERENCE UPDATE (TODO wiring — memo only for now): when an RFC is received/promoted here, that event
-# FIRES a Reference update. The RFC's meaningful implementation terms feed ai_org.reference.build_from_rfc,
-# which looks up each term in the org-level knowledge store and, on a miss, expands it (language-agnostic
-# repo search -> extract -> strict delta-over-baseline -> distill), appending (never deleting) what it finds.
-# This is the Reference super-module's "step 1 = build at RFC-receive time"; leaves later READ that Reference,
-# and top up on a miss. The store is off-git and grows with use. The actual call is not wired in yet.
+# ==========================================================================================================
+# CANONICAL RECEIVE FLOW — ①②③④ (terum 2026-07-02, CONFIRMED). Read this before touching the Reference wiring.
+# This block is a "Memento tattoo": the correct flow lives HERE, in the code, because ADR/notes get missed.
+#   ① validate + ground        -> grounded RFC (what to build: problem + proposal).
+#   ② reference.build_from_rfc  -> POPULATE the single org-level Reference with THIS RFC's concepts
+#                                  (implementation AND design facets). ==> This is the PREREQUISITE for ③.
+#   ③ form_technical_approach   -> CONSUME the Reference by lookup to propose HOW to build it
+#                                  (Reference patterns + repo context + requester approach).
+#   ④ promote RFC (with Technical Approach) -> review.
 #
-# TECHNICAL APPROACH — where the design is FORMED (TODO build; grounded in the Linux/RFC review research):
+# WHY ② PRECEDES ③ (do not reorder): ③'s prior-art map READS the Reference. If ② has not populated it, ③
+# reads an empty well and every prior_art node degrades to facet_kind='none'. ② fills the well first, ③ drinks.
+#
+# THE 0/6 BUG THIS PREVENTS (root cause — do NOT reintroduce): ② and ③ must key off the SAME concept list.
+# The old code ran neither ② here NOR shared keys: build_from_rfc extracted terms from _rfc_text(rfc_view),
+# while ③ re-extracted terms from a DIFFERENT string (RFC + accumulated approach tree) -> DIFFERENT terms ->
+# every lookup MISSED the store -> facet_kind='none' for all 6/6 prior_art nodes, and ③ papered over it with an
+# inline reference.expand() band-aid. FIX (current): ② runs first and RETURNS its exact ordered term list;
+# form_technical_approach threads THOSE terms into ③, which CONSUMES them by lookup (no re-extract). Reference
+# BUILD keys == Reference READ keys, by construction. Inline expand survives ONLY as a fallback when ② is skipped.
+#
+# SEARCH TIMEOUT (correctness, not speed): a single codex Reference search once hung 36 minutes and stalled the
+# whole pipeline. reference search subprocess calls are bounded by AI_ORG_REFERENCE_SEARCH_TIMEOUT (default 180s);
+# on timeout that one concept degrades to empty/failed and the build CONTINUES — a hung search can never wedge ③.
+#
+# COST NOTE (deferred by terum — flow first, speed later): ② is heavy and synchronous (~25 min for DQ's ~30
+# concepts). Running the full build on every RFC is slow; the intended future is async/incremental/cache. The
+# hooks are already here — pass reference_terms=<prebuilt> (skip the internal build) or skip_reference_build=True
+# — so async ② can be added later WITHOUT changing ③. Do not add async now.
+# ==========================================================================================================
+#
+# TECHNICAL APPROACH — where the design is FORMED (BUILT: form_technical_approach; grounded in Linux/RFC review):
 # "propose the approach" and "review the approach" are DISTINCT. Review CRITIQUES a submitted design; it must
 # NOT be the first place the approach is created (Rust RFCs / PEPs / IETF I-Ds all post a design that review
 # reshapes). So the RFC must arrive at review already carrying a Technical Approach. That approach is formed
@@ -51,8 +75,8 @@
 # The formed Technical Approach carries: problem/impact, reference-derived prior-art, implementation strategy,
 # alternatives-with-why-not, compatibility/migration, testing plan, scope/patch plan, open questions.
 #
-# TECHNICAL APPROACH — formation procedure (grounded in RFC/PEP + ADR + ATAM + senior-dev practice; TODO, build
-# ONE STEP AT A TIME). Codex STRUCTURES the reasoning and exposes evidence/trade-offs; it must NOT emit a one-shot
+# TECHNICAL APPROACH — formation procedure (grounded in RFC/PEP + ADR + ATAM + senior-dev practice; BUILT as a
+# derivation tree, see form_technical_approach). Codex STRUCTURES the reasoning and exposes evidence/trade-offs; it must NOT emit a one-shot
 # design claim. Weighting stays judgment-heavy (final priorities / risk tolerance / architectural taste are human):
 #   1. Normalize the problem: problem, affected users/systems, current inadequacy, success criteria, non-goals.
 #   2. Extract constraints: hard constraints + soft preferences (repo architecture, compatibility, data/API
@@ -1015,6 +1039,7 @@ def _build_prior_art_map(
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
     approach: Mapping[str, Any] | None = None,
+    reference_terms: Any | None = None,
 ) -> dict[str, Any]:
     """Form step 3 of the documented 10-step Technical Approach procedure."""
     # Step 3 of 10: attach prior art to the accumulated approach before candidate generation.
@@ -1023,9 +1048,17 @@ def _build_prior_art_map(
 
     repo_path = Path(repo).resolve()
     accumulated_approach = _prior_art_approach_context(approach)
-    concepts = _prior_art_key_concepts(rfc_view, context, accumulated_approach)
+    concepts = (
+        _reference_terms_for_prior_art(reference_terms)
+        if reference_terms is not None
+        else _prior_art_key_concepts(rfc_view, context, accumulated_approach)
+    )
     try:
-        reference_facets = _read_prior_art_reference_facets(concepts, context)
+        reference_facets = _read_prior_art_reference_facets(
+            concepts,
+            context,
+            allow_expand=reference_terms is None,
+        )
     except Exception as exc:
         return _prior_art_error(f"Reference prior-art read failed: {exc}")
 
@@ -1058,6 +1091,7 @@ def _build_prior_art_map(
 
         lint_errors = _lint_prior_art_map(parsed, reference_facets, accumulated_approach)
         if not lint_errors:
+            _attach_prior_art_reference_facets(parsed, reference_facets)
             return parsed
         last_error = "; ".join(lint_errors)
         feedback = lint_errors
@@ -1422,6 +1456,8 @@ def form_technical_approach(
     context: Mapping[str, Any] | None = None,
     provided_approach: Any | None = None,
     progress_path: str | Path | None = None,
+    reference_terms: Any | None = None,
+    skip_reference_build: bool = False,
 ) -> dict[str, Any]:
     """Form step 10 of the documented 10-step Technical Approach procedure."""
     # Step 10 of 10: the orchestrator + requester/AI-Org boundary.
@@ -1470,8 +1506,20 @@ def form_technical_approach(
     partial_tree["problem"]["constraints"] = _constraint_tree_nodes(constraints)
     mark_step_completed("extract_constraints", started_at, partial_tree)
 
+    prior_art_reference_terms = reference_terms
+    if prior_art_reference_terms is None and not skip_reference_build:
+        reference_build = reference.build_from_rfc(rfc_view, approach_context)
+        prior_art_reference_terms = _reference_terms_from_build_result(reference_build)
+        steps["build_reference_from_rfc"] = _json_safe(reference_build)
+
     started_at = start_step()
-    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, dict(partial_tree))
+    prior_art = _build_prior_art_map(
+        rfc_view,
+        repo_path,
+        approach_context,
+        dict(partial_tree),
+        prior_art_reference_terms,
+    )
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
     if failure:
         return failure
@@ -2286,6 +2334,22 @@ def _prior_art_key_concepts(
     return concepts[:12]
 
 
+def _reference_terms_from_build_result(reference_build: Mapping[str, Any]) -> list[str]:
+    processed = reference_build.get("processed_terms")
+    terms = _reference_terms_for_prior_art(processed)
+    if terms:
+        return terms
+    return _reference_terms_for_prior_art(reference_build.get("terms"))
+
+
+def _reference_terms_for_prior_art(values: Any) -> list[str]:
+    concepts: list[str] = []
+    if isinstance(values, Mapping):
+        values = list(values.keys())
+    _extend_concepts(concepts, values)
+    return concepts
+
+
 def _extend_concepts(concepts: list[str], values: Any) -> None:
     if isinstance(values, str):
         _add_concept(concepts, values)
@@ -2329,6 +2393,8 @@ def _important_phrases(text: str) -> list[str]:
 def _read_prior_art_reference_facets(
     concepts: list[str],
     context: Mapping[str, Any] | None = None,
+    *,
+    allow_expand: bool = True,
 ) -> list[dict[str, Any]]:
     reference_context = _reference_stack_context(context)
     facets_by_index: dict[int, dict[str, Any]] = {}
@@ -2355,8 +2421,20 @@ def _read_prior_art_reference_facets(
             continue
         missing_indexes.append(index)
 
-    research_indexes = missing_indexes[:MAX_PRIOR_ART_REFERENCE_EXPANSIONS]
-    for index in missing_indexes[MAX_PRIOR_ART_REFERENCE_EXPANSIONS:]:
+    if allow_expand:
+        research_indexes = missing_indexes[:MAX_PRIOR_ART_REFERENCE_EXPANSIONS]
+        capped_indexes = missing_indexes[MAX_PRIOR_ART_REFERENCE_EXPANSIONS:]
+    else:
+        research_indexes = []
+        capped_indexes = []
+        for index in missing_indexes:
+            term = concepts[index]
+            term_facets = initial.get(index) or {"term": term, "design": [], "implementation": []}
+            term_facets["status"] = "not_found"
+            empty_after_research.append(term)
+            facets_by_index[index] = term_facets
+
+    for index in capped_indexes:
         term = concepts[index]
         term_facets = initial.get(index) or {"term": term, "design": [], "implementation": []}
         term_facets["status"] = "not_researched_cap"
@@ -2547,6 +2625,33 @@ def _trim_reference_candidates(candidates: Any) -> list[dict[str, str]]:
                 }
             )
     return trimmed
+
+
+def _attach_prior_art_reference_facets(
+    prior_art_map: dict[str, Any],
+    reference_facets: list[dict[str, Any]],
+) -> None:
+    facets_by_term = {
+        str(facet.get("term") or "").strip().lower(): facet
+        for facet in reference_facets
+        if isinstance(facet, Mapping) and str(facet.get("term") or "").strip()
+    }
+    for pattern in prior_art_map.get("patterns", []):
+        if not isinstance(pattern, dict):
+            continue
+        source = pattern.get("source")
+        if not isinstance(source, Mapping):
+            continue
+        concept = str(source.get("reference_concept") or "").strip().lower()
+        facet = facets_by_term.get(concept)
+        if facet is None:
+            continue
+        pattern["reference_facets"] = {
+            "term": str(facet.get("term") or ""),
+            "status": str(facet.get("status") or ""),
+            "design": list(facet.get("design") or []),
+            "implementation": list(facet.get("implementation") or []),
+        }
 
 
 def _rfc_text(rfc_view: dict[str, Any]) -> str:

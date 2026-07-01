@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 from pathlib import Path
+import subprocess
 import threading
 import time
 
@@ -18,6 +19,12 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         "_normalize_problem",
         lambda rfc_view, context=None: calls.append("normalize_problem") or _normalized_problem(),
     )
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda rfc_view, context=None: calls.append("build_from_rfc")
+        or {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
 
     def fake_constraints(rfc_view, repo, context=None, approach=None):
         calls.append(("extract_constraints", approach))
@@ -26,9 +33,10 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         assert "normalized_problem" not in approach
         return _constraints()
 
-    def fake_prior_art(rfc_view, repo, context=None, approach=None):
+    def fake_prior_art(rfc_view, repo, context=None, approach=None, reference_terms=None):
         calls.append(("build_prior_art_map", approach))
         approaches["build_prior_art_map"] = approach
+        assert reference_terms == ["battle loop"]
         assert approach["problem"]["constraints"]["hard"][0]["id"] == "constraint:hard:1"
         return _prior_art_map()
 
@@ -97,6 +105,8 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert "approach" not in result
     assert calls[0] == "normalize_problem"
+    assert calls[2] == "build_from_rfc"
+    assert calls[3][0] == "build_prior_art_map"
     assert calls[-1] == "surface_risks"
     for step in (
         "extract_constraints",
@@ -413,6 +423,11 @@ def test_empty_slot_fails_closed_after_bounded_regeneration(monkeypatch, tmp_pat
 def test_risk_targets_fail_closed_when_parent_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(receive_module, "_normalize_problem", lambda rfc_view, context=None: _normalized_problem())
     monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
     monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
     monkeypatch.setattr(receive_module, "_generate_candidates", lambda *args, **kwargs: _candidates())
     monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
@@ -440,6 +455,149 @@ def test_risk_targets_fail_closed_when_parent_is_unknown(monkeypatch, tmp_path):
     assert result["ok"] is False
     assert result["failed_step"] == "surface_risks"
     assert "targets unknown implementation node" in result["error"]
+
+
+def test_form_technical_approach_builds_reference_then_prior_art_uses_same_terms(monkeypatch, tmp_path):
+    calls = []
+
+    monkeypatch.setattr(receive_module, "_normalize_problem", lambda *args, **kwargs: _normalized_problem())
+    monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(receive_module, "_generate_candidates", lambda *args, **kwargs: _candidates())
+    monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
+    monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
+    monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
+    monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: _risks())
+    monkeypatch.setattr(
+        receive_module,
+        "_prior_art_key_concepts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("prior art must not re-extract terms")),
+    )
+
+    def fake_build_from_rfc(rfc_view, context=None):
+        calls.append("build_from_rfc")
+        return {
+            "terms": {"C1": {}, "C2": {}},
+            "processed_terms": ["C1", "C2"],
+            "expanded": ["C1", "C2"],
+            "hits": [],
+            "failed": {},
+        }
+
+    def fake_lookup(term, reference_context, kind=None):
+        assert term in {"C1", "C2"}
+        if kind == "design":
+            return {"term": term, "candidates": [_reference_candidate_for_term(term, "design", f"{term} design summary")]}
+        if kind == "implementation":
+            return {
+                "term": term,
+                "candidates": [_reference_candidate_for_term(term, "implementation", f"{term} implementation summary")],
+            }
+        return {"term": term, "candidates": []}
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append("build_prior_art_map")
+        prompt = kwargs["prompt"]
+        assert prompt.index('"term": "C1"') < prompt.index('"term": "C2"')
+        assert "C1 design structure" in prompt
+        assert "C2 implementation summary" in prompt
+        return {"ok": True, "raw": json.dumps(_prior_art_map_for_terms(("C1", "design"), ("C2", "implementation")))}
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module.reference, "lookup", fake_lookup)
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+
+    assert result["ok"] is True
+    assert calls == ["build_from_rfc", "build_prior_art_map"]
+    patterns = result["steps"]["build_prior_art_map"]["patterns"]
+    assert patterns[0]["source"]["facet_kind"] == "design"
+    assert patterns[0]["reference_facets"]["design"][0]["structure"] == "C1 design structure"
+    assert patterns[1]["source"]["facet_kind"] == "implementation"
+    assert patterns[1]["reference_facets"]["design"][0]["rationale"] == "C2 design rationale"
+
+
+def test_form_technical_approach_reference_terms_skip_internal_build(monkeypatch, tmp_path):
+    used_terms = []
+
+    _patch_successful_approach_steps(monkeypatch)
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build_from_rfc should be skipped")),
+    )
+
+    def fake_prior_art(rfc_view, repo, context=None, approach=None, reference_terms=None):
+        used_terms.extend(reference_terms)
+        return _prior_art_map()
+
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", fake_prior_art)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path, reference_terms=["cached concept"])
+
+    assert result["ok"] is True
+    assert used_terms == ["cached concept"]
+
+
+def test_prior_art_reference_term_timeout_does_not_abort_other_concepts(monkeypatch, tmp_path):
+    lookup_calls = []
+
+    def fake_lookup(term, reference_context, kind=None):
+        lookup_calls.append((term, kind))
+        if term == "timed concept":
+            raise receive_module.reference.ReferenceCodexTimeout("search timed out")
+        if kind == "design":
+            return {
+                "term": term,
+                "candidates": [_reference_candidate_for_term(term, "design", f"{term} design summary")],
+            }
+        return {"term": term, "candidates": []}
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompt = kwargs["prompt"]
+        assert '"status": "failed"' in prompt
+        assert "search timed out" in prompt
+        assert "good concept design summary" in prompt
+        return {
+            "ok": True,
+            "raw": json.dumps(_prior_art_map_for_terms(("timed concept", "none"), ("good concept", "design"))),
+        }
+
+    monkeypatch.setattr(receive_module.reference, "lookup", fake_lookup)
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._build_prior_art_map(
+        _rfc_view(),
+        tmp_path,
+        {},
+        {"normalized_problem": _normalized_problem()},
+        ["timed concept", "good concept"],
+    )
+
+    assert result["patterns"][0]["source"]["facet_kind"] == "none"
+    assert result["patterns"][0]["reference_facets"]["status"] == "failed"
+    assert result["patterns"][1]["source"]["facet_kind"] == "design"
+    assert result["patterns"][1]["reference_facets"]["design"][0]["structure"] == "good concept design structure"
+    assert ("good concept", "design") in lookup_calls
+
+
+def test_reference_codex_search_timeout_returns_empty_result(monkeypatch):
+    observed_timeouts = []
+
+    def fake_run(*args, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setenv("AI_ORG_REFERENCE_SEARCH_TIMEOUT", "1")
+    monkeypatch.setattr(receive_module.reference.subprocess, "run", fake_run)
+
+    context: dict[str, object] = {}
+    result = receive_module.reference._codex_search_keywords("battle loop", context)
+
+    assert result == []
+    assert observed_timeouts == [1.0]
+    assert "search-keywords.json timed out after 1 seconds" in context["_reference_codex_timeouts"][0]
 
 
 def test_prior_art_expands_reference_on_miss_and_uses_researched_facets(monkeypatch, tmp_path):
@@ -671,6 +829,11 @@ def test_receive_imports_reference_and_codex_exec_without_later_phases():
 def _patch_successful_approach_steps(monkeypatch) -> None:
     monkeypatch.setattr(receive_module, "_normalize_problem", lambda rfc_view, context=None: _normalized_problem())
     monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
     monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
     monkeypatch.setattr(receive_module, "_generate_candidates", lambda *args, **kwargs: _candidates())
     monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
@@ -789,6 +952,29 @@ def _prior_art_map_with_facet(reference_concept: str, facet_kind: str) -> dict[s
     }
 
 
+def _prior_art_map_for_terms(*term_facets: tuple[str, str]) -> dict[str, object]:
+    patterns = []
+    expanded = list(term_facets)
+    while len(expanded) < 3:
+        expanded.append(term_facets[-1])
+    for index, (reference_concept, facet_kind) in enumerate(expanded[:3], start=1):
+        patterns.append(
+            {
+                "name": f"{reference_concept} prior-art pattern {index}",
+                "source": {
+                    "reference_concept": reference_concept,
+                    "facet_kind": facet_kind,
+                    "where": "Reference." if facet_kind != "none" else "RFC and repository.",
+                },
+                "when_applies": "When the RFC needs a grounded implementation direction.",
+                "tradeoffs": {"pros": ["Grounded direction."], "cons": ["Requires validation."]},
+                "disposition": {"choice": "adopt", "why": "It fits the RFC constraints."},
+                "traces_to": ["normalized_problem.success_criteria[0]"],
+            }
+        )
+    return {"patterns": patterns}
+
+
 def _reference_candidate(kind: str, summary: str) -> dict[str, str]:
     return {
         "kind": kind,
@@ -809,6 +995,16 @@ def _reference_candidate(kind: str, summary: str) -> dict[str, str]:
         "source_url": "https://example.test/reference",
         "found_via": "test",
     }
+
+
+def _reference_candidate_for_term(term: str, kind: str, summary: str) -> dict[str, str]:
+    candidate = _reference_candidate(kind, summary)
+    candidate["term"] = term
+    candidate["structure"] = f"{term} {kind} structure"
+    candidate["rationale"] = f"{term} {kind} rationale"
+    candidate["when_to_use"] = f"{term} {kind} use"
+    candidate["tradeoffs"] = f"{term} {kind} tradeoffs"
+    return candidate
 
 
 def _candidate(candidate_id: str, kind: str, name: str) -> dict[str, object]:
