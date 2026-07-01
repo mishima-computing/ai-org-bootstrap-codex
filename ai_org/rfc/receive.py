@@ -177,6 +177,46 @@ NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
     },
 }
 
+CONSTRAINT_SOURCE_VALUES = ("repo", "rfc", "domain")
+CONSTRAINT_ITEM_FIELDS = ("constraint", "source", "why")
+PREFERENCE_ITEM_FIELDS = ("preference", "source", "why")
+EXTRACT_CONSTRAINTS_FIELDS = ("hard_constraints", "soft_preferences")
+
+EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(EXTRACT_CONSTRAINTS_FIELDS),
+    "properties": {
+        "hard_constraints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(CONSTRAINT_ITEM_FIELDS),
+                "properties": {
+                    "constraint": {"type": "string"},
+                    "source": {"type": "string", "enum": list(CONSTRAINT_SOURCE_VALUES)},
+                    "why": {"type": "string"},
+                },
+            },
+        },
+        "soft_preferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(PREFERENCE_ITEM_FIELDS),
+                "properties": {
+                    "preference": {"type": "string"},
+                    "source": {"type": "string", "enum": list(CONSTRAINT_SOURCE_VALUES)},
+                    "why": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 MAX_REGROUNDS = 2
 
 GENERALIZER_MARKERS = (
@@ -353,6 +393,30 @@ def _normalize_problem(rfc_view: dict[str, Any], context: Mapping[str, Any] | No
     return _parse_normalized_problem(run["raw"])
 
 
+def _extract_constraints(
+    rfc_view: dict[str, Any],
+    repo: str | Path,
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 2 of the documented 10-step Technical Approach procedure."""
+    # Step 2 of 10: extract hard constraints and soft preferences before approach generation.
+    if not _is_rfc_view(rfc_view):
+        return _constraints_error("extract_constraints requires a grounded common-8 RFC view")
+
+    repo_path = Path(repo).resolve()
+    run = codex_exec.run_json(
+        repo_path,
+        schema=EXTRACT_CONSTRAINTS_SCHEMA,
+        prompt=_extract_constraints_prompt(rfc_view, repo_path, context),
+        schema_filename="rfc-extract-constraints.schema.json",
+        output_filename="rfc-extracted-constraints.json",
+        failure_label="Codex constraint extraction",
+    )
+    if not run["ok"]:
+        return _constraints_error(run["error"])
+    return _parse_constraints(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -506,6 +570,40 @@ def _normalize_problem_prompt(rfc_view: dict[str, Any], context: Mapping[str, An
     )
 
 
+def _extract_constraints_prompt(
+    rfc_view: dict[str, Any],
+    repo: Path,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    return (
+        "You are forming step 2 of AI Org's 10-step Technical Approach procedure: extract constraints.\n"
+        "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
+        "RFC view, repository architecture, and supplied context to identify constraints only. Do not propose "
+        "candidate approaches, select an approach, create a patch plan, or perform later Technical Approach "
+        "steps.\n\n"
+        "Extract two lists:\n"
+        "- hard_constraints: must-satisfy constraints that later approaches cannot violate.\n"
+        "- soft_preferences: nice-to-have preferences that should influence trade-offs but may be outweighed.\n\n"
+        "Cover these areas when evidence exists:\n"
+        "- repository architecture and module boundaries.\n"
+        "- backward compatibility and public/interface compatibility.\n"
+        "- data, API, schema, protocol, and configuration contracts.\n"
+        "- performance, security, reliability, operability, and migration requirements.\n"
+        "- test constraints, existing coverage style, and verification expectations.\n"
+        "- delivery scope, non-goals, rollout boundaries, and documentation expectations.\n\n"
+        "For each item, set source to exactly one of: repo, rfc, domain. Use repo for constraints observed in "
+        "code, tests, docs, or project structure; rfc for constraints stated or implied by the grounded RFC; "
+        "domain for generally applicable engineering, security, reliability, or compatibility constraints. "
+        "The why field must briefly explain the evidence or reason. Return an empty list when no defensible "
+        "items exist for a category; do not invent unsupported constraints.\n\n"
+        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nRepository root:\n{repo}\n"
+        + f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
 def _parse_normalized_problem(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
@@ -532,6 +630,75 @@ def _parse_normalized_problem(raw: str) -> dict[str, Any]:
 
 
 def _normalized_problem_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_constraints(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _constraints_error(f"Codex constraint extraction returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _constraints_error("Codex constraint extraction returned non-object JSON")
+    if set(parsed) != set(EXTRACT_CONSTRAINTS_FIELDS):
+        return _constraints_error("Codex constraint extraction returned invalid fields")
+
+    hard_constraints = _parse_constraint_items(
+        parsed.get("hard_constraints"),
+        field="hard_constraints",
+        item_fields=CONSTRAINT_ITEM_FIELDS,
+        text_field="constraint",
+    )
+    if isinstance(hard_constraints, dict) and hard_constraints.get("ok") is False:
+        return hard_constraints
+
+    soft_preferences = _parse_constraint_items(
+        parsed.get("soft_preferences"),
+        field="soft_preferences",
+        item_fields=PREFERENCE_ITEM_FIELDS,
+        text_field="preference",
+    )
+    if isinstance(soft_preferences, dict) and soft_preferences.get("ok") is False:
+        return soft_preferences
+
+    return {
+        "hard_constraints": hard_constraints,
+        "soft_preferences": soft_preferences,
+    }
+
+
+def _parse_constraint_items(
+    value: Any,
+    *,
+    field: str,
+    item_fields: tuple[str, ...],
+    text_field: str,
+) -> list[dict[str, str]] | dict[str, Any]:
+    if not isinstance(value, list):
+        return _constraints_error(f"Codex constraint extraction returned invalid {field}")
+
+    items: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return _constraints_error(f"Codex constraint extraction returned invalid {field} item")
+        if set(item) != set(item_fields):
+            return _constraints_error(f"Codex constraint extraction returned invalid {field} item fields")
+        if not all(isinstance(item[prop], str) for prop in item_fields):
+            return _constraints_error(f"Codex constraint extraction returned invalid {field} item values")
+        if item["source"] not in CONSTRAINT_SOURCE_VALUES:
+            return _constraints_error(f"Codex constraint extraction returned invalid {field} source")
+        items.append(
+            {
+                text_field: item[text_field],
+                "source": item["source"],
+                "why": item["why"],
+            }
+        )
+    return items
+
+
+def _constraints_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
