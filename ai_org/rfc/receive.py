@@ -37,6 +37,11 @@
 #                                  (Reference patterns + repo context + requester approach).
 #   ④ promote RFC (with Technical Approach) -> review.
 #
+# produce_rfc now executes the flow after confident grounding: it synchronously builds DESIGN Reference facets,
+# starts IMPLEMENTATION Reference research in the background, forms the Technical Approach with the exact design
+# terms from the build, and commits that approach as technical-approach.json beside the common-8 rfc.json. Review
+# therefore receives a promoted RFC that already carries its Technical Approach.
+#
 # WHY DESIGN ② PRECEDES ③ (do not reorder): ③'s prior-art map READS the Reference. If design ② has not
 # populated it, ③ reads an empty well and every prior_art node degrades to facet_kind='none'. Design ② fills
 # the well first, ③ drinks. Implementation ② runs in the background for the later Contributor/patch stage.
@@ -932,6 +937,27 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
         return result
 
     rfc = grounding.rfc_view
+    approach_context = _technical_approach_context(None, repo_path)
+    design_build = reference.build_from_rfc(rfc, approach_context, kinds=("design",))
+    design_terms = _reference_terms_from_build_result(design_build)
+    reference.start_background_build(rfc, approach_context, kinds=("implementation",))
+    # Keep the entrypoint from pinning a stack; hardcoded language/environment/version forecloses engine/platform alternatives.
+    approach = form_technical_approach(
+        rfc,
+        repo_path,
+        context=approach_context,
+        reference_terms=design_terms,
+    )
+    if approach.get("ok") is False:
+        return {
+            "ok": False,
+            "status": "needs_work",
+            "error": approach.get("error", "Technical Approach formation failed"),
+            "failed_step": approach.get("failed_step"),
+            "proposed_rfc": rfc,
+            "grounding_notes": grounding.grounding_notes,
+        }
+
     rfc_id = _slug(rfc["title"])
     branch = f"ai-org/rfc/{rfc_id}"
     base = _default_branch(repo_path)
@@ -941,6 +967,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
         base,
         rfc,
         rfc_path=rfc_path,
+        extra_files={"technical-approach.json": approach["technical_approach"]},
         commit_message=f"rfc: receive {rfc['title']}",
     )
     return {
@@ -949,6 +976,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
         "id": rfc_id,
         "branch": branch,
         "commit": written["commit"],
+        "technical_approach_path": "technical-approach.json",
         "grounding_notes": grounding.grounding_notes,
     }
 

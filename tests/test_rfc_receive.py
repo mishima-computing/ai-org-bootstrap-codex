@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_org.patch.implement import _is_common_8 as _implement_is_common_8
 from ai_org.rfc import receive as receive_module
 from ai_org.rfc.receive import (
     COMMON_8_FIELDS,
@@ -93,7 +94,7 @@ def test_receive_preserves_extra_keys():
     )["custom_priority"] == "high"
 
 
-def test_produce_rfc_writes_common_8_to_rfc_branch_from_default_branch(tmp_path, monkeypatch):
+def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive(
         {
@@ -110,6 +111,41 @@ def test_produce_rfc_writes_common_8_to_rfc_branch_from_default_branch(tmp_path,
     )
 
     monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(rfc, "identity"))
+    approach_tree = _approach_tree()
+    calls = []
+
+    def fake_build_from_rfc(rfc_view, context=None, **kwargs):
+        calls.append("build_from_rfc")
+        assert rfc_view == {field: request[field] for field in COMMON_8_FIELDS}
+        assert kwargs == {"kinds": ("design",)}
+        assert context["repo"] == repo.resolve()
+        assert context["repo_root"] == repo.resolve()
+        assert "language" not in context
+        assert "environment" not in context
+        assert "version" not in context
+        return {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}}
+
+    def fake_start_background_build(rfc_view, context=None, **kwargs):
+        calls.append("start_background_build")
+        assert calls == ["build_from_rfc", "start_background_build"]
+        assert kwargs == {"kinds": ("implementation",)}
+        assert context["repo"] == repo.resolve()
+        return object()
+
+    def fake_form_technical_approach(rfc_view, repo_path, **kwargs):
+        calls.append("form_technical_approach")
+        assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
+        assert repo_path == repo.resolve()
+        assert kwargs["context"]["repo"] == repo.resolve()
+        assert kwargs["reference_terms"] == ["battle loop"]
+        assert "language" not in kwargs["context"]
+        assert "environment" not in kwargs["context"]
+        assert "version" not in kwargs["context"]
+        return {"ok": True, "technical_approach": approach_tree}
+
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module.reference, "start_background_build", fake_start_background_build)
+    monkeypatch.setattr(receive_module, "form_technical_approach", fake_form_technical_approach)
 
     result = produce_rfc(request, repo)
 
@@ -118,11 +154,15 @@ def test_produce_rfc_writes_common_8_to_rfc_branch_from_default_branch(tmp_path,
     assert result["id"] == "manual-intake"
     assert result["branch"] == "ai-org/rfc/manual-intake"
     assert result["commit"] == _git(repo, "rev-parse", "refs/heads/ai-org/rfc/manual-intake")
+    assert result["technical_approach_path"] == "technical-approach.json"
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
     assert _git(repo, "show", "main:README.md") == "base"
     produced = json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:rfc.json"))
     assert produced == {field: request[field] for field in COMMON_8_FIELDS}
+    assert _implement_is_common_8(produced)
     assert "custom_priority" not in produced
+    assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:technical-approach.json")) == approach_tree
+    assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
 
 
 def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch):
@@ -173,6 +213,7 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
         }
 
     _install_codex_fake(monkeypatch, handler)
+    _install_successful_approach_pipeline(monkeypatch)
 
     result = intake(request, repo)
 
@@ -181,6 +222,10 @@ def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch
     assert result["branch"] == "ai-org/rfc/auto-battle-party-dungeon-rpg"
     assert result["grounding_notes"] == notes
     assert json.loads(_git(repo, "show", "ai-org/rfc/auto-battle-party-dungeon-rpg:rfc.json")) == grounded
+    assert json.loads(
+        _git(repo, "show", "ai-org/rfc/auto-battle-party-dungeon-rpg:technical-approach.json")
+    ) == _approach_tree()
+    assert result["technical_approach_path"] == "technical-approach.json"
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
     assert calls == ["grounding", "verifier"]
 
@@ -229,6 +274,21 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
         }
 
     _install_codex_fake(monkeypatch, handler)
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("design build should not run")),
+    )
+    monkeypatch.setattr(
+        receive_module.reference,
+        "start_background_build",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("background build should not run")),
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "form_technical_approach",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("approach should not be formed")),
+    )
 
     result = intake(request, repo)
 
@@ -239,6 +299,58 @@ def test_intake_grounding_not_confident_returns_proposed_rfc_without_branch(tmp_
     assert "branch" not in result
     missing_branch = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/ai-org/rfc/rough-game"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert missing_branch.returncode != 0
+    assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
+
+
+def test_produce_rfc_approach_failure_does_not_promote_hollow_rfc(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive(
+        {
+            "title": "Manual Intake",
+            "problem": "Requests need a real entrance form.",
+            "proposal": "Commit the validated COMMON-8 as rfc.json.",
+        }
+    )
+    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(rfc, "identity"))
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
+    monkeypatch.setattr(receive_module.reference, "start_background_build", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        receive_module,
+        "form_technical_approach",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "error": "Could not select a coherent approach.",
+            "failed_step": "select_approach",
+        },
+    )
+    monkeypatch.setattr(
+        receive_module,
+        "_write_rfc_branch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hollow RFC should not be written")),
+    )
+
+    result = produce_rfc(request, repo)
+
+    assert result == {
+        "ok": False,
+        "status": "needs_work",
+        "error": "Could not select a coherent approach.",
+        "failed_step": "select_approach",
+        "proposed_rfc": {field: request[field] for field in COMMON_8_FIELDS},
+        "grounding_notes": "identity",
+    }
+    missing_branch = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/ai-org/rfc/manual-intake"],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -360,6 +472,36 @@ def _install_codex_fake(monkeypatch: pytest.MonkeyPatch, handler) -> None:
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(receive_module.subprocess, "run", fake_run)
+
+
+def _install_successful_approach_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
+    monkeypatch.setattr(receive_module.reference, "start_background_build", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        receive_module,
+        "form_technical_approach",
+        lambda *args, **kwargs: {"ok": True, "technical_approach": _approach_tree()},
+    )
+
+
+def _approach_tree() -> dict[str, object]:
+    return {
+        "problem": {
+            "summary": "Requests need a grounded implementation approach before review.",
+            "question": {
+                "decision": {
+                    "chosen": "Build the receive-stage approach artifact.",
+                    "implementation": {
+                        "plan": ["Write technical-approach.json next to rfc.json."],
+                    },
+                }
+            },
+        }
+    }
 
 
 def _schema_kind(output_schema: str | Path) -> str:
