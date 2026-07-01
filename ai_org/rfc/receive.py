@@ -163,6 +163,65 @@ NORMALIZED_PROBLEM_FIELDS = (
     "success_criteria",
     "non_goals",
 )
+SUCCESS_CRITERION_FIELDS = (
+    "actor",
+    "capability",
+    "verifiable_outcome",
+    "verification",
+)
+SUCCESS_CRITERION_CAPABILITY_FIELDS = ("action", "preconditions")
+SUCCESS_CRITERION_OUTCOME_FIELDS = ("expected_state", "evidence")
+SUCCESS_CRITERION_VERIFICATION_FIELDS = ("method", "check")
+SUCCESS_CRITERION_VERIFICATION_METHODS = ("automated_test", "manual_check", "metric")
+SUCCESS_CRITERION_BANNED_WHOLE_VALUES = frozenset(
+    {
+        "recognizably",
+        "enough",
+        "complete",
+        "appropriate",
+        "good",
+        "proper",
+        "faithful",
+        "robust",
+    }
+)
+MAX_NORMALIZE_PROBLEM_REGENERATIONS = 2
+
+SUCCESS_CRITERION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(SUCCESS_CRITERION_FIELDS),
+    "properties": {
+        "actor": {"type": "string"},
+        "capability": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(SUCCESS_CRITERION_CAPABILITY_FIELDS),
+            "properties": {
+                "action": {"type": "string"},
+                "preconditions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            },
+        },
+        "verifiable_outcome": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(SUCCESS_CRITERION_OUTCOME_FIELDS),
+            "properties": {
+                "expected_state": {"type": "string"},
+                "evidence": {"type": "string"},
+            },
+        },
+        "verification": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(SUCCESS_CRITERION_VERIFICATION_FIELDS),
+            "properties": {
+                "method": {"type": "string", "enum": list(SUCCESS_CRITERION_VERIFICATION_METHODS)},
+                "check": {"type": "string"},
+            },
+        },
+    },
+}
 
 NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -173,7 +232,7 @@ NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
         "problem": {"type": "string"},
         "affected": {"type": "string"},
         "current_inadequacy": {"type": "string"},
-        "success_criteria": {"type": "array", "items": {"type": "string"}},
+        "success_criteria": {"type": "array", "minItems": 1, "items": SUCCESS_CRITERION_SCHEMA},
         "non_goals": {"type": "array", "items": {"type": "string"}},
     },
 }
@@ -679,17 +738,33 @@ def _normalize_problem(rfc_view: dict[str, Any], context: Mapping[str, Any] | No
         return _normalized_problem_error("normalize_problem requires a grounded common-8 RFC view")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=NORMALIZE_PROBLEM_SCHEMA,
-        prompt=_normalize_problem_prompt(rfc_view, context),
-        schema_filename="rfc-normalize-problem.schema.json",
-        output_filename="rfc-normalized-problem.json",
-        failure_label="Codex problem normalization",
+    feedback: list[str] = []
+    last_lint_error = ""
+    for attempt in range(MAX_NORMALIZE_PROBLEM_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=NORMALIZE_PROBLEM_SCHEMA,
+            prompt=_normalize_problem_prompt(rfc_view, context, feedback if attempt else None),
+            schema_filename="rfc-normalize-problem.schema.json",
+            output_filename="rfc-normalized-problem.json",
+            failure_label="Codex problem normalization",
+        )
+        if not run["ok"]:
+            return _normalized_problem_error(run["error"])
+        parsed = _parse_normalized_problem(run["raw"])
+        if not parsed.get("ok", True):
+            return parsed
+
+        lint_errors = _lint_normalized_problem(parsed, rfc_view)
+        if not lint_errors:
+            return parsed
+        last_lint_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _normalized_problem_error(
+        "Codex problem normalization remained unmeasurable after "
+        f"{MAX_NORMALIZE_PROBLEM_REGENERATIONS + 1} attempts: {last_lint_error}"
     )
-    if not run["ok"]:
-        return _normalized_problem_error(run["error"])
-    return _parse_normalized_problem(run["raw"])
 
 
 def _extract_constraints(
@@ -1147,21 +1222,42 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
     )
 
 
-def _normalize_problem_prompt(rfc_view: dict[str, Any], context: Mapping[str, Any] | None = None) -> str:
+def _normalize_problem_prompt(
+    rfc_view: dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
+) -> str:
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic validation. Regenerate the whole object and fix these "
+            "measurability issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
         "You are forming step 1 of AI Org's 10-step Technical Approach procedure: normalize the problem.\n"
         "Use the grounded common-8 RFC view and repository context only to restate the problem clearly. "
         "Do not propose an implementation approach, alternatives, patch plan, reviewer decision, or later "
         "Technical Approach steps.\n\n"
+        "Write English only. Distill problem and current_inadequacy; do not copy any RFC field verbatim. "
+        "Derive success criteria from the RFC intent, but do not copy RFC feature-list bullets as criteria.\n\n"
         "Return these fields:\n"
         "- problem: the core problem, restated crisply.\n"
         "- affected: affected users, operators, contributors, systems, modules, or workflows.\n"
         "- current_inadequacy: what is missing or where the current state falls short.\n"
-        "- success_criteria: checkable statements for what solved looks like.\n"
+        "- success_criteria: measurable nested objects. Each criterion must include actor, capability "
+        "{action, preconditions}, verifiable_outcome {expected_state, evidence}, and verification "
+        "{method, check}. action must be observable; preconditions must be concrete; expected_state must "
+        "name the end state that proves success; evidence must state what is observed or measured; method "
+        "must be automated_test, manual_check, or metric; check must be the concrete verification performed. "
+        "Do not use recognizably, enough, complete, appropriate, good, proper, faithful, or robust as a "
+        "standalone action, expected_state, evidence, or check.\n"
         "- non_goals: explicit boundaries that should remain out of scope for this RFC.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1600,21 +1696,169 @@ def _parse_normalized_problem(raw: str) -> dict[str, Any]:
         return _normalized_problem_error("Codex problem normalization returned invalid fields")
     if not all(isinstance(parsed[field], str) for field in ("problem", "affected", "current_inadequacy")):
         return _normalized_problem_error("Codex problem normalization returned invalid string fields")
-    for field in ("success_criteria", "non_goals"):
-        value = parsed.get(field)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            return _normalized_problem_error(f"Codex problem normalization returned invalid {field}")
+    non_goals = parsed.get("non_goals")
+    if not isinstance(non_goals, list) or not all(isinstance(item, str) for item in non_goals):
+        return _normalized_problem_error("Codex problem normalization returned invalid non_goals")
+    criteria = parsed.get("success_criteria")
+    if not isinstance(criteria, list):
+        return _normalized_problem_error("Codex problem normalization returned invalid success_criteria")
+    parsed_criteria: list[dict[str, Any]] = []
+    for criterion in criteria:
+        parsed_criterion = _parse_success_criterion(criterion)
+        if parsed_criterion is None:
+            return _normalized_problem_error("Codex problem normalization returned invalid success_criteria")
+        parsed_criteria.append(parsed_criterion)
     return {
         "problem": parsed["problem"],
         "affected": parsed["affected"],
         "current_inadequacy": parsed["current_inadequacy"],
-        "success_criteria": list(parsed["success_criteria"]),
-        "non_goals": list(parsed["non_goals"]),
+        "success_criteria": parsed_criteria,
+        "non_goals": list(non_goals),
     }
 
 
 def _normalized_problem_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
+
+
+def _parse_success_criterion(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != set(SUCCESS_CRITERION_FIELDS):
+        return None
+    actor = value.get("actor")
+    capability = value.get("capability")
+    outcome = value.get("verifiable_outcome")
+    verification = value.get("verification")
+    if not isinstance(actor, str):
+        return None
+    if not isinstance(capability, dict) or set(capability) != set(SUCCESS_CRITERION_CAPABILITY_FIELDS):
+        return None
+    action = capability.get("action")
+    preconditions = capability.get("preconditions")
+    if not isinstance(action, str) or not isinstance(preconditions, list):
+        return None
+    if not all(isinstance(item, str) for item in preconditions):
+        return None
+    if not isinstance(outcome, dict) or set(outcome) != set(SUCCESS_CRITERION_OUTCOME_FIELDS):
+        return None
+    expected_state = outcome.get("expected_state")
+    evidence = outcome.get("evidence")
+    if not isinstance(expected_state, str) or not isinstance(evidence, str):
+        return None
+    if not isinstance(verification, dict) or set(verification) != set(SUCCESS_CRITERION_VERIFICATION_FIELDS):
+        return None
+    method = verification.get("method")
+    check = verification.get("check")
+    if method not in SUCCESS_CRITERION_VERIFICATION_METHODS or not isinstance(check, str):
+        return None
+    return {
+        "actor": actor,
+        "capability": {"action": action, "preconditions": list(preconditions)},
+        "verifiable_outcome": {"expected_state": expected_state, "evidence": evidence},
+        "verification": {"method": method, "check": check},
+    }
+
+
+def _lint_normalized_problem(parsed: Mapping[str, Any], rfc_view: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    rfc_phrases = _normalized_rfc_phrases(rfc_view)
+    for field in ("problem", "current_inadequacy"):
+        value = parsed.get(field)
+        if isinstance(value, str) and _canonical_phrase(value) in rfc_phrases:
+            errors.append(f"{field} restates an RFC field verbatim instead of distilling it")
+
+    for path, value in _walk_normalized_problem_strings(parsed):
+        if not value.strip():
+            errors.append(f"{path} is empty")
+        if _contains_japanese_script(value):
+            errors.append(f"{path} must be English-only")
+
+    criteria = parsed.get("success_criteria")
+    if not isinstance(criteria, list) or not criteria:
+        errors.append("success_criteria must contain at least one nested criterion")
+        return errors
+
+    for index, criterion in enumerate(criteria):
+        base = f"success_criteria[{index}]"
+        if not isinstance(criterion, Mapping):
+            errors.append(f"{base} is not a nested criterion object")
+            continue
+        for path in (
+            "capability.action",
+            "verifiable_outcome.expected_state",
+            "verifiable_outcome.evidence",
+            "verification.check",
+        ):
+            value = _nested_string(criterion, path)
+            if value is None:
+                errors.append(f"{base}.{path} is missing")
+                continue
+            if _canonical_vague_value(value) in SUCCESS_CRITERION_BANNED_WHOLE_VALUES:
+                errors.append(f"{base}.{path} uses a vague standalone value: {value.strip()}")
+            if _canonical_phrase(value) in rfc_phrases:
+                errors.append(f"{base}.{path} copies RFC feature text instead of deriving a measurable check")
+        preconditions = criterion.get("capability", {}).get("preconditions") if isinstance(
+            criterion.get("capability"), Mapping
+        ) else None
+        if not isinstance(preconditions, list) or not preconditions:
+            errors.append(f"{base}.capability.preconditions is empty")
+    return errors
+
+
+def _walk_normalized_problem_strings(value: Any, path: str = "") -> list[tuple[str, str]]:
+    strings: list[tuple[str, str]] = []
+    if isinstance(value, str):
+        strings.append((path, value))
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            strings.extend(_walk_normalized_problem_strings(item, child_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            strings.extend(_walk_normalized_problem_strings(item, f"{path}[{index}]"))
+    return strings
+
+
+def _nested_string(value: Mapping[str, Any], dotted_path: str) -> str | None:
+    current: Any = value
+    for part in dotted_path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current if isinstance(current, str) else None
+
+
+def _normalized_rfc_phrases(rfc_view: Mapping[str, Any]) -> set[str]:
+    phrases: set[str] = set()
+    for field in RFC_VIEW_FIELDS:
+        value = rfc_view.get(field)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if not isinstance(item, str):
+                continue
+            for phrase in _split_source_phrases(item):
+                canonical = _canonical_phrase(phrase)
+                if canonical:
+                    phrases.add(canonical)
+    return phrases
+
+
+def _split_source_phrases(value: str) -> list[str]:
+    phrases = [value]
+    phrases.extend(line.strip(" -*\t") for line in value.splitlines())
+    phrases.extend(part.strip() for part in re.split(r"[.;]", value))
+    return [phrase for phrase in phrases if phrase.strip()]
+
+
+def _canonical_phrase(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _canonical_vague_value(value: str) -> str:
+    return re.sub(r"^[\W_]+|[\W_]+$", "", value.strip().lower())
+
+
+def _contains_japanese_script(value: str) -> bool:
+    return bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", value))
 
 
 def _parse_constraints(raw: str) -> dict[str, Any]:

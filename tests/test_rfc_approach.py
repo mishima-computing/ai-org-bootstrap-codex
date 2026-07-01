@@ -13,8 +13,18 @@ def test_normalize_problem_returns_parsed_structure(monkeypatch, tmp_path):
         "affected": "RFC reviewers and downstream implementation agents.",
         "current_inadequacy": "The grounded common-8 view is not restated into crisp success boundaries.",
         "success_criteria": [
-            "A normalized problem includes checkable success criteria.",
-            "Out-of-scope work is explicit before later approach steps run.",
+            _success_criterion(
+                action="Read the normalized problem before candidate generation.",
+                expected_state="The problem object contains nested measurable success criteria.",
+                evidence="The success_criteria array contains actor, capability, verifiable_outcome, and verification tags.",
+                check="Assert every criterion has all nested tags and sub-tags populated.",
+            ),
+            _success_criterion(
+                action="Compare non-goals with later approach outputs.",
+                expected_state="Later approach steps can identify work that is out of scope.",
+                evidence="The non_goals array contains explicit boundaries before candidate generation.",
+                check="Assert non_goals is a list of non-empty English strings.",
+            ),
         ],
         "non_goals": ["Do not generate candidate approaches in this step."],
     }
@@ -80,8 +90,100 @@ def test_normalize_problem_schema_is_codex_valid():
     assert "allOf" not in serialized
     assert "anyOf" not in serialized
     assert "oneOf" not in serialized
-    assert schema["additionalProperties"] is False
-    assert sorted(schema["required"]) == sorted(schema["properties"])
+    _assert_codex_valid_object_schema(schema)
+
+    criterion_schema = schema["properties"]["success_criteria"]["items"]
+    assert sorted(criterion_schema["properties"]) == [
+        "actor",
+        "capability",
+        "verifiable_outcome",
+        "verification",
+    ]
+    assert sorted(criterion_schema["properties"]["capability"]["properties"]) == ["action", "preconditions"]
+    assert sorted(criterion_schema["properties"]["verifiable_outcome"]["properties"]) == [
+        "evidence",
+        "expected_state",
+    ]
+    assert sorted(criterion_schema["properties"]["verification"]["properties"]) == ["check", "method"]
+    assert criterion_schema["properties"]["verification"]["properties"]["method"]["enum"] == [
+        "automated_test",
+        "manual_check",
+        "metric",
+    ]
+
+
+def test_normalize_problem_rejects_lint_failure_and_regenerates(monkeypatch, tmp_path):
+    first = {
+        "problem": "RFC formation lacks a normalized problem statement before approach design.",
+        "affected": "RFC reviewers and downstream implementation agents.",
+        "current_inadequacy": "The current RFC view lacks measurable step-one boundaries.",
+        "success_criteria": [
+            _success_criterion(
+                action="complete",
+                expected_state="The normalized problem has measurable criteria.",
+                evidence="",
+                check="Verify criteria fields.",
+            )
+        ],
+        "non_goals": ["Do not generate candidate approaches in this step."],
+    }
+    second = {
+        **first,
+        "success_criteria": [
+            _success_criterion(
+                action="Read the normalized problem before candidate generation.",
+                expected_state="The criteria object identifies a checkable end state for step 1.",
+                evidence="The JSON contains populated nested fields for actor, capability, outcome, and verification.",
+                check="Assert nested success criteria slots are non-empty and measurable.",
+            )
+        ],
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "raw": json.dumps(first if len(calls) == 1 else second)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._normalize_problem(_rfc_view(), {"repo": tmp_path})
+
+    assert result == second
+    assert len(calls) == 2
+    assert "Previous output failed deterministic validation" in calls[1]["prompt"]
+    assert "success_criteria[0].capability.action uses a vague standalone value" in calls[1]["prompt"]
+    assert "success_criteria[0].verifiable_outcome.evidence is empty" in calls[1]["prompt"]
+
+
+def test_normalize_problem_fails_closed_when_still_unmeasurable(monkeypatch, tmp_path):
+    unmeasurable = {
+        "problem": "RFC formation lacks a normalized problem statement before approach design.",
+        "affected": "RFC reviewers and downstream implementation agents.",
+        "current_inadequacy": "The current RFC view lacks measurable step-one boundaries.",
+        "success_criteria": [
+            _success_criterion(
+                action="Read the normalized problem before candidate generation.",
+                expected_state="complete",
+                evidence="The JSON contains populated nested fields.",
+                check="Verify criteria fields.",
+            )
+        ],
+        "non_goals": ["Do not generate candidate approaches in this step."],
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "raw": json.dumps(unmeasurable)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._normalize_problem(_rfc_view(), {"repo": tmp_path})
+
+    assert result["ok"] is False
+    assert "remained unmeasurable after 3 attempts" in result["error"]
+    assert "success_criteria[0].verifiable_outcome.expected_state uses a vague standalone value" in result["error"]
+    assert len(calls) == 3
 
 
 def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
@@ -1332,12 +1434,38 @@ def _prior_art_pattern(name: str, disposition: str) -> dict[str, object]:
     }
 
 
+def _success_criterion(
+    *,
+    action: str = "Inspect generated candidate approaches.",
+    preconditions: list[str] | None = None,
+    expected_state: str = "The candidate list contains distinct approach objects for later evaluation.",
+    evidence: str = "The candidates array has separately named minimal_local and repo_native entries.",
+    method: str = "automated_test",
+    check: str = "Assert candidates include distinct names, kinds, summaries, decisions, and prior-art links.",
+) -> dict[str, object]:
+    return {
+        "actor": "an RFC reviewer",
+        "capability": {
+            "action": action,
+            "preconditions": preconditions or ["The normalized problem has been produced."],
+        },
+        "verifiable_outcome": {
+            "expected_state": expected_state,
+            "evidence": evidence,
+        },
+        "verification": {
+            "method": method,
+            "check": check,
+        },
+    }
+
+
 def _normalized_problem() -> dict[str, object]:
     return {
         "problem": "RFC formation needs candidate approaches.",
         "affected": "RFC reviewers and implementation agents.",
         "current_inadequacy": "Prior-art evidence exists but no approach options are generated.",
-        "success_criteria": ["Generate distinct candidate approaches."],
+        "success_criteria": [_success_criterion()],
         "non_goals": ["Do not select a candidate in step 4."],
     }
 
