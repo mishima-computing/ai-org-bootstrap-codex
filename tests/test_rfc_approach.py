@@ -191,26 +191,44 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
     expected = {
         "hard_constraints": [
             {
-                "constraint": "Keep RFC receive isolated from patch and merge modules.",
-                "source": "repo",
-                "why": "The RFC package owns receive/review/decompose without importing implementation phases.",
+                "statement": "Keep RFC receive isolated from patch and merge modules.",
+                "derivation": {
+                    "from": "repo",
+                    "trace": "ai_org.rfc.receive imports ai_org.rfc.codex_exec and does not import ai_org.patch or ai_org.merge.",
+                },
+                "implication": {
+                    "must": "Reuse ai_org.rfc.codex_exec for Codex-backed extraction.",
+                    "must_not": "Import ai_org.patch or ai_org.merge from the RFC receive phase.",
+                },
             },
             {
-                "constraint": "Generated schemas must be accepted by Codex output schema validation.",
-                "source": "success_criteria",
-                "why": "The measurable success criteria require codex-valid schemas.",
+                "statement": "Generated schemas must be accepted by Codex output schema validation.",
+                "derivation": {
+                    "from": "success_criteria",
+                    "trace": "success_criteria[0].verifiable_outcome.expected_state requires nested measurable criteria.",
+                },
+                "implication": {
+                    "must": "Keep the constraints schema compatible with Codex output schema validation.",
+                    "must_not": "Use allOf, anyOf, oneOf, open object properties, or partial required lists.",
+                },
             },
         ],
         "soft_preferences": [
             {
-                "preference": "Match the existing normalize_problem helper pattern.",
-                "source": "repo",
-                "why": "Step 1 already uses ai_org.rfc.codex_exec.run_json with prompt, schema, and parser helpers.",
+                "statement": "Match the existing normalize_problem helper pattern.",
+                "derivation": {
+                    "from": "repo",
+                    "trace": "Step 1 already uses ai_org.rfc.codex_exec.run_json with prompt, schema, and parser helpers.",
+                },
+                "rationale": "Matching the helper pattern keeps the receive phase easier to review.",
             },
             {
-                "preference": "Keep delivery scoped to step 2 only.",
-                "source": "domain",
-                "why": "Incremental approach formation reduces review and regression risk.",
+                "statement": "Keep delivery scoped to step 2 only.",
+                "derivation": {
+                    "from": "domain",
+                    "trace": "Establishing the accumulating document pattern in one step limits blast radius.",
+                },
+                "rationale": "Incremental approach formation reduces review and regression risk.",
             },
         ],
     }
@@ -223,11 +241,12 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
     monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
 
     normalized_problem = _normalized_problem()
+    approach = {"normalized_problem": normalized_problem}
     result = receive_module._extract_constraints(
         rfc_view,
         tmp_path,
         {"normalized": "problem"},
-        normalized_problem,
+        approach,
     )
 
     assert result == expected
@@ -242,11 +261,13 @@ def test_extract_constraints_returns_parsed_structure(monkeypatch, tmp_path):
     assert "extract constraints" in kwargs["prompt"]
     assert "Inspect the repository read-only" in kwargs["prompt"]
     assert "Do not propose candidate approaches" in kwargs["prompt"]
-    assert "Step 1 normalized problem" in kwargs["prompt"]
+    assert "Accumulated approach so far" in kwargs["prompt"]
+    assert "approach.normalized_problem" in kwargs["prompt"]
     assert normalized_problem["problem"] in kwargs["prompt"]
     assert normalized_problem["success_criteria"][0]["verifiable_outcome"]["expected_state"] in kwargs["prompt"]
-    assert "verifiable_outcome and verification" in kwargs["prompt"]
+    assert "statement, derivation {from, trace}, and implication {must, must_not}" in kwargs["prompt"]
     assert "success_criteria" in kwargs["prompt"]
+    assert "English only" in kwargs["prompt"]
     assert "Return only JSON matching the provided schema." in kwargs["prompt"]
 
 
@@ -255,16 +276,33 @@ def test_extract_constraints_fails_closed_on_invalid_shape(monkeypatch, tmp_path
         {"hard_constraints": []},
         {"hard_constraints": [], "soft_preferences": [], "extra": "not allowed"},
         {
-            "hard_constraints": [{"constraint": "Keep API stable.", "source": "unknown", "why": "Bad source."}],
+            "hard_constraints": [
+                {
+                    "statement": "Keep API stable.",
+                    "derivation": {"from": "unknown", "trace": "Bad source."},
+                    "implication": {"must": "Preserve API shape.", "must_not": "Break callers."},
+                }
+            ],
             "soft_preferences": [],
         },
         {
-            "hard_constraints": [{"constraint": "Keep API stable.", "source": "repo"}],
+            "hard_constraints": [
+                {
+                    "statement": "Keep API stable.",
+                    "derivation": {"from": "repo", "trace": "Existing public API."},
+                }
+            ],
             "soft_preferences": [],
         },
         {
             "hard_constraints": [],
-            "soft_preferences": [{"preference": "Small patch.", "source": "rfc", "why": 42}],
+            "soft_preferences": [
+                {
+                    "statement": "Small patch.",
+                    "derivation": {"from": "problem", "trace": "Scoped request."},
+                    "rationale": 42,
+                }
+            ],
         },
     ]
 
@@ -281,6 +319,35 @@ def test_extract_constraints_fails_closed_on_invalid_shape(monkeypatch, tmp_path
         assert "Codex constraint extraction returned invalid" in result["error"]
 
 
+def test_extract_constraints_rejects_empty_subslots_and_regenerates(monkeypatch, tmp_path):
+    invalid = {
+        "hard_constraints": [
+            {
+                "statement": "Persist generated state.",
+                "derivation": {"from": "success_criteria", "trace": "success_criteria[0]"},
+                "implication": {"must": "", "must_not": "Lose saved state."},
+            }
+        ],
+        "soft_preferences": [],
+    }
+    valid = _constraints()
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append(kwargs)
+        payload = invalid if len(calls) == 1 else valid
+        return {"ok": True, "raw": json.dumps(payload)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._extract_constraints(_rfc_view(), tmp_path, approach={"normalized_problem": _normalized_problem()})
+
+    assert result == valid
+    assert len(calls) == 2
+    assert "Previous output failed deterministic validation" in calls[1]["prompt"]
+    assert "hard_constraints[0].implication.must is empty" in calls[1]["prompt"]
+
+
 def test_extract_constraints_schema_is_codex_valid():
     schema = receive_module.EXTRACT_CONSTRAINTS_SCHEMA
     serialized = json.dumps(schema)
@@ -291,8 +358,28 @@ def test_extract_constraints_schema_is_codex_valid():
 
     hard_item = schema["properties"]["hard_constraints"]["items"]
     soft_item = schema["properties"]["soft_preferences"]["items"]
-    assert hard_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain", "success_criteria"]
-    assert soft_item["properties"]["source"]["enum"] == ["repo", "rfc", "domain", "success_criteria"]
+    hard_derivation = hard_item["properties"]["derivation"]
+    hard_implication = hard_item["properties"]["implication"]
+    soft_derivation = soft_item["properties"]["derivation"]
+    assert hard_derivation["properties"]["from"]["enum"] == [
+        "problem",
+        "success_criteria",
+        "non_goals",
+        "repo",
+        "domain",
+    ]
+    assert soft_derivation["properties"]["from"]["enum"] == [
+        "problem",
+        "success_criteria",
+        "non_goals",
+        "repo",
+        "domain",
+    ]
+    assert sorted(hard_item["properties"]) == ["derivation", "implication", "statement"]
+    assert sorted(soft_item["properties"]) == ["derivation", "rationale", "statement"]
+    assert sorted(hard_derivation["properties"]) == ["from", "trace"]
+    assert sorted(soft_derivation["properties"]) == ["from", "trace"]
+    assert sorted(hard_implication["properties"]) == ["must", "must_not"]
 
 
 def test_build_prior_art_map_reads_reference_and_returns_patterns(monkeypatch, tmp_path):
@@ -1178,11 +1265,11 @@ def test_form_technical_approach_runs_full_generation_and_composes_section(monke
         assert context["repo"] == tmp_path.resolve()
         return _normalized_problem()
 
-    def fake_constraints(rfc_view, repo, context=None, normalized_problem=None):
+    def fake_constraints(rfc_view, repo, context=None, approach=None):
         calls.append("extract_constraints")
         assert rfc_view == _rfc_view()
         assert repo == tmp_path.resolve()
-        assert normalized_problem == _normalized_problem()
+        assert approach == {"normalized_problem": _normalized_problem()}
         return _constraints()
 
     def fake_prior_art(rfc_view, repo, context=None, normalized_problem=None):
@@ -1262,6 +1349,10 @@ def test_form_technical_approach_runs_full_generation_and_composes_section(monke
         "right_size_patch_plan": _patch_plan(),
         "surface_risks": _risks(),
     }
+    assert result["approach"] == {
+        "normalized_problem": _normalized_problem(),
+        "constraints": _constraints(),
+    }
 
     technical_approach = result["technical_approach"]
     assert technical_approach["source"] == "generated"
@@ -1306,8 +1397,8 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     monkeypatch.setattr(
         receive_module,
         "_extract_constraints",
-        lambda rfc_view, repo, context=None, normalized_problem=None: (
-            calls.append(("extract_constraints", normalized_problem)) or _constraints()
+        lambda rfc_view, repo, context=None, approach=None: (
+            calls.append(("extract_constraints", approach)) or _constraints()
         ),
     )
     monkeypatch.setattr(
@@ -1361,7 +1452,7 @@ def test_form_technical_approach_uses_provided_approach_as_boundary_basis(monkey
     assert result["ok"] is True
     assert calls == [
         "normalize_problem",
-        ("extract_constraints", _normalized_problem()),
+        ("extract_constraints", {"normalized_problem": _normalized_problem()}),
         "build_prior_art_map",
         "implementation_strategy",
         "right_size_patch_plan",
@@ -1389,7 +1480,7 @@ def test_form_technical_approach_fails_closed_when_a_step_errors(monkeypatch, tm
     monkeypatch.setattr(
         receive_module,
         "_extract_constraints",
-        lambda rfc_view, repo, context=None, normalized_problem=None: {
+        lambda rfc_view, repo, context=None, approach=None: {
             "ok": False,
             "error": "constraint extraction failed",
         },
@@ -1491,16 +1582,25 @@ def _constraints() -> dict[str, object]:
     return {
         "hard_constraints": [
             {
-                "constraint": "Keep RFC receive isolated from patch and merge modules.",
-                "source": "repo",
-                "why": "RFC formation must not import later phases.",
+                "statement": "Keep RFC receive isolated from patch and merge modules.",
+                "derivation": {
+                    "from": "repo",
+                    "trace": "ai_org.rfc.receive must not import ai_org.patch or ai_org.merge.",
+                },
+                "implication": {
+                    "must": "Keep constraint extraction inside ai_org.rfc using codex_exec.run_json.",
+                    "must_not": "Import or call patch and merge phase modules from receive.py.",
+                },
             }
         ],
         "soft_preferences": [
             {
-                "preference": "Reuse existing RFC Codex helper patterns.",
-                "source": "repo",
-                "why": "Steps 1 through 3 already use codex_exec.run_json.",
+                "statement": "Reuse existing RFC Codex helper patterns.",
+                "derivation": {
+                    "from": "repo",
+                    "trace": "Steps 1 through 3 already use codex_exec.run_json.",
+                },
+                "rationale": "The same helper path keeps output handling consistent.",
             }
         ],
     }

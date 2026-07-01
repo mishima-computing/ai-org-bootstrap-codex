@@ -237,10 +237,13 @@ NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
     },
 }
 
-CONSTRAINT_SOURCE_VALUES = ("repo", "rfc", "domain", "success_criteria")
-CONSTRAINT_ITEM_FIELDS = ("constraint", "source", "why")
-PREFERENCE_ITEM_FIELDS = ("preference", "source", "why")
+CONSTRAINT_DERIVATION_VALUES = ("problem", "success_criteria", "non_goals", "repo", "domain")
+CONSTRAINT_DERIVATION_FIELDS = ("from", "trace")
+CONSTRAINT_IMPLICATION_FIELDS = ("must", "must_not")
+CONSTRAINT_ITEM_FIELDS = ("statement", "derivation", "implication")
+PREFERENCE_ITEM_FIELDS = ("statement", "derivation", "rationale")
 EXTRACT_CONSTRAINTS_FIELDS = ("hard_constraints", "soft_preferences")
+MAX_EXTRACT_CONSTRAINTS_REGENERATIONS = 2
 
 EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -255,9 +258,25 @@ EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(CONSTRAINT_ITEM_FIELDS),
                 "properties": {
-                    "constraint": {"type": "string"},
-                    "source": {"type": "string", "enum": list(CONSTRAINT_SOURCE_VALUES)},
-                    "why": {"type": "string"},
+                    "statement": {"type": "string"},
+                    "derivation": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(CONSTRAINT_DERIVATION_FIELDS),
+                        "properties": {
+                            "from": {"type": "string", "enum": list(CONSTRAINT_DERIVATION_VALUES)},
+                            "trace": {"type": "string"},
+                        },
+                    },
+                    "implication": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(CONSTRAINT_IMPLICATION_FIELDS),
+                        "properties": {
+                            "must": {"type": "string"},
+                            "must_not": {"type": "string"},
+                        },
+                    },
                 },
             },
         },
@@ -268,9 +287,17 @@ EXTRACT_CONSTRAINTS_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(PREFERENCE_ITEM_FIELDS),
                 "properties": {
-                    "preference": {"type": "string"},
-                    "source": {"type": "string", "enum": list(CONSTRAINT_SOURCE_VALUES)},
-                    "why": {"type": "string"},
+                    "statement": {"type": "string"},
+                    "derivation": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(CONSTRAINT_DERIVATION_FIELDS),
+                        "properties": {
+                            "from": {"type": "string", "enum": list(CONSTRAINT_DERIVATION_VALUES)},
+                            "trace": {"type": "string"},
+                        },
+                    },
+                    "rationale": {"type": "string"},
                 },
             },
         },
@@ -771,25 +798,50 @@ def _extract_constraints(
     rfc_view: dict[str, Any],
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
-    normalized_problem: Mapping[str, Any] | None = None,
+    approach: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 2 of the documented 10-step Technical Approach procedure."""
-    # Step 2 of 10: extract hard constraints and soft preferences before approach generation.
+    # Step 2 of 10: attach constraints to the accumulated approach before approach generation.
     if not _is_rfc_view(rfc_view):
         return _constraints_error("extract_constraints requires a grounded common-8 RFC view")
 
     repo_path = Path(repo).resolve()
-    run = codex_exec.run_json(
-        repo_path,
-        schema=EXTRACT_CONSTRAINTS_SCHEMA,
-        prompt=_extract_constraints_prompt(rfc_view, repo_path, context, normalized_problem),
-        schema_filename="rfc-extract-constraints.schema.json",
-        output_filename="rfc-extracted-constraints.json",
-        failure_label="Codex constraint extraction",
+    accumulated_approach = _constraints_approach_context(approach)
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_EXTRACT_CONSTRAINTS_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo_path,
+            schema=EXTRACT_CONSTRAINTS_SCHEMA,
+            prompt=_extract_constraints_prompt(
+                rfc_view,
+                repo_path,
+                context,
+                accumulated_approach,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-extract-constraints.schema.json",
+            output_filename="rfc-extracted-constraints.json",
+            failure_label="Codex constraint extraction",
+        )
+        if not run["ok"]:
+            return _constraints_error(run["error"])
+        parsed = _parse_constraints(run["raw"])
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+
+        lint_errors = _lint_constraints(parsed, accumulated_approach)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _constraints_error(
+        "Codex constraint extraction remained invalid after "
+        f"{MAX_EXTRACT_CONSTRAINTS_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _constraints_error(run["error"])
-    return _parse_constraints(run["raw"])
 
 
 def _build_prior_art_map(
@@ -1013,12 +1065,14 @@ def form_technical_approach(
     if failure:
         return failure
     steps["normalize_problem"] = normalized
+    approach: dict[str, Any] = {"normalized_problem": normalized}
 
-    constraints = _extract_constraints(rfc_view, repo_path, approach_context, normalized)
+    constraints = _extract_constraints(rfc_view, repo_path, approach_context, dict(approach))
     failure = _technical_approach_step_failure("extract_constraints", constraints)
     if failure:
         return failure
     steps["extract_constraints"] = constraints
+    approach["constraints"] = constraints
 
     prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, normalized)
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
@@ -1086,6 +1140,7 @@ def form_technical_approach(
             rfc_view=rfc_view,
         ),
         "steps": steps,
+        "approach": approach,
     }
 
 
@@ -1267,32 +1322,49 @@ def _extract_constraints_prompt(
     rfc_view: dict[str, Any],
     repo: Path,
     context: Mapping[str, Any] | None = None,
-    normalized_problem: Mapping[str, Any] | None = None,
+    approach: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
-    normalized_problem_text = json.dumps(
-        normalized_problem or {},
+    approach_text = json.dumps(
+        approach or {},
         indent=2,
         sort_keys=True,
         ensure_ascii=True,
         default=str,
     )
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic validation. Regenerate the whole constraints branch and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
         "You are forming step 2 of AI Org's 10-step Technical Approach procedure: extract constraints.\n"
         "Inspect the repository read-only as needed from the configured repo root. Use the grounded common-8 "
-        "RFC view, step 1 normalized problem, repository architecture, and supplied context to identify "
+        "RFC view, accumulated approach document, repository architecture, and supplied context to identify "
         "constraints only. Do not propose candidate approaches, select an approach, create a patch plan, or "
         "perform later Technical Approach steps.\n\n"
-        "This step must build on step 1. Derive constraints from the distilled normalized problem and from each "
-        "measurable success criterion, especially verifiable_outcome and verification. Treat a success criterion's "
-        "required observable result as a hard constraint when later approaches could violate it. For example, "
-        "a criterion that save reload restores identical state implies a serialization and versioning constraint; "
-        "a criterion that battle resolution follows commands and stats implies a deterministic battle-state "
-        "constraint. Use the raw RFC only as grounding and ambiguity context, not as an independent restart of "
-        "problem discovery.\n\n"
-        "Extract two lists:\n"
+        "This step must attach one nested-tag branch to the accumulated approach document. The accumulated "
+        "document currently contains step 1 as approach.normalized_problem. Derive constraints from that branch, "
+        "including nested success_criteria, and from repository facts. Treat a success criterion's required "
+        "observable result as a hard constraint when later approaches could violate it. For example, a criterion "
+        "that save reload restores identical state implies a persistence and versioning constraint; a criterion "
+        "that battle resolution follows commands and stats implies a deterministic battle-state constraint. Use "
+        "the raw RFC only as grounding and ambiguity context, not as an independent restart of problem discovery.\n\n"
+        "Write English only. Extract two lists:\n"
         "- hard_constraints: must-satisfy constraints that later approaches cannot violate.\n"
         "- soft_preferences: nice-to-have preferences that should influence trade-offs but may be outweighed.\n\n"
+        "Each hard constraint item must include statement, derivation {from, trace}, and implication {must, "
+        "must_not}. Each soft preference item must include statement, derivation {from, trace}, and rationale. "
+        "Set derivation.from to exactly one of: problem, success_criteria, non_goals, repo, domain. If a "
+        "constraint or preference comes from a success criterion, derivation.from must be success_criteria and "
+        "derivation.trace must name the specific criterion or nested criterion slot, such as "
+        "success_criteria[0].verifiable_outcome.expected_state. Do not leave statement, derivation.trace, "
+        "implication.must, implication.must_not, or rationale empty; when a prohibition is implicit, state the "
+        "forbidden class of change in must_not.\n\n"
         "Cover these areas when evidence exists:\n"
         "- repository architecture and module boundaries.\n"
         "- backward compatibility and public/interface compatibility.\n"
@@ -1300,18 +1372,13 @@ def _extract_constraints_prompt(
         "- performance, security, reliability, operability, and migration requirements.\n"
         "- test constraints, existing coverage style, and verification expectations.\n"
         "- delivery scope, non-goals, rollout boundaries, and documentation expectations.\n\n"
-        "For each item, set source to exactly one of: repo, rfc, domain, success_criteria. Use repo for "
-        "constraints observed in code, tests, docs, or project structure; rfc for constraints inherited from "
-        "the distilled normalized problem, non-goals, or grounded RFC context; success_criteria for constraints "
-        "derived from a measurable success criterion; and domain for generally applicable engineering, security, "
-        "reliability, or compatibility constraints. The why field must briefly explain the evidence or reason "
-        "and cite the normalized problem field or success criterion behind the constraint when applicable. "
         "Return an empty list when no defensible items exist for a category; do not invent unsupported "
         "constraints.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
-        + f"\nStep 1 normalized problem:\n{normalized_problem_text}\n"
+        + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nRepository root:\n{repo}\n"
         + f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1896,7 +1963,7 @@ def _parse_constraints(raw: str) -> dict[str, Any]:
         parsed.get("hard_constraints"),
         field="hard_constraints",
         item_fields=CONSTRAINT_ITEM_FIELDS,
-        text_field="constraint",
+        kind="hard",
     )
     if isinstance(hard_constraints, dict) and hard_constraints.get("ok") is False:
         return hard_constraints
@@ -1905,7 +1972,7 @@ def _parse_constraints(raw: str) -> dict[str, Any]:
         parsed.get("soft_preferences"),
         field="soft_preferences",
         item_fields=PREFERENCE_ITEM_FIELDS,
-        text_field="preference",
+        kind="soft",
     )
     if isinstance(soft_preferences, dict) and soft_preferences.get("ok") is False:
         return soft_preferences
@@ -1921,29 +1988,131 @@ def _parse_constraint_items(
     *,
     field: str,
     item_fields: tuple[str, ...],
-    text_field: str,
-) -> list[dict[str, str]] | dict[str, Any]:
+    kind: str,
+) -> list[dict[str, Any]] | dict[str, Any]:
     if not isinstance(value, list):
         return _constraints_error(f"Codex constraint extraction returned invalid {field}")
 
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             return _constraints_error(f"Codex constraint extraction returned invalid {field} item")
         if set(item) != set(item_fields):
             return _constraints_error(f"Codex constraint extraction returned invalid {field} item fields")
-        if not all(isinstance(item[prop], str) for prop in item_fields):
+        statement = item.get("statement")
+        derivation = _parse_constraint_derivation(item.get("derivation"))
+        if derivation is None:
+            return _constraints_error(f"Codex constraint extraction returned invalid {field} derivation")
+        if not isinstance(statement, str):
             return _constraints_error(f"Codex constraint extraction returned invalid {field} item values")
-        if item["source"] not in CONSTRAINT_SOURCE_VALUES:
-            return _constraints_error(f"Codex constraint extraction returned invalid {field} source")
-        items.append(
-            {
-                text_field: item[text_field],
-                "source": item["source"],
-                "why": item["why"],
-            }
-        )
+        if kind == "hard":
+            implication = _parse_constraint_implication(item.get("implication"))
+            if implication is None:
+                return _constraints_error(f"Codex constraint extraction returned invalid {field} implication")
+            items.append(
+                {
+                    "statement": statement,
+                    "derivation": derivation,
+                    "implication": implication,
+                }
+            )
+        else:
+            rationale = item.get("rationale")
+            if not isinstance(rationale, str):
+                return _constraints_error(f"Codex constraint extraction returned invalid {field} item values")
+            items.append(
+                {
+                    "statement": statement,
+                    "derivation": derivation,
+                    "rationale": rationale,
+                }
+            )
     return items
+
+
+def _parse_constraint_derivation(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(CONSTRAINT_DERIVATION_FIELDS):
+        return None
+    source = value.get("from")
+    trace = value.get("trace")
+    if source not in CONSTRAINT_DERIVATION_VALUES or not isinstance(trace, str):
+        return None
+    return {"from": source, "trace": trace}
+
+
+def _parse_constraint_implication(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(CONSTRAINT_IMPLICATION_FIELDS):
+        return None
+    must = value.get("must")
+    must_not = value.get("must_not")
+    if not isinstance(must, str) or not isinstance(must_not, str):
+        return None
+    return {"must": must, "must_not": must_not}
+
+
+def _constraints_approach_context(approach: Mapping[str, Any] | None) -> dict[str, Any]:
+    if approach is None:
+        return {}
+    if "normalized_problem" in approach:
+        return dict(approach)
+    if set(approach) == set(NORMALIZED_PROBLEM_FIELDS):
+        return {"normalized_problem": dict(approach)}
+    return dict(approach)
+
+
+def _lint_constraints(parsed: Mapping[str, Any], approach: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for path, value in _walk_normalized_problem_strings(parsed):
+        if not value.strip():
+            errors.append(f"{path} is empty")
+        if _contains_japanese_script(value):
+            errors.append(f"{path} must be English-only")
+
+    success_trace_phrases = _success_criterion_trace_phrases(approach)
+    for field in EXTRACT_CONSTRAINTS_FIELDS:
+        value = parsed.get(field)
+        if not isinstance(value, list):
+            continue
+        for index, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                continue
+            derivation = item.get("derivation")
+            if not isinstance(derivation, Mapping):
+                continue
+            source = derivation.get("from")
+            trace = derivation.get("trace")
+            if source != "success_criteria" or not isinstance(trace, str):
+                continue
+            if not _trace_mentions_success_criterion(trace, success_trace_phrases):
+                errors.append(f"{field}[{index}].derivation.trace must identify a specific success criterion")
+    return errors
+
+
+def _success_criterion_trace_phrases(approach: Mapping[str, Any]) -> set[str]:
+    normalized = approach.get("normalized_problem") if isinstance(approach, Mapping) else None
+    if not isinstance(normalized, Mapping):
+        return set()
+    criteria = normalized.get("success_criteria")
+    if not isinstance(criteria, list):
+        return set()
+
+    phrases: set[str] = set()
+    for index, criterion in enumerate(criteria):
+        phrases.add(f"success_criteria[{index}]")
+        if not isinstance(criterion, Mapping):
+            continue
+        for _, value in _walk_normalized_problem_strings(criterion):
+            canonical = _canonical_phrase(value)
+            if canonical:
+                phrases.add(canonical)
+    return phrases
+
+
+def _trace_mentions_success_criterion(trace: str, phrases: set[str]) -> bool:
+    canonical_trace = _canonical_phrase(trace)
+    if "success_criteria[" in trace or "success criterion" in canonical_trace:
+        return True
+    return any(phrase and phrase in canonical_trace for phrase in phrases)
 
 
 def _constraints_error(reason: str) -> dict[str, Any]:
