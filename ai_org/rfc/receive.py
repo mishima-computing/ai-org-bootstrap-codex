@@ -32,6 +32,24 @@
 # repo search -> extract -> strict delta-over-baseline -> distill), appending (never deleting) what it finds.
 # This is the Reference super-module's "step 1 = build at RFC-receive time"; leaves later READ that Reference,
 # and top up on a miss. The store is off-git and grows with use. The actual call is not wired in yet.
+#
+# TECHNICAL APPROACH — where the design is FORMED (TODO build; grounded in the Linux/RFC review research):
+# "propose the approach" and "review the approach" are DISTINCT. Review CRITIQUES a submitted design; it must
+# NOT be the first place the approach is created (Rust RFCs / PEPs / IETF I-Ds all post a design that review
+# reshapes). So the RFC must arrive at review already carrying a Technical Approach. That approach is formed
+# HERE, at receive, and it is the BOUNDARY between the requester and the AI Org:
+#     Technical Approach present in the request?
+#       YES -> use it as the basis (ground/refine with the Reference + repo context; do NOT discard the
+#              requester's approach). Partial -> fill only the gaps.
+#       NO  -> the AI Org GENERATES it (Reference-driven: use the Reference's implementation knowledge to
+#              propose HOW to build it, labelled as PROPOSAL, not fact).
+# GOAL: usable by a layperson (an amateur will not supply a Technical Approach -> the AI Org generates it).
+# But even for an amateur, receive does NOT silently decide everything: when it generates the approach it
+# also ASKS QUESTIONS BACK — surface the pivotal decisions/assumptions and return them for confirm/correct
+# (this is the existing needs_confirmation "propose a guess, ask 'is this right?'" path, EXTENDED to the
+# technical-approach decisions). The amateur steers by ANSWERING (intent/preferences), not by AUTHORING.
+# The formed Technical Approach carries: problem/impact, reference-derived prior-art, implementation strategy,
+# alternatives-with-why-not, compatibility/migration, testing plan, scope/patch plan, open questions.
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 

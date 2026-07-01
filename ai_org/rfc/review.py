@@ -30,6 +30,21 @@ aufheben revises, the five re-critique); only convergence (OK) and non-convergen
 
 The loop/orchestration below is real; the reviewer and aufheben calls run Codex directly.
 """
+# REVIEW RE-DERIVATION (grounded; TODO — the docstring above describes the earlier INVENTED framework):
+# The fixed "5 named reviewers + Aufheben + direction-ok/nak" was made up, not derived from real Linux review.
+# The review research re-derives it from practice (SubmittingPatches / reviewer guidelines / -next / Reviewed-by
+# & Nacked-by dynamics; Rust RFC / PEP / IETF for proposal review):
+#   SURVIVES: need / approach / compat / scope / maintenance as review AXES (concerns to weigh), and a synthesis
+#             = JUDGMENT function (someone integrates the comments and decides the next outcome).
+#   DROP:     fixed reviewer SLOTS (one Codex agent per concern); the assumption each concern needs a separate
+#             reviewer; review-as-CHECKLIST-SCORING; letting REVIEW INVENT the approach after intake (the
+#             Technical Approach is formed at RECEIVE — see receive.py); treating patch-HYGIENE feedback (style,
+#             mechanics) as equivalent to DIRECTION feedback (hygiene belongs to the later patch stage).
+#   PRESUPPOSES: review CRITIQUES a submitted Technical Approach; it does not create it.
+#   OUTCOMES (richer than ok/nak): accept-direction | revise-RFC | needs-design | reject(NACK) | defer |
+#             fast-track-hygiene.
+#   HONEST: Linux does not prove design acceptability by a checklist — the maintainer JUDGES (argument, evidence,
+#           reviewers, long-term cost). Structured review exists to make that judgment BETTER, not unnecessary.
 from __future__ import annotations
 
 import json
