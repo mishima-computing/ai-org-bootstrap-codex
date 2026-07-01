@@ -25,6 +25,13 @@
 #
 # Shape (to match the other stages): validate the request -> codex grounds it -> git-write the
 # promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
+#
+# REFERENCE UPDATE (TODO wiring — memo only for now): when an RFC is received/promoted here, that event
+# FIRES a Reference update. The RFC's meaningful implementation terms feed ai_org.reference.build_from_rfc,
+# which looks up each term in the org-level knowledge store and, on a miss, expands it (language-agnostic
+# repo search -> extract -> strict delta-over-baseline -> distill), appending (never deleting) what it finds.
+# This is the Reference super-module's "step 1 = build at RFC-receive time"; leaves later READ that Reference,
+# and top up on a miss. The store is off-git and grows with use. The actual call is not wired in yet.
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 
