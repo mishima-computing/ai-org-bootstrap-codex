@@ -85,6 +85,8 @@ import subprocess
 import tempfile
 from typing import Any, Mapping
 
+import ai_org.rfc.codex_exec as codex_exec
+
 
 COMMON_8_FIELDS = (
     "title",
@@ -150,6 +152,28 @@ GROUNDING_VERDICT_SCHEMA: dict[str, Any] = {
         "non_legal": {"type": "boolean"},
         "latest_default": {"type": "boolean"},
         "reasons": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+NORMALIZED_PROBLEM_FIELDS = (
+    "problem",
+    "affected",
+    "current_inadequacy",
+    "success_criteria",
+    "non_goals",
+)
+
+NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(NORMALIZED_PROBLEM_FIELDS),
+    "properties": {
+        "problem": {"type": "string"},
+        "affected": {"type": "string"},
+        "current_inadequacy": {"type": "string"},
+        "success_criteria": {"type": "array", "items": {"type": "string"}},
+        "non_goals": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -310,6 +334,25 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
     }
 
 
+def _normalize_problem(rfc_view: dict[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Form step 1 of the documented 10-step Technical Approach procedure."""
+    if not _is_rfc_view(rfc_view):
+        return _normalized_problem_error("normalize_problem requires a grounded common-8 RFC view")
+
+    repo = _repo_from_context(context)
+    run = codex_exec.run_json(
+        repo,
+        schema=NORMALIZE_PROBLEM_SCHEMA,
+        prompt=_normalize_problem_prompt(rfc_view, context),
+        schema_filename="rfc-normalize-problem.schema.json",
+        output_filename="rfc-normalized-problem.json",
+        failure_label="Codex problem normalization",
+    )
+    if not run["ok"]:
+        return _normalized_problem_error(run["error"])
+    return _parse_normalized_problem(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -442,6 +485,62 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         + _format_rfc("Current request common-8", _rfc_to_view(rfc_view))
         + "\nReturn only JSON matching the provided schema."
     )
+
+
+def _normalize_problem_prompt(rfc_view: dict[str, Any], context: Mapping[str, Any] | None = None) -> str:
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    return (
+        "You are forming step 1 of AI Org's 10-step Technical Approach procedure: normalize the problem.\n"
+        "Use the grounded common-8 RFC view and repository context only to restate the problem clearly. "
+        "Do not propose an implementation approach, alternatives, patch plan, reviewer decision, or later "
+        "Technical Approach steps.\n\n"
+        "Return these fields:\n"
+        "- problem: the core problem, restated crisply.\n"
+        "- affected: affected users, operators, contributors, systems, modules, or workflows.\n"
+        "- current_inadequacy: what is missing or where the current state falls short.\n"
+        "- success_criteria: checkable statements for what solved looks like.\n"
+        "- non_goals: explicit boundaries that should remain out of scope for this RFC.\n\n"
+        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _parse_normalized_problem(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _normalized_problem_error(f"Codex problem normalization returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _normalized_problem_error("Codex problem normalization returned non-object JSON")
+    if set(parsed) != set(NORMALIZED_PROBLEM_FIELDS):
+        return _normalized_problem_error("Codex problem normalization returned invalid fields")
+    if not all(isinstance(parsed[field], str) for field in ("problem", "affected", "current_inadequacy")):
+        return _normalized_problem_error("Codex problem normalization returned invalid string fields")
+    for field in ("success_criteria", "non_goals"):
+        value = parsed.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return _normalized_problem_error(f"Codex problem normalization returned invalid {field}")
+    return {
+        "problem": parsed["problem"],
+        "affected": parsed["affected"],
+        "current_inadequacy": parsed["current_inadequacy"],
+        "success_criteria": list(parsed["success_criteria"]),
+        "non_goals": list(parsed["non_goals"]),
+    }
+
+
+def _normalized_problem_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _repo_from_context(context: Mapping[str, Any] | None = None) -> Path:
+    if isinstance(context, Mapping):
+        repo = context.get("repo_root") or context.get("repo")
+        if repo:
+            return Path(str(repo)).resolve()
+    return Path.cwd().resolve()
 
 
 def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> GroundingResult:
