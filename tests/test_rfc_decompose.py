@@ -211,7 +211,7 @@ def _child(
 ) -> dict[str, object]:
     data = _rfc(title, f"{title} is needed as a coherent child RFC.")
     data["tech_stack"] = {
-        "build_strategy": "framework_based",
+        "build_strategy": "",
         "engine": "",
         "framework": "",
         "language": "",

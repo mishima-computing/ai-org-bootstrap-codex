@@ -189,6 +189,10 @@ def test_tech_stack_provenance_controls_candidate_generation(monkeypatch, tmp_pa
     rfc = _rfc_view()
     rfc["tech_stack"] = {
         **rfc["tech_stack"],
+        "build_strategy": "framework_based",
+        "framework": "repo-native Python modules",
+        "language": "Python",
+        "platform": "CLI",
         "rationale": "The requester specified the repository-native Python stack.",
         "provenance": "requester_specified",
     }
@@ -227,6 +231,9 @@ def test_unspecified_tech_stack_is_ai_deliberated_after_generated_selection(monk
     result = receive_module.form_technical_approach(rfc, tmp_path, skip_reference_build=True, reference_terms=[])
 
     assert result["ok"] is True
+    assert rfc["tech_stack"]["build_strategy"] == "framework_based"
+    assert rfc["tech_stack"]["framework"] == "Repo Native"
+    assert rfc["tech_stack"]["engine"] == ""
     assert rfc["tech_stack"]["provenance"] == "ai_deliberated"
     assert rfc["tech_stack"]["rationale"]
 
@@ -1019,11 +1026,11 @@ def _rfc_view() -> dict[str, object]:
         "desired_outcomes_success": "A named enemy can be defeated with a named spell and progress is recorded.",
         "affected_area_platform": "gameplay",
         "tech_stack": {
-            "build_strategy": "framework_based",
+            "build_strategy": "",
             "engine": "",
-            "framework": "repo-native game modules",
-            "language": "Python",
-            "platform": "CLI",
+            "framework": "",
+            "language": "",
+            "platform": "",
             "rationale": "No stack was specified; candidate generation should choose a stack.",
             "provenance": "unspecified",
         },

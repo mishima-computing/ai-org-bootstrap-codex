@@ -80,6 +80,22 @@ def test_tech_stack_structured_field_validates():
     assert receive_module._is_rfc_view(rfc) is False
 
 
+def test_validate_tech_stack_unspecified_requires_empty_choice_fields():
+    unspecified = {
+        "build_strategy": "",
+        "engine": "",
+        "framework": "",
+        "language": "",
+        "platform": "",
+        "rationale": "",
+        "provenance": "unspecified",
+    }
+
+    assert receive_module.validate_tech_stack(unspecified)
+    assert not receive_module.validate_tech_stack({**unspecified, "build_strategy": "framework_based"})
+    assert not receive_module.validate_tech_stack({**unspecified, "engine": "Unity"})
+
+
 def test_receive_preserves_extra_keys():
     assert receive(
         {
@@ -457,7 +473,9 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
 
     result = intake(request, repo)
 
-    assert result["status"] == "needs_confirmation"
+    assert result["ok"] is False
+    assert result["status"] == "needs_work"
+    assert result["failed_step"] == "grounding"
     assert result["proposed_rfc"] == bad_grounding
     assert "violations" in result
     assert any("C1 faithfulness/specificity" in violation for violation in result["violations"])
@@ -468,6 +486,63 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     assert verifier_calls == 3
     assert "Your previous grounding violated" in grounding_prompts[1]
     assert "branch" not in result
+
+
+def test_grounding_empty_required_field_regrounds_before_promotion(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive(
+        {
+            "raw_request": "Add a dashboard for RFC intake health.",
+        }
+    )
+    incomplete = _rfc_view(
+        "",
+        raw_request=request["raw_request"],
+        problem_or_motivation="RFC intake needs visible health signals.",
+        desired_outcomes_success="A dashboard summarizes intake health.",
+    )
+    complete = _rfc_view(
+        "RFC Intake Health Dashboard",
+        raw_request=request["raw_request"],
+        problem_or_motivation="RFC intake needs visible health signals.",
+        desired_outcomes_success="A dashboard summarizes intake health.",
+    )
+    grounding_calls = 0
+    grounding_prompts = []
+
+    def handler(cmd):
+        nonlocal grounding_calls
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+
+        grounding_calls += 1
+        grounding_prompts.append(cmd[-1])
+        return {
+            "confident": True,
+            "proposed_rfc": incomplete if grounding_calls == 1 else complete,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounded RFC intake health dashboard.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+    _install_successful_approach_pipeline(monkeypatch)
+
+    result = intake(request, repo)
+
+    assert result["status"] == "promoted"
+    assert result["id"] == "rfc-intake-health-dashboard"
+    assert grounding_calls == 2
+    assert "working_title" in grounding_prompts[1]
+    assert "rfc_handoff string fields must be non-empty" in grounding_prompts[1]
+    assert json.loads(_git(repo, "show", "ai-org/rfc/rfc-intake-health-dashboard:rfc.json")) == complete
 
 
 def test_grounding_and_verifier_schemas_are_codex_valid_registry():
@@ -484,6 +559,8 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
     assert schema_rfc["properties"]["tech_stack"]["required"] == list(receive_module.TECH_STACK_FIELDS)
+    assert schema_rfc["properties"]["working_title"]["minLength"] == 1
+    assert schema_rfc["properties"]["problem_or_motivation"]["minLength"] == 1
     assert schema_rfc["properties"]["grounding_provenance"]["description"]["must_not"] == (
         "content consumed downstream as product requirement nouns"
     )
@@ -625,3 +702,6 @@ def _assert_prompt_preserves_named_thing_specificity(prompt: str) -> None:
     assert "Default to the latest or current version" in prompt
     assert "unless the request explicitly asks for a retro, classic, old, vintage" in prompt
     assert "games should target the current experience, modern graphics, scope, and conventions" in prompt
+    assert "required_at=rfc_handoff" in prompt
+    assert "working_title" in prompt
+    assert "short noun phrase naming the deliverable" in prompt

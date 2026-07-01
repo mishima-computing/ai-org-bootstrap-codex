@@ -959,6 +959,16 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
     raw_rfc = _entrance_request(validated_request)
     repo_path = Path(repo).resolve()
     grounding = _ground_with_contract(repo_path, raw_rfc)
+    if grounding.violations:
+        return {
+            "ok": False,
+            "status": "needs_work",
+            "error": "Grounding contract violations remain unresolved after verification.",
+            "failed_step": "grounding",
+            "proposed_rfc": grounding.rfc_view,
+            "grounding_notes": grounding.grounding_notes,
+            "violations": grounding.violations,
+        }
     # Memento: needs_confirmation is default-off because autonomy is the AI Org's differentiator; the
     # confirm-back loop is deferred to the roadmap end. Preserve assumptions/open questions non-blocking.
     if not grounding.confident and _require_confirmation():
@@ -1654,7 +1664,7 @@ def form_technical_approach(
         )
         mark_step_completed("select_approach", started_at, partial_tree)
         source = "generated"
-        _fill_ai_deliberated_tech_stack(rfc_view, selected)
+        _fill_ai_deliberated_tech_stack(rfc_view, selected, candidates)
     else:
         started_at = start_step()
         steps["provided_approach"] = _json_safe(effective_provided_approach)
@@ -1902,7 +1912,9 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "Fill proposed_rfc from this registry. Each field's must_not is an anti-dumping gate: content matching "
         "must_not belongs elsewhere or nowhere. Research prose and audit trail go in grounding_provenance, not "
         "requirement fields; bounded domain facts go in background_facts; requester solution ideas go in "
-        "proposal_hint; genuine blockers go in open_questions.\n\n"
+        "proposal_hint; genuine blockers go in open_questions. Every field marked required_at=rfc_handoff "
+        "must be filled with a non-empty value when it is a string. In particular, produce a concise "
+        "working_title derived from the request, such as a short noun phrase naming the deliverable.\n\n"
         f"{registry_text}\n"
         + _format_rfc("Current request registry view", _rfc_to_view(rfc_view))
         + "\nReturn only JSON matching the provided schema."
@@ -3693,16 +3705,51 @@ def _provided_approach_from_tech_stack(rfc_view: Mapping[str, Any]) -> dict[str,
     }
 
 
-def _fill_ai_deliberated_tech_stack(rfc_view: dict[str, Any], selected: Mapping[str, Any]) -> None:
+def _fill_ai_deliberated_tech_stack(
+    rfc_view: dict[str, Any],
+    selected: Mapping[str, Any],
+    candidates: Mapping[str, Any] | None = None,
+) -> None:
     tech_stack = rfc_view.get("tech_stack")
     if not isinstance(tech_stack, dict) or tech_stack.get("provenance") != "unspecified":
         return
     rationale = _selected_approach_rationale(selected)
+    selected_candidate = _selected_candidate(selected, candidates)
+    build_strategy, engine, framework = _tech_stack_choice_from_candidate(selected_candidate)
+    tech_stack["build_strategy"] = build_strategy
+    tech_stack["engine"] = engine
+    tech_stack["framework"] = framework
     tech_stack["provenance"] = "ai_deliberated"
     tech_stack["rationale"] = (
         rationale
         or "No stack was specified by the requester; approach formation selected the build stack after comparing available engine/framework/platform candidates."
     )
+
+
+def _selected_candidate(selected: Mapping[str, Any], candidates: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    selected_id = selected.get("selected_candidate_id")
+    if not isinstance(selected_id, str) or not isinstance(candidates, Mapping):
+        return None
+    for candidate in candidates.get("candidates", []):
+        if isinstance(candidate, Mapping) and candidate.get("id") == selected_id:
+            return candidate
+    return None
+
+
+def _tech_stack_choice_from_candidate(candidate: Mapping[str, Any] | None) -> tuple[str, str, str]:
+    if not isinstance(candidate, Mapping):
+        return ("framework_based", "", "Selected Technical Approach")
+    text = " ".join(
+        str(candidate.get(field, ""))
+        for field in ("id", "name", "kind", "summary")
+        if isinstance(candidate.get(field, ""), str)
+    ).lower()
+    if "from scratch" in text or "from_scratch" in text:
+        return ("from_scratch", "", "")
+    name = str(candidate.get("name") or candidate.get("id") or "Selected Technical Approach").strip()
+    if "engine" in text or str(candidate.get("kind", "")) == "general_architectural":
+        return ("engine_based", name, "")
+    return ("framework_based", "", name)
 
 
 def _selected_approach_rationale(selected: Mapping[str, Any]) -> str:
@@ -4238,6 +4285,17 @@ def _lint_grounding(
 ) -> list[str]:
     text = _grounding_text(rfc_view, grounding_result)
     violations: list[str] = []
+
+    empty_required_fields = [
+        field
+        for field in RFC_HANDOFF_REQUIRED_FIELDS
+        if field in STRING_FIELDS and isinstance(rfc_view.get(field), str) and not rfc_view[field].strip()
+    ]
+    if empty_required_fields:
+        violations.append(
+            "C0 required-field completeness lint: rfc_handoff string fields must be non-empty: "
+            + ", ".join(empty_required_fields)
+        )
 
     generalizers = _matching_markers(text, GENERALIZER_MARKERS)
     if generalizers:

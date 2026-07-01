@@ -7,7 +7,8 @@ from typing import Any, Mapping
 
 FIELD_OWNERS = ("requester", "grounding", "either")
 REQUIRED_AT_VALUES = ("entrance", "rfc_handoff", "optional")
-TECH_STACK_BUILD_STRATEGIES = ("engine_based", "framework_based", "from_scratch")
+TECH_STACK_BUILD_STRATEGIES = ("", "engine_based", "framework_based", "from_scratch")
+TECH_STACK_CONCRETE_BUILD_STRATEGIES = ("engine_based", "framework_based", "from_scratch")
 TECH_STACK_PROVENANCE = ("requester_specified", "ai_deliberated", "unspecified")
 TECH_STACK_FIELDS = (
     "build_strategy",
@@ -206,7 +207,10 @@ def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
                 "provenance": {"type": "string", "enum": list(TECH_STACK_PROVENANCE)},
             },
         }
-    return {"type": "string", "description": entry.description}
+    schema: dict[str, Any] = {"type": "string", "description": entry.description}
+    if entry.required_at == "rfc_handoff":
+        schema["minLength"] = 1
+    return schema
 
 
 def rfc_view_schema() -> dict[str, Any]:
@@ -220,7 +224,7 @@ def rfc_view_schema() -> dict[str, Any]:
 
 def empty_tech_stack() -> dict[str, str]:
     return {
-        "build_strategy": "framework_based",
+        "build_strategy": "",
         "engine": "",
         "framework": "",
         "language": "",
@@ -265,9 +269,13 @@ def validate_tech_stack(value: object, *, require_choice: bool = True) -> bool:
         return False
     if value["provenance"] not in TECH_STACK_PROVENANCE:
         return False
+    if value["provenance"] == "unspecified":
+        unspecified_choice_fields = ("build_strategy", "engine", "framework", "language", "platform")
+        return all(not value[field].strip() for field in unspecified_choice_fields)
+    if value["build_strategy"] not in TECH_STACK_CONCRETE_BUILD_STRATEGIES:
+        return False
     if require_choice and value["provenance"] != "unspecified" and not value["rationale"].strip():
         return False
     if value["build_strategy"] == "from_scratch" and not value["rationale"].strip():
         return False
     return True
-
