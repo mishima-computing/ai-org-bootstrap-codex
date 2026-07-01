@@ -85,6 +85,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping
 
 import ai_org.reference as reference
@@ -1420,6 +1421,7 @@ def form_technical_approach(
     repo: str | Path,
     context: Mapping[str, Any] | None = None,
     provided_approach: Any | None = None,
+    progress_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Form step 10 of the documented 10-step Technical Approach procedure."""
     # Step 10 of 10: the orchestrator + requester/AI-Org boundary.
@@ -1433,29 +1435,52 @@ def form_technical_approach(
     repo_path = Path(repo).resolve()
     approach_context = _technical_approach_context(context, repo_path)
     steps: dict[str, Any] = {}
+    step_order = _technical_approach_step_order(provided_approach)
+    steps_completed: list[dict[str, Any]] = []
 
+    def start_step() -> float:
+        return time.monotonic() if progress_path is not None else 0.0
+
+    def mark_step_completed(step: str, started_at: float, tree: Mapping[str, Any]) -> None:
+        if progress_path is None:
+            return
+        steps_completed.append({"step": step, "seconds": time.monotonic() - started_at})
+        _write_technical_approach_progress(
+            progress_path,
+            tree,
+            steps_completed,
+            _next_technical_approach_step(step_order, step),
+        )
+
+    started_at = start_step()
     normalized = _normalize_problem(rfc_view, approach_context)
     failure = _technical_approach_step_failure("normalize_problem", normalized)
     if failure:
         return failure
     steps["normalize_problem"] = normalized
     partial_tree: dict[str, Any] = {"problem": _problem_root_from_normalized(normalized)}
+    mark_step_completed("normalize_problem", started_at, partial_tree)
 
+    started_at = start_step()
     constraints = _extract_constraints(rfc_view, repo_path, approach_context, dict(partial_tree))
     failure = _technical_approach_step_failure("extract_constraints", constraints)
     if failure:
         return failure
     steps["extract_constraints"] = constraints
     partial_tree["problem"]["constraints"] = _constraint_tree_nodes(constraints)
+    mark_step_completed("extract_constraints", started_at, partial_tree)
 
+    started_at = start_step()
     prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, dict(partial_tree))
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
     if failure:
         return failure
     steps["build_prior_art_map"] = prior_art
     partial_tree["problem"]["prior_art"] = _prior_art_tree_nodes(prior_art)
+    mark_step_completed("build_prior_art_map", started_at, partial_tree)
 
     if provided_approach is None:
+        started_at = start_step()
         candidates = _generate_candidates(
             normalized,
             constraints,
@@ -1468,7 +1493,9 @@ def form_technical_approach(
             return failure
         steps["generate_candidates"] = candidates
         partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates)
+        mark_step_completed("generate_candidates", started_at, partial_tree)
 
+        started_at = start_step()
         evaluations = _evaluate_candidates(
             candidates,
             normalized,
@@ -1481,7 +1508,9 @@ def form_technical_approach(
             return failure
         steps["evaluate_candidates"] = evaluations
         partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates, evaluations=evaluations)
+        mark_step_completed("evaluate_candidates", started_at, partial_tree)
 
+        started_at = start_step()
         selected = _select_approach(
             candidates,
             evaluations,
@@ -1498,8 +1527,10 @@ def form_technical_approach(
             evaluations=evaluations,
             selected=selected,
         )
+        mark_step_completed("select_approach", started_at, partial_tree)
         source = "generated"
     else:
+        started_at = start_step()
         steps["provided_approach"] = _json_safe(provided_approach)
         candidates = None
         evaluations = None
@@ -1509,8 +1540,10 @@ def form_technical_approach(
             selected=selected,
             provided_approach=provided_approach,
         )
+        mark_step_completed("select_approach", started_at, partial_tree)
         source = "requester_provided_refined"
 
+    started_at = start_step()
     implementation = _implementation_strategy(
         selected,
         prior_art,
@@ -1531,7 +1564,9 @@ def form_technical_approach(
         implementation=implementation,
         provided_approach=provided_approach,
     )
+    mark_step_completed("implementation_strategy", started_at, partial_tree)
 
+    started_at = start_step()
     patch_plan = _right_size_patch_plan(
         selected,
         implementation,
@@ -1551,7 +1586,9 @@ def form_technical_approach(
         patch_plan=patch_plan,
         provided_approach=provided_approach,
     )
+    mark_step_completed("right_size_patch_plan", started_at, partial_tree)
 
+    started_at = start_step()
     risks = _surface_risks(
         selected,
         implementation,
@@ -1572,6 +1609,18 @@ def form_technical_approach(
             "error": risk_target_failure,
             "failed_step": "surface_risks",
         }
+
+    partial_tree["problem"]["question"] = _question_tree(
+        selected,
+        candidates,
+        evaluations,
+        implementation,
+        patch_plan,
+        risks,
+        [],
+        provided_approach=provided_approach,
+    )
+    mark_step_completed("surface_risks", started_at, partial_tree)
 
     return {
         "ok": True,
@@ -3409,6 +3458,59 @@ def _technical_approach_context(context: Mapping[str, Any] | None, repo: Path) -
     approach_context.setdefault("repo", repo)
     approach_context.setdefault("repo_root", repo)
     return approach_context
+
+
+def _technical_approach_step_order(provided_approach: Any | None) -> list[str]:
+    middle_steps = (
+        ["generate_candidates", "evaluate_candidates", "select_approach"]
+        if provided_approach is None
+        else ["select_approach"]
+    )
+    return [
+        "normalize_problem",
+        "extract_constraints",
+        "build_prior_art_map",
+        *middle_steps,
+        "implementation_strategy",
+        "right_size_patch_plan",
+        "surface_risks",
+    ]
+
+
+def _next_technical_approach_step(step_order: list[str], completed_step: str) -> str | None:
+    try:
+        completed_index = step_order.index(completed_step)
+    except ValueError:
+        return None
+    next_index = completed_index + 1
+    if next_index >= len(step_order):
+        return None
+    return step_order[next_index]
+
+
+def _write_technical_approach_progress(
+    progress_path: str | Path,
+    partial_tree: Mapping[str, Any],
+    steps_completed: list[Mapping[str, Any]],
+    current_step: str | None,
+) -> None:
+    safe_steps = [
+        {"step": str(step.get("step", "")), "seconds": float(step.get("seconds", 0.0))}
+        for step in steps_completed
+    ]
+    snapshot = {
+        "technical_approach": _approach_snapshot(partial_tree),
+        "steps_completed": safe_steps,
+        "current_step": current_step,
+        "progress": {
+            "steps_done": [step["step"] for step in safe_steps],
+            "steps_completed": safe_steps,
+            "current_step": current_step,
+        },
+    }
+    path = Path(progress_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, indent=2, default=str, sort_keys=True), encoding="utf-8")
 
 
 def _technical_approach_step_failure(step: str, result: Any) -> dict[str, Any] | None:

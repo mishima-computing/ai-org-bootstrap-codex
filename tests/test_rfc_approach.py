@@ -163,6 +163,98 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     ]
 
 
+def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypatch, tmp_path):
+    _patch_successful_approach_steps(monkeypatch)
+    ticks = iter(float(value) for value in range(100))
+    monkeypatch.setattr(receive_module.time, "monotonic", lambda: next(ticks))
+
+    progress_path = tmp_path / "progress" / "technical-approach.json"
+    original_writer = receive_module._write_technical_approach_progress
+    snapshots = []
+
+    def recording_writer(path, partial_tree, steps_completed, current_step):
+        original_writer(path, partial_tree, steps_completed, current_step)
+        snapshots.append(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(receive_module, "_write_technical_approach_progress", recording_writer)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path, progress_path=progress_path)
+
+    expected_steps = [
+        "normalize_problem",
+        "extract_constraints",
+        "build_prior_art_map",
+        "generate_candidates",
+        "evaluate_candidates",
+        "select_approach",
+        "implementation_strategy",
+        "right_size_patch_plan",
+        "surface_risks",
+    ]
+    assert result["ok"] is True
+    assert len(snapshots) == len(expected_steps)
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == snapshots[-1]
+
+    for index, snapshot in enumerate(snapshots):
+        completed = snapshot["steps_completed"]
+        expected_completed = expected_steps[: index + 1]
+        expected_current = expected_steps[index + 1] if index + 1 < len(expected_steps) else None
+        assert [step["step"] for step in completed] == expected_completed
+        assert [step["seconds"] for step in completed] == [1.0] * len(expected_completed)
+        assert snapshot["current_step"] == expected_current
+        assert snapshot["progress"]["steps_done"] == expected_completed
+        assert snapshot["progress"]["steps_completed"] == completed
+        assert snapshot["progress"]["current_step"] == expected_current
+
+    assert snapshots[0]["technical_approach"]["problem"]["goals"][0]["id"] == "goal:1"
+    assert snapshots[0]["technical_approach"]["problem"]["constraints"] == {"hard": [], "soft": []}
+    assert snapshots[1]["technical_approach"]["problem"]["constraints"]["hard"][0]["id"] == "constraint:hard:1"
+    assert snapshots[2]["technical_approach"]["problem"]["prior_art"][0]["id"] == (
+        "prior_art:reference-first-prior-art-synthesis"
+    )
+    assert [candidate["id"] for candidate in snapshots[3]["technical_approach"]["problem"]["question"]["candidates"]] == [
+        "minimal",
+        "repo_native",
+    ]
+    assert "evaluation" not in snapshots[3]["technical_approach"]["problem"]["question"]["candidates"][0]
+    assert snapshots[4]["technical_approach"]["problem"]["question"]["candidates"][1]["evaluation"]["id"] == (
+        "evaluation:repo_native"
+    )
+    assert snapshots[5]["technical_approach"]["problem"]["question"]["decision"]["id"] == "decision:repo_native"
+    implementation_after_step_7 = snapshots[6]["technical_approach"]["problem"]["question"]["decision"]["implementation"]
+    assert implementation_after_step_7["id"] == "implementation:repo_native"
+    assert "patch_plan" not in implementation_after_step_7
+    assert snapshots[7]["technical_approach"]["problem"]["question"]["decision"]["implementation"]["patch_plan"][
+        "id"
+    ] == "patch_plan:repo_native"
+    final_question = snapshots[8]["technical_approach"]["problem"]["question"]
+    assert final_question["candidates"][1]["risks"][0]["id"] == "risk:candidate"
+    assert final_question["decision"]["implementation"]["risks"][0]["id"] == "risk:implementation"
+
+
+def test_form_technical_approach_without_progress_path_does_not_persist_progress(monkeypatch, tmp_path):
+    _patch_successful_approach_steps(monkeypatch)
+
+    def fail_monotonic():
+        raise AssertionError("progress timing should not run when progress_path is None")
+
+    def fail_writer(*args):
+        raise AssertionError("progress writer should not run when progress_path is None")
+
+    monkeypatch.setattr(receive_module.time, "monotonic", fail_monotonic)
+    monkeypatch.setattr(receive_module, "_write_technical_approach_progress", fail_writer)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path, progress_path=None)
+
+    assert result["ok"] is True
+    assert "progress" not in result
+    assert "steps_completed" not in result
+    assert "current_step" not in result
+    assert result["technical_approach"]["problem"]["question"]["decision"]["implementation"]["risks"][0]["id"] == (
+        "risk:implementation"
+    )
+
+
 def test_empty_slot_regenerates_then_accepts(monkeypatch, tmp_path):
     attempts = [
         {
@@ -574,6 +666,18 @@ def test_receive_imports_reference_and_codex_exec_without_later_phases():
     assert "ai_org.patch" not in source
     assert "ai_org.merge" not in source
     assert not any("\u3040" <= character <= "\u9fff" for character in source)
+
+
+def _patch_successful_approach_steps(monkeypatch) -> None:
+    monkeypatch.setattr(receive_module, "_normalize_problem", lambda rfc_view, context=None: _normalized_problem())
+    monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
+    monkeypatch.setattr(receive_module, "_generate_candidates", lambda *args, **kwargs: _candidates())
+    monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
+    monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
+    monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
+    monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: _risks())
 
 
 def _assert_codex_valid_object_schema(schema: dict[str, object]) -> None:
