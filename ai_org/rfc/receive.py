@@ -69,7 +69,7 @@
 #      testing plan, observability/operability where relevant.
 #   8. Right-size the patch plan: first safe slice, follow-up slices, explicitly deferred work + why safe to defer
 #      (YAGNI, unless the deferred decision is hard to reverse or affects major quality attributes).
-#   9. Surface risks & open questions: assumptions, risks, unresolved questions, spikes/prototypes, reviewer Qs.
+#   9. Surface risks: attach risk nodes to candidate, decision, or implementation parents.
 #  10. Emit the Technical Approach section: chosen approach, alternatives-with-why-not, prior-art rationale,
 #      trade-off analysis, implementation plan, compat/migration, testing plan, scoped patch plan, risks/open Qs.
 # Question-back to the requester (needs_confirmation extended to approach decisions) is deferred — build it LAST.
@@ -173,19 +173,8 @@ SUCCESS_CRITERION_CAPABILITY_FIELDS = ("action", "preconditions")
 SUCCESS_CRITERION_OUTCOME_FIELDS = ("expected_state", "evidence")
 SUCCESS_CRITERION_VERIFICATION_FIELDS = ("method", "check")
 SUCCESS_CRITERION_VERIFICATION_METHODS = ("automated_test", "manual_check", "metric")
-SUCCESS_CRITERION_BANNED_WHOLE_VALUES = frozenset(
-    {
-        "recognizably",
-        "enough",
-        "complete",
-        "appropriate",
-        "good",
-        "proper",
-        "faithful",
-        "robust",
-    }
-)
 MAX_NORMALIZE_PROBLEM_REGENERATIONS = 2
+MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS = 2
 
 SUCCESS_CRITERION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -389,36 +378,69 @@ CANDIDATE_APPROACH_KINDS = (
     "do_nothing_defer",
 )
 CANDIDATE_APPROACH_FIELDS = (
+    "id",
     "name",
     "kind",
     "summary",
-    "key_decisions",
+    "first_playable_moment",
+    "core_systems",
     "draws_on",
 )
-GENERATE_CANDIDATES_FIELDS = ("candidates",)
+CANDIDATE_FIRST_PLAYABLE_FIELDS = (
+    "player_actions",
+    "named_content",
+    "win_or_progress_condition",
+)
+GAME_NAMED_CONTENT_FIELDS = (
+    "locations",
+    "enemies",
+    "items_or_spells",
+)
+CANDIDATE_APPROACH_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(CANDIDATE_APPROACH_FIELDS),
+    "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "kind": {"type": "string", "enum": list(CANDIDATE_APPROACH_KINDS)},
+        "summary": {"type": "string"},
+        "first_playable_moment": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(CANDIDATE_FIRST_PLAYABLE_FIELDS),
+            "properties": {
+                "player_actions": {"type": "array", "items": {"type": "string"}},
+                "named_content": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(GAME_NAMED_CONTENT_FIELDS),
+                    "properties": {
+                        "locations": {"type": "array", "items": {"type": "string"}},
+                        "enemies": {"type": "array", "items": {"type": "string"}},
+                        "items_or_spells": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "win_or_progress_condition": {"type": "string"},
+            },
+        },
+        "core_systems": {"type": "array", "items": {"type": "string"}},
+        "draws_on": {"type": "array", "items": {"type": "string"}},
+    },
+}
 
 GENERATE_CANDIDATES_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": list(GENERATE_CANDIDATES_FIELDS),
+    "required": ["candidates"],
     "properties": {
         "candidates": {
             "type": "array",
             "minItems": 2,
-            "maxItems": 4,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": list(CANDIDATE_APPROACH_FIELDS),
-                "properties": {
-                    "name": {"type": "string"},
-                    "kind": {"type": "string", "enum": list(CANDIDATE_APPROACH_KINDS)},
-                    "summary": {"type": "string"},
-                    "key_decisions": {"type": "array", "items": {"type": "string"}},
-                    "draws_on": {"type": "array", "items": {"type": "string"}},
-                },
-            },
+            "maxItems": 3,
+            "items": CANDIDATE_APPROACH_SCHEMA,
         },
     },
 }
@@ -433,60 +455,70 @@ CANDIDATE_EVALUATION_SCORE_FIELDS = (
     "operability",
     "reversibility",
     "risk",
-    "evidence",
 )
+EVALUATION_SCORE_FIELDS = ("rating", "reason")
 CANDIDATE_EVALUATION_FIELDS = (
-    "candidate_name",
+    "candidate_id",
     "scores",
-    "summary",
 )
-EVALUATE_CANDIDATES_FIELDS = ("evaluations",)
-
-EVALUATE_CANDIDATES_SCHEMA: dict[str, Any] = {
+EVALUATE_CANDIDATE_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": list(EVALUATE_CANDIDATES_FIELDS),
+    "required": list(CANDIDATE_EVALUATION_FIELDS),
     "properties": {
-        "evaluations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": list(CANDIDATE_EVALUATION_FIELDS),
-                "properties": {
-                    "candidate_name": {"type": "string"},
-                    "scores": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": list(CANDIDATE_EVALUATION_SCORE_FIELDS),
-                        "properties": {
-                            "problem_fit": {"type": "string"},
-                            "repo_fit": {"type": "string"},
-                            "complexity": {"type": "string"},
-                            "quality_attributes": {"type": "string"},
-                            "compat_migration": {"type": "string"},
-                            "testability": {"type": "string"},
-                            "operability": {"type": "string"},
-                            "reversibility": {"type": "string"},
-                            "risk": {"type": "string"},
-                            "evidence": {"type": "string"},
-                        },
+        "candidate_id": {"type": "string"},
+        "scores": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(CANDIDATE_EVALUATION_SCORE_FIELDS),
+            "properties": {
+                field: {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(EVALUATION_SCORE_FIELDS),
+                    "properties": {
+                        "rating": {"type": "string"},
+                        "reason": {"type": "string"},
                     },
-                    "summary": {"type": "string"},
-                },
+                }
+                for field in CANDIDATE_EVALUATION_SCORE_FIELDS
             },
         },
     },
 }
+EVALUATE_CANDIDATES_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["evaluations"],
+    "properties": {
+        "evaluations": {"type": "array", "items": EVALUATE_CANDIDATE_SCHEMA},
+    },
+}
+TOULMIN_ARGUMENT_ROLES = ("support", "objection")
+TOULMIN_ARGUMENT_FIELDS = (
+    "role",
+    "about_candidate_id",
+    "claim",
+    "grounds",
+    "warrant",
+    "backing",
+    "rebuttal",
+)
+DECISION_RATIONALE_FIELDS = (
+    "because",
+    "under_constraints",
+    "accepting_tradeoffs",
+)
 REJECTED_APPROACH_FIELDS = (
-    "candidate_name",
-    "why_not",
+    "candidate_id",
+    "objection",
 )
 SELECT_APPROACH_FIELDS = (
-    "chosen",
-    "decision",
-    "accepted_tradeoffs",
+    "selected_candidate_id",
+    "arguments",
+    "rationale",
     "rejected",
 )
 
@@ -496,9 +528,34 @@ SELECT_APPROACH_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": list(SELECT_APPROACH_FIELDS),
     "properties": {
-        "chosen": {"type": "string"},
-        "decision": {"type": "string"},
-        "accepted_tradeoffs": {"type": "array", "items": {"type": "string"}},
+        "selected_candidate_id": {"type": "string"},
+        "arguments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(TOULMIN_ARGUMENT_FIELDS),
+                "properties": {
+                    "role": {"type": "string", "enum": list(TOULMIN_ARGUMENT_ROLES)},
+                    "about_candidate_id": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "grounds": {"type": "string"},
+                    "warrant": {"type": "string"},
+                    "backing": {"type": "string"},
+                    "rebuttal": {"type": "string"},
+                },
+            },
+        },
+        "rationale": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(DECISION_RATIONALE_FIELDS),
+            "properties": {
+                "because": {"type": "array", "items": {"type": "string"}},
+                "under_constraints": {"type": "array", "items": {"type": "string"}},
+                "accepting_tradeoffs": {"type": "array", "items": {"type": "string"}},
+            },
+        },
         "rejected": {
             "type": "array",
             "items": {
@@ -506,21 +563,28 @@ SELECT_APPROACH_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(REJECTED_APPROACH_FIELDS),
                 "properties": {
-                    "candidate_name": {"type": "string"},
-                    "why_not": {"type": "string"},
+                    "candidate_id": {"type": "string"},
+                    "objection": {"type": "string"},
                 },
             },
         },
     },
 }
 IMPLEMENTATION_STRATEGY_FIELDS = (
-    "main_changes",
-    "affected_modules",
-    "data_api_config_changes",
-    "migration_compat",
-    "testing_plan",
-    "observability",
+    "systems",
+    "persistence",
 )
+IMPLEMENTATION_SYSTEM_FIELDS = (
+    "system_name",
+    "behavior_in_game",
+    "named_content",
+    "key_modules",
+)
+IMPLEMENTATION_NAMED_CONTENT_FIELDS = (
+    "entities",
+    "content_items",
+)
+IMPLEMENTATION_PERSISTENCE_FIELDS = ("saved_fields",)
 
 IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -528,23 +592,56 @@ IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": list(IMPLEMENTATION_STRATEGY_FIELDS),
     "properties": {
-        "main_changes": {"type": "array", "items": {"type": "string"}},
-        "affected_modules": {"type": "array", "items": {"type": "string"}},
-        "data_api_config_changes": {"type": "array", "items": {"type": "string"}},
-        "migration_compat": {"type": "string"},
-        "testing_plan": {"type": "string"},
-        "observability": {"type": "string"},
+        "systems": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(IMPLEMENTATION_SYSTEM_FIELDS),
+                "properties": {
+                    "system_name": {"type": "string"},
+                    "behavior_in_game": {"type": "string"},
+                    "named_content": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(IMPLEMENTATION_NAMED_CONTENT_FIELDS),
+                        "properties": {
+                            "entities": {"type": "array", "items": {"type": "string"}},
+                            "content_items": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "key_modules": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "persistence": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(IMPLEMENTATION_PERSISTENCE_FIELDS),
+            "properties": {
+                "saved_fields": {"type": "array", "items": {"type": "string"}},
+            },
+        },
     },
 }
 PATCH_PLAN_DEFERRED_FIELDS = (
     "item",
     "why_safe_to_defer",
 )
+PATCH_PLAN_FOLLOW_UP_FIELDS = (
+    "adds",
+    "named_content",
+)
+PATCH_PLAN_FIRST_PLAYABLE_FIELDS = (
+    "player_can",
+    "named_content",
+    "win_or_progress_condition",
+    "how_verified",
+)
 RIGHT_SIZE_PATCH_PLAN_FIELDS = (
-    "first_slice",
-    "follow_up_slices",
+    "first_playable",
+    "follow_ups",
     "deferred",
-    "yagni_note",
 )
 
 RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
@@ -553,8 +650,47 @@ RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": list(RIGHT_SIZE_PATCH_PLAN_FIELDS),
     "properties": {
-        "first_slice": {"type": "string"},
-        "follow_up_slices": {"type": "array", "items": {"type": "string"}},
+        "first_playable": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(PATCH_PLAN_FIRST_PLAYABLE_FIELDS),
+            "properties": {
+                "player_can": {"type": "array", "items": {"type": "string"}},
+                "named_content": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(GAME_NAMED_CONTENT_FIELDS),
+                    "properties": {
+                        "locations": {"type": "array", "items": {"type": "string"}},
+                        "enemies": {"type": "array", "items": {"type": "string"}},
+                        "items_or_spells": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "win_or_progress_condition": {"type": "string"},
+                "how_verified": {"type": "string"},
+            },
+        },
+        "follow_ups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(PATCH_PLAN_FOLLOW_UP_FIELDS),
+                "properties": {
+                    "adds": {"type": "string"},
+                    "named_content": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(GAME_NAMED_CONTENT_FIELDS),
+                        "properties": {
+                            "locations": {"type": "array", "items": {"type": "string"}},
+                            "enemies": {"type": "array", "items": {"type": "string"}},
+                            "items_or_spells": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        },
         "deferred": {
             "type": "array",
             "items": {
@@ -567,20 +703,17 @@ RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-        "yagni_note": {"type": "string"},
     },
 }
 SURFACED_RISK_FIELDS = (
+    "id",
     "risk",
     "mitigation",
+    "attaches_to",
+    "target_id",
 )
-SURFACE_RISKS_FIELDS = (
-    "assumptions",
-    "risks",
-    "open_questions",
-    "spikes",
-    "reviewer_questions",
-)
+RISK_ATTACHES_TO = ("candidate", "decision", "implementation")
+SURFACE_RISKS_FIELDS = ("risks",)
 
 SURFACE_RISKS_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -588,7 +721,6 @@ SURFACE_RISKS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": list(SURFACE_RISKS_FIELDS),
     "properties": {
-        "assumptions": {"type": "array", "items": {"type": "string"}},
         "risks": {
             "type": "array",
             "items": {
@@ -596,14 +728,14 @@ SURFACE_RISKS_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(SURFACED_RISK_FIELDS),
                 "properties": {
+                    "id": {"type": "string"},
                     "risk": {"type": "string"},
                     "mitigation": {"type": "string"},
+                    "attaches_to": {"type": "string", "enum": list(RISK_ATTACHES_TO)},
+                    "target_id": {"type": "string"},
                 },
             },
         },
-        "open_questions": {"type": "array", "items": {"type": "string"}},
-        "spikes": {"type": "array", "items": {"type": "string"}},
-        "reviewer_questions": {"type": "array", "items": {"type": "string"}},
     },
 }
 _PRIOR_ART_STOPWORDS = {
@@ -653,8 +785,6 @@ GENERALIZER_MARKERS = (
     "broad category",
     "genre entry",
     "safer-sounding substitute",
-    "\u98a8",
-    "\u6c4e\u7528",
 )
 
 SCOPE_HEDGE_MARKERS = (
@@ -667,10 +797,6 @@ SCOPE_HEDGE_MARKERS = (
     "minimal",
     "first iteration",
     "small deliverable",
-    "\u30b9\u30e9\u30a4\u30b9",
-    "\u6700\u5c0f",
-    "\u77ed\u7de8",
-    "\u30d7\u30ed\u30c8\u30bf\u30a4\u30d7",
 )
 
 LEGAL_KEYWORDS = (
@@ -683,10 +809,6 @@ LEGAL_KEYWORDS = (
     "license",
     "material usage",
     "rights holder",
-    "\u5546\u6a19",
-    "\u8457\u4f5c\u6a29",
-    "\u6cd5\u52d9",
-    "\u30e9\u30a4\u30bb\u30f3\u30b9",
 )
 
 RETRO_MARKERS = (
@@ -699,8 +821,6 @@ RETRO_MARKERS = (
     "old-school",
     "old school",
     "vintage",
-    "\u30d5\u30a1\u30df\u30b3\u30f3",
-    "\u30ec\u30c8\u30ed",
 )
 
 RETRO_REQUEST_MARKERS = RETRO_MARKERS + (
@@ -954,17 +1074,57 @@ def _generate_candidates(
         return _candidate_generation_error("generate_candidates requires outputs from steps 1-3")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=GENERATE_CANDIDATES_SCHEMA,
-        prompt=_generate_candidates_prompt(normalized_problem, constraints, prior_art_map, context),
-        schema_filename="rfc-generate-candidates.schema.json",
-        output_filename="rfc-candidate-approaches.json",
-        failure_label="Codex candidate generation",
-    )
-    if not run["ok"]:
-        return _candidate_generation_error(run["error"])
-    return _parse_candidate_approaches(run["raw"])
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_kinds: set[str] = set()
+    for kind in ("minimal_local", "repo_native", "general_architectural"):
+        feedback: list[str] = []
+        last_error = ""
+        parsed: dict[str, Any] | None = None
+        for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+            run = codex_exec.run_json(
+                repo,
+                schema=CANDIDATE_APPROACH_SCHEMA,
+                prompt=_generate_candidate_prompt(
+                    normalized_problem,
+                    constraints,
+                    prior_art_map,
+                    kind,
+                    candidates,
+                    context,
+                    feedback if attempt else None,
+                ),
+                schema_filename=f"rfc-candidate-{kind}.schema.json",
+                output_filename=f"rfc-candidate-{kind}.json",
+                failure_label="Codex candidate generation",
+            )
+            if not run["ok"]:
+                return _candidate_generation_error(run["error"])
+            parsed = _parse_candidate_approach(run["raw"], expected_kind=kind)
+            if not parsed.get("ok", True):
+                last_error = parsed["error"]
+                feedback = [last_error]
+                continue
+            lint_errors = _lint_empty_slots(parsed)
+            if parsed["id"] in seen_ids:
+                lint_errors.append(f"id duplicates an earlier candidate: {parsed['id']}")
+            if parsed["kind"] in seen_kinds:
+                lint_errors.append(f"kind duplicates an earlier candidate: {parsed['kind']}")
+            if not lint_errors:
+                break
+            last_error = "; ".join(lint_errors)
+            feedback = lint_errors
+            parsed = None
+        if parsed is None or not parsed.get("ok", True):
+            return _candidate_generation_error(
+                "Codex candidate generation remained invalid after "
+                f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
+            )
+        seen_ids.add(parsed["id"])
+        seen_kinds.add(parsed["kind"])
+        candidates.append(parsed)
+
+    return {"candidates": candidates}
 
 
 def _evaluate_candidates(
@@ -978,22 +1138,56 @@ def _evaluate_candidates(
     if not all(isinstance(value, Mapping) for value in (candidates, normalized_problem, constraints)):
         return _candidate_evaluation_error("evaluate_candidates requires outputs from steps 1, 2, and 4")
 
-    candidate_names = _candidate_names(candidates)
-    if not candidate_names:
+    candidate_ids = _candidate_ids(candidates)
+    if not candidate_ids:
         return _candidate_evaluation_error("evaluate_candidates requires named candidates from step 4")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=EVALUATE_CANDIDATES_SCHEMA,
-        prompt=_evaluate_candidates_prompt(candidates, normalized_problem, constraints, context),
-        schema_filename="rfc-evaluate-candidates.schema.json",
-        output_filename="rfc-candidate-evaluations.json",
-        failure_label="Codex candidate evaluation",
-    )
-    if not run["ok"]:
-        return _candidate_evaluation_error(run["error"])
-    return _parse_candidate_evaluations(run["raw"], candidate_names)
+    evaluations: list[dict[str, Any]] = []
+    for candidate in candidates["candidates"]:
+        feedback: list[str] = []
+        last_error = ""
+        parsed: dict[str, Any] | None = None
+        candidate_id = candidate["id"]
+        for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+            run = codex_exec.run_json(
+                repo,
+                schema=EVALUATE_CANDIDATE_SCHEMA,
+                prompt=_evaluate_candidate_prompt(
+                    candidate,
+                    candidates,
+                    normalized_problem,
+                    constraints,
+                    context,
+                    feedback if attempt else None,
+                ),
+                schema_filename=f"rfc-evaluate-candidate-{candidate_id}.schema.json",
+                output_filename=f"rfc-candidate-evaluation-{candidate_id}.json",
+                failure_label="Codex candidate evaluation",
+            )
+            if not run["ok"]:
+                return _candidate_evaluation_error(run["error"])
+            parsed = _parse_candidate_evaluation(run["raw"], candidate_id)
+            if not parsed.get("ok", True):
+                last_error = parsed["error"]
+                feedback = [last_error]
+                continue
+            lint_errors = _lint_empty_slots(parsed)
+            if not lint_errors:
+                break
+            last_error = "; ".join(lint_errors)
+            feedback = lint_errors
+            parsed = None
+        if parsed is None or not parsed.get("ok", True):
+            return _candidate_evaluation_error(
+                "Codex candidate evaluation remained invalid after "
+                f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
+            )
+        evaluations.append(parsed)
+
+    if {evaluation["candidate_id"] for evaluation in evaluations} != set(candidate_ids):
+        return _candidate_evaluation_error("Codex candidate evaluation returned incomplete candidate coverage")
+    return {"evaluations": evaluations}
 
 
 def _select_approach(
@@ -1007,26 +1201,43 @@ def _select_approach(
     if not all(isinstance(value, Mapping) for value in (candidates, evaluations, constraints)):
         return _approach_selection_error("select_approach requires outputs from steps 2, 4, and 5")
 
-    candidate_names = _candidate_names(candidates)
-    if not candidate_names:
+    candidate_ids = _candidate_ids(candidates)
+    if not candidate_ids:
         return _approach_selection_error("select_approach requires named candidates from step 4")
 
-    evaluation_names = _evaluation_names(evaluations)
-    if set(evaluation_names) != set(candidate_names):
+    evaluation_ids = _evaluation_ids(evaluations)
+    if set(evaluation_ids) != set(candidate_ids):
         return _approach_selection_error("select_approach requires one evaluation per candidate from step 5")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=SELECT_APPROACH_SCHEMA,
-        prompt=_select_approach_prompt(candidates, evaluations, constraints, context),
-        schema_filename="rfc-select-approach.schema.json",
-        output_filename="rfc-selected-approach.json",
-        failure_label="Codex approach selection",
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=SELECT_APPROACH_SCHEMA,
+            prompt=_select_approach_prompt(candidates, evaluations, constraints, context, feedback if attempt else None),
+            schema_filename="rfc-select-approach.schema.json",
+            output_filename="rfc-selected-approach.json",
+            failure_label="Codex approach selection",
+        )
+        if not run["ok"]:
+            return _approach_selection_error(run["error"])
+        parsed = _parse_approach_selection(run["raw"], candidate_ids)
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+        lint_errors = _lint_empty_slots(parsed)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _approach_selection_error(
+        "Codex approach selection remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _approach_selection_error(run["error"])
-    return _parse_approach_selection(run["raw"], candidate_names)
 
 
 def _implementation_strategy(
@@ -1045,17 +1256,42 @@ def _implementation_strategy(
         return _implementation_strategy_error("implementation_strategy requires a grounded common-8 RFC view")
 
     repo_path = Path(repo).resolve()
-    run = codex_exec.run_json(
-        repo_path,
-        schema=IMPLEMENTATION_STRATEGY_SCHEMA,
-        prompt=_implementation_strategy_prompt(chosen, prior_art_map, constraints, rfc_view, repo_path, context),
-        schema_filename="rfc-implementation-strategy.schema.json",
-        output_filename="rfc-implementation-strategy.json",
-        failure_label="Codex implementation strategy",
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo_path,
+            schema=IMPLEMENTATION_STRATEGY_SCHEMA,
+            prompt=_implementation_strategy_prompt(
+                chosen,
+                prior_art_map,
+                constraints,
+                rfc_view,
+                repo_path,
+                context,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-implementation-strategy.schema.json",
+            output_filename="rfc-implementation-strategy.json",
+            failure_label="Codex implementation strategy",
+        )
+        if not run["ok"]:
+            return _implementation_strategy_error(run["error"])
+        parsed = _parse_implementation_strategy(run["raw"])
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+        lint_errors = _lint_empty_slots(parsed)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _implementation_strategy_error(
+        "Codex implementation strategy remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _implementation_strategy_error(run["error"])
-    return _parse_implementation_strategy(run["raw"])
 
 
 def _right_size_patch_plan(
@@ -1070,17 +1306,40 @@ def _right_size_patch_plan(
         return _right_size_patch_plan_error("right_size_patch_plan requires outputs from steps 2, 6, and 7")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=RIGHT_SIZE_PATCH_PLAN_SCHEMA,
-        prompt=_right_size_patch_plan_prompt(chosen, implementation_strategy, constraints, context),
-        schema_filename="rfc-right-size-patch-plan.schema.json",
-        output_filename="rfc-right-sized-patch-plan.json",
-        failure_label="Codex patch plan right-sizing",
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=RIGHT_SIZE_PATCH_PLAN_SCHEMA,
+            prompt=_right_size_patch_plan_prompt(
+                chosen,
+                implementation_strategy,
+                constraints,
+                context,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-right-size-patch-plan.schema.json",
+            output_filename="rfc-right-sized-patch-plan.json",
+            failure_label="Codex patch plan right-sizing",
+        )
+        if not run["ok"]:
+            return _right_size_patch_plan_error(run["error"])
+        parsed = _parse_right_size_patch_plan(run["raw"])
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+        lint_errors = _lint_empty_slots(parsed)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _right_size_patch_plan_error(
+        "Codex patch plan right-sizing remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _right_size_patch_plan_error(run["error"])
-    return _parse_right_size_patch_plan(run["raw"])
 
 
 def _surface_risks(
@@ -1091,22 +1350,46 @@ def _surface_risks(
     context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Form step 9 of the documented 10-step Technical Approach procedure."""
-    # Step 9 of 10: surface assumptions, risks, unresolved questions, spikes, and reviewer questions.
+    # Step 9 of 10: surface risk nodes and attach each one to its parent node.
     if not all(isinstance(value, Mapping) for value in (chosen, implementation_strategy, patch_plan, constraints)):
         return _surface_risks_error("surface_risks requires outputs from steps 2, 6, 7, and 8")
 
     repo = _repo_from_context(context)
-    run = codex_exec.run_json(
-        repo,
-        schema=SURFACE_RISKS_SCHEMA,
-        prompt=_surface_risks_prompt(chosen, implementation_strategy, patch_plan, constraints, context),
-        schema_filename="rfc-surface-risks.schema.json",
-        output_filename="rfc-surfaced-risks.json",
-        failure_label="Codex risk surfacing",
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=SURFACE_RISKS_SCHEMA,
+            prompt=_surface_risks_prompt(
+                chosen,
+                implementation_strategy,
+                patch_plan,
+                constraints,
+                context,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-surface-risks.schema.json",
+            output_filename="rfc-surfaced-risks.json",
+            failure_label="Codex risk surfacing",
+        )
+        if not run["ok"]:
+            return _surface_risks_error(run["error"])
+        parsed = _parse_surface_risks(run["raw"])
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+        lint_errors = _lint_empty_slots(parsed)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _surface_risks_error(
+        "Codex risk surfacing remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
     )
-    if not run["ok"]:
-        return _surface_risks_error(run["error"])
-    return _parse_surface_risks(run["raw"])
 
 
 def form_technical_approach(
@@ -1133,21 +1416,21 @@ def form_technical_approach(
     if failure:
         return failure
     steps["normalize_problem"] = normalized
-    approach: dict[str, Any] = {"normalized_problem": normalized}
+    partial_tree: dict[str, Any] = {"problem": _problem_root_from_normalized(normalized)}
 
-    constraints = _extract_constraints(rfc_view, repo_path, approach_context, dict(approach))
+    constraints = _extract_constraints(rfc_view, repo_path, approach_context, dict(partial_tree))
     failure = _technical_approach_step_failure("extract_constraints", constraints)
     if failure:
         return failure
     steps["extract_constraints"] = constraints
-    approach["constraints"] = constraints
+    partial_tree["problem"]["constraints"] = _constraint_tree_nodes(constraints)
 
-    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, dict(approach))
+    prior_art = _build_prior_art_map(rfc_view, repo_path, approach_context, dict(partial_tree))
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
     if failure:
         return failure
     steps["build_prior_art_map"] = prior_art
-    approach["prior_art"] = prior_art
+    partial_tree["problem"]["prior_art"] = _prior_art_tree_nodes(prior_art)
 
     if provided_approach is None:
         candidates = _generate_candidates(normalized, constraints, prior_art, approach_context)
@@ -1194,9 +1477,19 @@ def form_technical_approach(
         return failure
     steps["surface_risks"] = risks
 
+    risk_target_failure = _validate_risk_targets(risks, candidates, selected)
+    if risk_target_failure:
+        return {
+            "ok": False,
+            "error": risk_target_failure,
+            "failed_step": "surface_risks",
+        }
+
     return {
         "ok": True,
         "technical_approach": _assemble_technical_approach(
+            normalized,
+            constraints,
             selected,
             candidates,
             evaluations,
@@ -1209,7 +1502,6 @@ def form_technical_approach(
             rfc_view=rfc_view,
         ),
         "steps": steps,
-        "approach": approach,
     }
 
 
@@ -1376,9 +1668,7 @@ def _normalize_problem_prompt(
         "{action, preconditions}, verifiable_outcome {expected_state, evidence}, and verification "
         "{method, check}. action must be observable; preconditions must be concrete; expected_state must "
         "name the end state that proves success; evidence must state what is observed or measured; method "
-        "must be automated_test, manual_check, or metric; check must be the concrete verification performed. "
-        "Do not use recognizably, enough, complete, appropriate, good, proper, faithful, or robust as a "
-        "standalone action, expected_state, evidence, or check.\n"
+        "must be automated_test, manual_check, or metric; check must be the concrete verification performed.\n"
         "- non_goals: explicit boundaries that should remain out of scope for this RFC.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nContext:\n{context_text}\n"
@@ -1514,64 +1804,81 @@ def _prior_art_map_prompt(
     )
 
 
-def _generate_candidates_prompt(
+def _generate_candidate_prompt(
     normalized_problem: Mapping[str, Any],
     constraints: Mapping[str, Any],
     prior_art_map: Mapping[str, Any],
+    candidate_kind: str,
+    existing_candidates: list[Mapping[str, Any]],
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    existing_text = json.dumps(existing_candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this candidate node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 4 of AI Org's 10-step Technical Approach procedure: generate candidate "
-        "approaches.\n"
+        "You are forming step 4 of AI Org's Technical Approach derivation tree: generate one candidate node.\n"
         "Use only the outputs of steps 1 through 3 plus read-only repository inspection from the configured "
-        "repo root. Do not select a winner, evaluate candidates in a matrix, write an implementation strategy, "
+        "repo root. Do not select a winner, evaluate candidates, write an implementation strategy, "
         "create a patch plan, or perform later Technical Approach steps. Do not modify files.\n\n"
-        "Generate candidate approaches that are distinct enough for later trade-off evaluation:\n"
-        "- Always include one minimal_local candidate: the smallest local change that can plausibly satisfy "
-        "the normalized problem and hard constraints.\n"
-        "- Always include one repo_native candidate: a reference-aligned approach that follows the repository's "
-        "existing architecture and the prior-art map.\n"
-        "- Include one general_architectural candidate only when a broader design is plausible under the "
-        "constraints and prior art.\n"
-        "- Optionally include do_nothing_defer when requirements are weak, ambiguous, blocked, or better "
-        "deferred; this defer candidate does not count toward the 2 to 3 substantive candidates.\n"
-        "- Produce 2 to 3 substantive candidates, excluding do_nothing_defer. Do not return more than one "
-        "candidate of the same kind.\n\n"
+        f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates.\n\n"
         "For each candidate:\n"
+        "- id: stable lowercase identifier using letters, numbers, underscores, or hyphens.\n"
         "- name: concise approach name.\n"
         "- kind: exactly one of minimal_local, repo_native, general_architectural, do_nothing_defer.\n"
         "- summary: what this approach would do and why it is materially different.\n"
-        "- key_decisions: the main design choices this approach commits to or postpones.\n"
+        "- first_playable_moment: name the player actions, locations, enemies, items or spells, and the "
+        "win or progress condition that would make the first slice playable or inspectable.\n"
+        "- core_systems: concrete gameplay, workflow, repository, or runtime systems this candidate would change.\n"
         "- draws_on: prior-art pattern names, repository references, or Reference entries this candidate builds on.\n\n"
         f"Normalized problem:\n{normalized_problem_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nPrior-art map:\n{prior_art_text}\n"
+        f"\nExisting candidates:\n{existing_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
 
-def _evaluate_candidates_prompt(
+def _evaluate_candidate_prompt(
+    candidate: Mapping[str, Any],
     candidates: Mapping[str, Any],
     normalized_problem: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
+    candidate_text = json.dumps(candidate, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     candidates_text = json.dumps(candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     normalized_problem_text = json.dumps(normalized_problem, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this evaluation node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 5 of AI Org's 10-step Technical Approach procedure: evaluate candidates.\n"
-        "Use only the candidate approaches from step 4, the normalized problem from step 1, the constraints "
-        "from step 2, and read-only repository inspection from the configured repo root. Do not select a "
+        "You are forming step 5 of AI Org's Technical Approach derivation tree: evaluate one candidate node.\n"
+        "Use only the candidate from step 4, the full candidate set for comparison, the normalized problem from "
+        "step 1, the constraints from step 2, and read-only repository inspection from the configured repo root. Do not select a "
         "winner, write an implementation strategy, create a patch plan, or perform later Technical Approach "
         "steps. Do not modify files.\n\n"
-        "Evaluate every candidate exactly once on this compact matrix:\n"
+        "Evaluate the single candidate on this compact matrix. Each score is an object with rating and reason:\n"
         "- problem_fit: how directly the candidate satisfies the normalized problem and success criteria.\n"
         "- repo_fit: how well it fits existing module boundaries, conventions, and ownership.\n"
         "- complexity: implementation and maintenance complexity.\n"
@@ -1581,14 +1888,13 @@ def _evaluate_candidates_prompt(
         "- operability: runtime, rollout, observability, support, or operational impact where relevant.\n"
         "- reversibility: how easy the choice is to undo, narrow, or replace later.\n"
         "- risk: main uncertainty, failure mode, or delivery risk.\n"
-        "- evidence: strongest supporting or opposing evidence from the RFC, constraints, repository, or context.\n\n"
-        "Each score must be a short assessment with a rating and one-line reason, such as "
-        "'high - fits existing module boundaries'. The summary must briefly state the candidate's overall "
-        "trade-off profile. Return one evaluation per candidate and use the candidate name exactly as given.\n\n"
-        f"Candidate approaches:\n{candidates_text}\n"
+        "Use the candidate_id exactly as given.\n\n"
+        f"Candidate to evaluate:\n{candidate_text}\n"
+        f"\nAll candidate approaches:\n{candidates_text}\n"
         f"\nNormalized problem:\n{normalized_problem_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1598,31 +1904,40 @@ def _select_approach_prompt(
     evaluations: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     candidates_text = json.dumps(candidates, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     evaluations_text = json.dumps(evaluations, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this decision node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 6 of AI Org's 10-step Technical Approach procedure: select the approach.\n"
+        "You are forming step 6 of AI Org's Technical Approach derivation tree: select the approach.\n"
         "Use only the candidate approaches from step 4, the compact evaluation matrix from step 5, the "
         "constraints from step 2, and read-only repository inspection from the configured repo root. Choose "
         "one candidate. Do not write an implementation strategy, create a patch plan, surface open questions, "
         "emit the final Technical Approach section, or perform later Technical Approach steps. Do not modify "
         "files.\n\n"
-        "The decision must be a reasoned selection from the matrix, not a one-shot claim. The decision string "
-        "must explicitly reference the constraints and the evaluation matrix, following this shape: "
-        "'Choose X because ... under constraints ..., accepting tradeoff F.' Reject every non-chosen candidate "
-        "with a concrete why_not tied to the matrix or constraints.\n\n"
+        "The decision must be a reasoned selection from the evaluation nodes, not a one-shot claim. Use Toulmin "
+        "arguments: claim, grounds, warrant, backing, and rebuttal. Include support for the selected candidate "
+        "and objections for rejected candidates.\n\n"
         "Return these fields:\n"
-        "- chosen: the exact name of the selected candidate.\n"
-        "- decision: one concise rationale sentence that references constraints and the evaluation matrix.\n"
-        "- accepted_tradeoffs: trade-offs accepted by choosing the selected candidate.\n"
-        "- rejected: one item for each non-chosen candidate with candidate_name and why_not.\n\n"
+        "- selected_candidate_id: the exact id of the selected candidate.\n"
+        "- arguments: support or objection Toulmin arguments about candidate ids.\n"
+        "- rationale: because, under_constraints, and accepting_tradeoffs arrays.\n"
+        "- rejected: one item for each non-chosen candidate with candidate_id and objection.\n\n"
         f"Candidate approaches:\n{candidates_text}\n"
         f"\nEvaluation matrix:\n{evaluations_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1634,13 +1949,22 @@ def _implementation_strategy_prompt(
     rfc_view: dict[str, Any],
     repo: Path,
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this implementation node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 7 of AI Org's 10-step Technical Approach procedure: implementation strategy.\n"
+        "You are forming step 7 of AI Org's Technical Approach derivation tree: implementation strategy.\n"
         "Use the selected approach from step 6, the prior-art map from step 3, the constraints from step 2, "
         "the grounded common-8 RFC view, and read-only repository inspection from the configured repo root. "
         "You may inspect module structure and tests to make the strategy concrete. Do not modify files.\n\n"
@@ -1648,19 +1972,16 @@ def _implementation_strategy_prompt(
         "alternatives, create a patch slice plan, surface risks and open questions, emit the final Technical "
         "Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
-        "- main_changes: concrete code changes needed to implement the chosen approach.\n"
-        "- affected_modules: repository modules, packages, tests, or docs expected to be touched.\n"
-        "- data_api_config_changes: data model, public API, schema, protocol, or configuration changes; use an "
-        "empty list when none are expected.\n"
-        "- migration_compat: compatibility and migration strategy, or n/a when irrelevant.\n"
-        "- testing_plan: focused tests and verification commands for the strategy.\n"
-        "- observability: logging, metrics, rollout, operator visibility, or n/a when irrelevant.\n\n"
+        "- systems: each system has system_name, behavior_in_game, named_content with entities and "
+        "content_items, and key_modules.\n"
+        "- persistence: saved_fields that must survive reload or handoff; name the field or state explicitly.\n\n"
         + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
         + f"\nChosen approach:\n{chosen_text}\n"
         + f"\nPrior-art map:\n{prior_art_text}\n"
         + f"\nConstraints:\n{constraints_text}\n"
         + f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1670,30 +1991,40 @@ def _right_size_patch_plan_prompt(
     implementation_strategy: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this patch_plan node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 8 of AI Org's 10-step Technical Approach procedure: right-size the patch plan.\n"
+        "You are forming step 8 of AI Org's Technical Approach derivation tree: right-size the patch plan.\n"
         "Use the selected approach from step 6, the implementation strategy from step 7, the constraints from "
         "step 2, and read-only repository inspection from the configured repo root. Do not modify files.\n\n"
         "Turn the implementation strategy into a right-sized, incremental patch plan. Every slice must leave "
-        "the system working and should enable behavior incrementally. The first_slice must be the first safe "
-        "walking skeleton slice. Apply YAGNI: defer speculative work unless a deferred decision is hard to "
+        "the system working and should enable behavior incrementally. The first_playable node must be the first safe "
+        "playable or inspectable slice. Apply YAGNI: defer speculative work unless a deferred decision is hard to "
         "reverse or affects major quality attributes such as security, reliability, compatibility, performance, "
         "operability, or maintainability. Do not surface risks and open questions, emit the final Technical "
         "Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
-        "- first_slice: the first safe walking-skeleton slice that leaves the system working.\n"
-        "- follow_up_slices: later incremental slices, each leaving the system working.\n"
+        "- first_playable: player_can, named_content locations/enemies/items_or_spells, win_or_progress_condition, "
+        "and how_verified.\n"
+        "- follow_ups: later additions, each with adds and named_content.\n"
         "- deferred: intentionally deferred work, each with item and why_safe_to_defer.\n"
-        "- yagni_note: what is intentionally not built now and why.\n\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1704,33 +2035,39 @@ def _surface_risks_prompt(
     patch_plan: Mapping[str, Any],
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     patch_plan_text = json.dumps(patch_plan, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic empty-slot validation. Regenerate this risks node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
     return (
-        "You are forming step 9 of AI Org's 10-step Technical Approach procedure: surface risks and open "
+        "You are forming step 9 of AI Org's Technical Approach derivation tree: surface risks and open "
         "questions.\n"
         "Use the selected approach from step 6, the implementation strategy from step 7, the right-sized patch "
         "plan from step 8, the constraints from step 2, and read-only repository inspection from the configured "
         "repo root. Do not modify files.\n\n"
-        "Surface only unresolved assumptions, delivery or design risks, unknowns that require answers, "
-        "prototypes or spikes needed to resolve uncertainty, and questions to raise with reviewers or the "
-        "requester. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
+        "Surface only delivery or design risks that can be attached to a candidate, decision, or implementation "
+        "node. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
         "slices, emit the final Technical Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
-        "- assumptions: assumptions the plan currently depends on.\n"
-        "- risks: risks, each with risk and mitigation.\n"
-        "- open_questions: unresolved technical or product questions.\n"
-        "- spikes: prototypes or spikes needed to resolve unknowns.\n"
-        "- reviewer_questions: questions to raise for the reviewer or requester.\n\n"
+        "- risks: each risk node has id, risk, mitigation, attaches_to candidate|decision|implementation, and "
+        "target_id naming the node it attaches under.\n\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
         f"\nPatch plan:\n{patch_plan_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1948,17 +2285,7 @@ def _parse_success_criterion(value: Any) -> dict[str, Any] | None:
 
 def _lint_normalized_problem(parsed: Mapping[str, Any], rfc_view: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
-    rfc_phrases = _normalized_rfc_phrases(rfc_view)
-    for field in ("problem", "current_inadequacy"):
-        value = parsed.get(field)
-        if isinstance(value, str) and _canonical_phrase(value) in rfc_phrases:
-            errors.append(f"{field} restates an RFC field verbatim instead of distilling it")
-
-    for path, value in _walk_normalized_problem_strings(parsed):
-        if not value.strip():
-            errors.append(f"{path} is empty")
-        if _contains_japanese_script(value):
-            errors.append(f"{path} must be English-only")
+    errors.extend(_lint_empty_slots(parsed))
 
     criteria = parsed.get("success_criteria")
     if not isinstance(criteria, list) or not criteria:
@@ -1980,15 +2307,52 @@ def _lint_normalized_problem(parsed: Mapping[str, Any], rfc_view: Mapping[str, A
             if value is None:
                 errors.append(f"{base}.{path} is missing")
                 continue
-            if _canonical_vague_value(value) in SUCCESS_CRITERION_BANNED_WHOLE_VALUES:
-                errors.append(f"{base}.{path} uses a vague standalone value: {value.strip()}")
-            if _canonical_phrase(value) in rfc_phrases:
-                errors.append(f"{base}.{path} copies RFC feature text instead of deriving a measurable check")
         preconditions = criterion.get("capability", {}).get("preconditions") if isinstance(
             criterion.get("capability"), Mapping
         ) else None
         if not isinstance(preconditions, list) or not preconditions:
             errors.append(f"{base}.capability.preconditions is empty")
+    return errors
+
+
+NON_EMPTY_ARRAY_SLOT_NAMES = frozenset(
+    {
+        "success_criteria",
+        "preconditions",
+        "player_actions",
+        "locations",
+        "enemies",
+        "items_or_spells",
+        "core_systems",
+        "draws_on",
+        "because",
+        "under_constraints",
+        "accepting_tradeoffs",
+        "systems",
+        "entities",
+        "content_items",
+        "key_modules",
+        "saved_fields",
+        "player_can",
+    }
+)
+
+
+def _lint_empty_slots(value: Any, path: str = "") -> list[str]:
+    errors: list[str] = []
+    if isinstance(value, str):
+        if not value.strip():
+            errors.append(f"{path or 'value'} is empty")
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            errors.extend(_lint_empty_slots(item, child_path))
+    elif isinstance(value, list):
+        slot_name = path.rsplit(".", 1)[-1]
+        if not value and slot_name in NON_EMPTY_ARRAY_SLOT_NAMES:
+            errors.append(f"{path or 'value'} is empty")
+        for index, item in enumerate(value):
+            errors.extend(_lint_empty_slots(item, f"{path}[{index}]"))
     return errors
 
 
@@ -2162,31 +2526,7 @@ def _constraints_approach_context(approach: Mapping[str, Any] | None) -> dict[st
 
 
 def _lint_constraints(parsed: Mapping[str, Any], approach: Mapping[str, Any]) -> list[str]:
-    errors: list[str] = []
-    for path, value in _walk_normalized_problem_strings(parsed):
-        if not value.strip():
-            errors.append(f"{path} is empty")
-        if _contains_japanese_script(value):
-            errors.append(f"{path} must be English-only")
-
-    success_trace_phrases = _success_criterion_trace_phrases(approach)
-    for field in EXTRACT_CONSTRAINTS_FIELDS:
-        value = parsed.get(field)
-        if not isinstance(value, list):
-            continue
-        for index, item in enumerate(value):
-            if not isinstance(item, Mapping):
-                continue
-            derivation = item.get("derivation")
-            if not isinstance(derivation, Mapping):
-                continue
-            source = derivation.get("from")
-            trace = derivation.get("trace")
-            if source != "success_criteria" or not isinstance(trace, str):
-                continue
-            if not _trace_mentions_success_criterion(trace, success_trace_phrases):
-                errors.append(f"{field}[{index}].derivation.trace must identify a specific success criterion")
-    return errors
+    return _lint_empty_slots(parsed)
 
 
 def _success_criterion_trace_phrases(approach: Mapping[str, Any]) -> set[str]:
@@ -2323,60 +2663,7 @@ def _lint_prior_art_map(
     reference_facets: list[dict[str, Any]],
     approach: Mapping[str, Any],
 ) -> list[str]:
-    errors: list[str] = []
-    for path, value in _walk_normalized_problem_strings(parsed):
-        if not value.strip():
-            errors.append(f"{path} is empty")
-        if _contains_japanese_script(value):
-            errors.append(f"{path} must be English-only")
-
-    patterns = parsed.get("patterns")
-    if not isinstance(patterns, list):
-        return errors
-
-    retrieved = _retrieved_reference_facet_index(reference_facets)
-    used_retrieved_facet = False
-    trace_targets = _prior_art_trace_targets(approach)
-    for index, pattern in enumerate(patterns):
-        if not isinstance(pattern, Mapping):
-            continue
-        source = pattern.get("source")
-        if not isinstance(source, Mapping):
-            continue
-        concept = source.get("reference_concept")
-        facet_kind = source.get("facet_kind")
-        if not isinstance(concept, str) or not isinstance(facet_kind, str):
-            continue
-        canonical_concept = concept.strip().lower()
-        if facet_kind == "none":
-            if canonical_concept in retrieved:
-                errors.append(
-                    f"patterns[{index}].source.facet_kind is none but Reference returned facets for {concept}"
-                )
-        elif facet_kind in ("design", "implementation"):
-            if facet_kind not in retrieved.get(canonical_concept, set()):
-                errors.append(
-                    f"patterns[{index}].source.facet_kind {facet_kind} does not match retrieved facets for {concept}"
-                )
-            else:
-                used_retrieved_facet = True
-
-        traces_to = pattern.get("traces_to")
-        if not isinstance(traces_to, list) or not traces_to:
-            errors.append(f"patterns[{index}].traces_to is empty")
-        elif trace_targets and not any(_prior_art_trace_is_known(str(trace), trace_targets) for trace in traces_to):
-            errors.append(f"patterns[{index}].traces_to must name normalized_problem or constraints elements")
-
-        tradeoffs = pattern.get("tradeoffs")
-        if isinstance(tradeoffs, Mapping):
-            for field in PRIOR_ART_TRADEOFF_FIELDS:
-                value = tradeoffs.get(field)
-                if not isinstance(value, list) or not value:
-                    errors.append(f"patterns[{index}].tradeoffs.{field} is empty")
-
-    if retrieved and not used_retrieved_facet:
-        errors.append("Reference facets were retrieved but no pattern cites a design or implementation facet")
-    return errors
+    return _lint_empty_slots(parsed)
 
 
 def _retrieved_reference_facet_index(reference_facets: list[dict[str, Any]]) -> dict[str, set[str]]:
@@ -2411,7 +2698,7 @@ def _prior_art_trace_is_known(trace: str, targets: set[str]) -> bool:
     return any(canonical == target or canonical.startswith(f"{target}.") or canonical.startswith(f"{target}[") for target in targets)
 
 
-def _parse_candidate_approaches(raw: str) -> dict[str, Any]:
+def _parse_candidate_approach(raw: str, expected_kind: str | None = None) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -2419,94 +2706,102 @@ def _parse_candidate_approaches(raw: str) -> dict[str, Any]:
 
     if not isinstance(parsed, dict):
         return _candidate_generation_error("Codex candidate generation returned non-object JSON")
-    if set(parsed) != set(GENERATE_CANDIDATES_FIELDS):
-        return _candidate_generation_error("Codex candidate generation returned invalid fields")
+    if set(parsed) != set(CANDIDATE_APPROACH_FIELDS):
+        return _candidate_generation_error("Codex candidate generation returned invalid candidate fields")
+    if not all(isinstance(parsed[field], str) for field in ("id", "name", "kind", "summary")):
+        return _candidate_generation_error("Codex candidate generation returned invalid candidate string fields")
+    if parsed["kind"] not in CANDIDATE_APPROACH_KINDS:
+        return _candidate_generation_error("Codex candidate generation returned invalid candidate kind")
+    if expected_kind is not None and parsed["kind"] != expected_kind:
+        return _candidate_generation_error("Codex candidate generation returned unexpected candidate kind")
+    first_playable = _parse_candidate_first_playable(parsed.get("first_playable_moment"))
+    if first_playable is None:
+        return _candidate_generation_error("Codex candidate generation returned invalid first_playable_moment")
+    for field in ("core_systems", "draws_on"):
+        value = parsed.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return _candidate_generation_error(f"Codex candidate generation returned invalid {field}")
+    return {
+        "id": parsed["id"],
+        "name": parsed["name"],
+        "kind": parsed["kind"],
+        "summary": parsed["summary"],
+        "first_playable_moment": first_playable,
+        "core_systems": list(parsed["core_systems"]),
+        "draws_on": list(parsed["draws_on"]),
+    }
 
-    candidates = parsed.get("candidates")
-    if not isinstance(candidates, list) or not 2 <= len(candidates) <= 4:
-        return _candidate_generation_error("Codex candidate generation returned invalid candidates")
 
-    parsed_candidates: list[dict[str, Any]] = []
-    seen_kinds: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            return _candidate_generation_error("Codex candidate generation returned invalid candidate item")
-        if set(candidate) != set(CANDIDATE_APPROACH_FIELDS):
-            return _candidate_generation_error("Codex candidate generation returned invalid candidate fields")
-        if not all(isinstance(candidate[field], str) for field in ("name", "kind", "summary")):
-            return _candidate_generation_error("Codex candidate generation returned invalid candidate string fields")
-        if candidate["kind"] not in CANDIDATE_APPROACH_KINDS:
-            return _candidate_generation_error("Codex candidate generation returned invalid candidate kind")
-        if candidate["kind"] in seen_kinds:
-            return _candidate_generation_error("Codex candidate generation returned duplicate candidate kind")
-        for field in ("key_decisions", "draws_on"):
-            value = candidate.get(field)
-            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-                return _candidate_generation_error(f"Codex candidate generation returned invalid {field}")
-        seen_kinds.add(candidate["kind"])
-        parsed_candidates.append(
-            {
-                "name": candidate["name"],
-                "kind": candidate["kind"],
-                "summary": candidate["summary"],
-                "key_decisions": list(candidate["key_decisions"]),
-                "draws_on": list(candidate["draws_on"]),
-            }
-        )
+def _parse_candidate_first_playable(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != set(CANDIDATE_FIRST_PLAYABLE_FIELDS):
+        return None
+    player_actions = value.get("player_actions")
+    win_or_progress_condition = value.get("win_or_progress_condition")
+    named_content = _parse_game_named_content(value.get("named_content"))
+    if not isinstance(player_actions, list) or not all(isinstance(item, str) for item in player_actions):
+        return None
+    if named_content is None or not isinstance(win_or_progress_condition, str):
+        return None
+    return {
+        "player_actions": list(player_actions),
+        "named_content": named_content,
+        "win_or_progress_condition": win_or_progress_condition,
+    }
 
-    if "minimal_local" not in seen_kinds:
-        return _candidate_generation_error("Codex candidate generation returned no minimal_local candidate")
-    if "repo_native" not in seen_kinds:
-        return _candidate_generation_error("Codex candidate generation returned no repo_native candidate")
 
-    substantive_count = sum(candidate["kind"] != "do_nothing_defer" for candidate in parsed_candidates)
-    if not 2 <= substantive_count <= 3:
-        return _candidate_generation_error("Codex candidate generation returned invalid substantive candidate count")
-
-    return {"candidates": parsed_candidates}
+def _parse_game_named_content(value: Any) -> dict[str, list[str]] | None:
+    if not isinstance(value, dict) or set(value) != set(GAME_NAMED_CONTENT_FIELDS):
+        return None
+    parsed: dict[str, list[str]] = {}
+    for field in GAME_NAMED_CONTENT_FIELDS:
+        items = value.get(field)
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            return None
+        parsed[field] = list(items)
+    return parsed
 
 
 def _candidate_generation_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
-def _candidate_names(candidates: Mapping[str, Any]) -> list[str]:
+def _candidate_ids(candidates: Mapping[str, Any]) -> list[str]:
     candidate_items = candidates.get("candidates")
     if not isinstance(candidate_items, list):
         return []
 
-    names: list[str] = []
+    ids: list[str] = []
     for candidate in candidate_items:
         if not isinstance(candidate, Mapping):
             return []
-        name = candidate.get("name")
-        if not isinstance(name, str):
+        candidate_id = candidate.get("id")
+        if not isinstance(candidate_id, str):
             return []
-        names.append(name)
-    if len(names) != len(set(names)):
+        ids.append(candidate_id)
+    if len(ids) != len(set(ids)):
         return []
-    return names
+    return ids
 
 
-def _evaluation_names(evaluations: Mapping[str, Any]) -> list[str]:
+def _evaluation_ids(evaluations: Mapping[str, Any]) -> list[str]:
     evaluation_items = evaluations.get("evaluations")
     if not isinstance(evaluation_items, list):
         return []
 
-    names: list[str] = []
+    ids: list[str] = []
     for evaluation in evaluation_items:
         if not isinstance(evaluation, Mapping):
             return []
-        name = evaluation.get("candidate_name")
-        if not isinstance(name, str):
+        candidate_id = evaluation.get("candidate_id")
+        if not isinstance(candidate_id, str):
             return []
-        names.append(name)
-    if len(names) != len(set(names)):
+        ids.append(candidate_id)
+    if len(ids) != len(set(ids)):
         return []
-    return names
+    return ids
 
 
-def _parse_candidate_evaluations(raw: str, candidate_names: list[str]) -> dict[str, Any]:
+def _parse_candidate_evaluation(raw: str, candidate_id: str) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -2514,57 +2809,31 @@ def _parse_candidate_evaluations(raw: str, candidate_names: list[str]) -> dict[s
 
     if not isinstance(parsed, dict):
         return _candidate_evaluation_error("Codex candidate evaluation returned non-object JSON")
-    if set(parsed) != set(EVALUATE_CANDIDATES_FIELDS):
-        return _candidate_evaluation_error("Codex candidate evaluation returned invalid fields")
-
-    evaluations = parsed.get("evaluations")
-    if not isinstance(evaluations, list) or len(evaluations) != len(candidate_names):
-        return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluations")
-
-    parsed_evaluations: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for evaluation in evaluations:
-        if not isinstance(evaluation, dict):
-            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation item")
-        if set(evaluation) != set(CANDIDATE_EVALUATION_FIELDS):
-            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation fields")
-        if not isinstance(evaluation["candidate_name"], str) or not isinstance(evaluation["summary"], str):
-            return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation strings")
-
-        candidate_name = evaluation["candidate_name"]
-        if candidate_name not in candidate_names:
-            return _candidate_evaluation_error("Codex candidate evaluation returned unknown candidate_name")
-        if candidate_name in seen_names:
-            return _candidate_evaluation_error("Codex candidate evaluation returned duplicate candidate_name")
-
-        scores = evaluation.get("scores")
-        if not isinstance(scores, dict):
-            return _candidate_evaluation_error("Codex candidate evaluation returned invalid scores")
-        if set(scores) != set(CANDIDATE_EVALUATION_SCORE_FIELDS):
-            return _candidate_evaluation_error("Codex candidate evaluation returned invalid score fields")
-        if not all(isinstance(scores[field], str) for field in CANDIDATE_EVALUATION_SCORE_FIELDS):
+    if set(parsed) != set(CANDIDATE_EVALUATION_FIELDS):
+        return _candidate_evaluation_error("Codex candidate evaluation returned invalid evaluation fields")
+    if parsed.get("candidate_id") != candidate_id:
+        return _candidate_evaluation_error("Codex candidate evaluation returned wrong candidate_id")
+    scores = parsed.get("scores")
+    if not isinstance(scores, dict) or set(scores) != set(CANDIDATE_EVALUATION_SCORE_FIELDS):
+        return _candidate_evaluation_error("Codex candidate evaluation returned invalid score fields")
+    parsed_scores: dict[str, dict[str, str]] = {}
+    for field in CANDIDATE_EVALUATION_SCORE_FIELDS:
+        score = scores.get(field)
+        if not isinstance(score, dict) or set(score) != set(EVALUATION_SCORE_FIELDS):
+            return _candidate_evaluation_error("Codex candidate evaluation returned invalid score object")
+        rating = score.get("rating")
+        reason = score.get("reason")
+        if not isinstance(rating, str) or not isinstance(reason, str):
             return _candidate_evaluation_error("Codex candidate evaluation returned invalid score values")
-
-        seen_names.add(candidate_name)
-        parsed_evaluations.append(
-            {
-                "candidate_name": candidate_name,
-                "scores": {field: scores[field] for field in CANDIDATE_EVALUATION_SCORE_FIELDS},
-                "summary": evaluation["summary"],
-            }
-        )
-
-    if seen_names != set(candidate_names):
-        return _candidate_evaluation_error("Codex candidate evaluation returned incomplete candidate coverage")
-
-    return {"evaluations": parsed_evaluations}
+        parsed_scores[field] = {"rating": rating, "reason": reason}
+    return {"candidate_id": candidate_id, "scores": parsed_scores}
 
 
 def _candidate_evaluation_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
-def _parse_approach_selection(raw: str, candidate_names: list[str]) -> dict[str, Any]:
+def _parse_approach_selection(raw: str, candidate_ids: list[str]) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -2574,27 +2843,42 @@ def _parse_approach_selection(raw: str, candidate_names: list[str]) -> dict[str,
         return _approach_selection_error("Codex approach selection returned non-object JSON")
     if set(parsed) != set(SELECT_APPROACH_FIELDS):
         return _approach_selection_error("Codex approach selection returned invalid fields")
-    if not isinstance(parsed["chosen"], str) or not isinstance(parsed["decision"], str):
-        return _approach_selection_error("Codex approach selection returned invalid selection strings")
 
-    chosen = parsed["chosen"]
-    if chosen not in candidate_names:
+    chosen = parsed.get("selected_candidate_id")
+    if not isinstance(chosen, str) or chosen not in candidate_ids:
         return _approach_selection_error("Codex approach selection returned unknown chosen candidate")
 
-    decision_lower = parsed["decision"].lower()
-    if "constraint" not in decision_lower or ("matrix" not in decision_lower and "evaluation" not in decision_lower):
-        return _approach_selection_error("Codex approach selection returned decision without constraints and matrix")
+    arguments = parsed.get("arguments")
+    if not isinstance(arguments, list):
+        return _approach_selection_error("Codex approach selection returned invalid arguments")
+    parsed_arguments: list[dict[str, str]] = []
+    for argument in arguments:
+        if not isinstance(argument, dict) or set(argument) != set(TOULMIN_ARGUMENT_FIELDS):
+            return _approach_selection_error("Codex approach selection returned invalid argument")
+        if argument.get("role") not in TOULMIN_ARGUMENT_ROLES:
+            return _approach_selection_error("Codex approach selection returned invalid argument role")
+        if argument.get("about_candidate_id") not in candidate_ids:
+            return _approach_selection_error("Codex approach selection returned argument for unknown candidate")
+        if not all(isinstance(argument[field], str) for field in TOULMIN_ARGUMENT_FIELDS):
+            return _approach_selection_error("Codex approach selection returned invalid argument values")
+        parsed_arguments.append({field: argument[field] for field in TOULMIN_ARGUMENT_FIELDS})
 
-    accepted_tradeoffs = parsed.get("accepted_tradeoffs")
-    if not isinstance(accepted_tradeoffs, list) or not all(isinstance(item, str) for item in accepted_tradeoffs):
-        return _approach_selection_error("Codex approach selection returned invalid accepted_tradeoffs")
+    rationale = parsed.get("rationale")
+    if not isinstance(rationale, dict) or set(rationale) != set(DECISION_RATIONALE_FIELDS):
+        return _approach_selection_error("Codex approach selection returned invalid rationale")
+    parsed_rationale: dict[str, list[str]] = {}
+    for field in DECISION_RATIONALE_FIELDS:
+        value = rationale.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return _approach_selection_error("Codex approach selection returned invalid rationale values")
+        parsed_rationale[field] = list(value)
 
     rejected = parsed.get("rejected")
     if not isinstance(rejected, list):
         return _approach_selection_error("Codex approach selection returned invalid rejected list")
 
     parsed_rejected: list[dict[str, str]] = []
-    rejected_names: set[str] = set()
+    rejected_ids: set[str] = set()
     for rejection in rejected:
         if not isinstance(rejection, dict):
             return _approach_selection_error("Codex approach selection returned invalid rejected item")
@@ -2603,23 +2887,23 @@ def _parse_approach_selection(raw: str, candidate_names: list[str]) -> dict[str,
         if not all(isinstance(rejection[field], str) for field in REJECTED_APPROACH_FIELDS):
             return _approach_selection_error("Codex approach selection returned invalid rejected values")
 
-        candidate_name = rejection["candidate_name"]
-        if candidate_name not in candidate_names:
+        rejected_id = rejection["candidate_id"]
+        if rejected_id not in candidate_ids:
             return _approach_selection_error("Codex approach selection returned unknown rejected candidate")
-        if candidate_name == chosen:
+        if rejected_id == chosen:
             return _approach_selection_error("Codex approach selection returned rejection for the chosen candidate")
-        if candidate_name in rejected_names:
+        if rejected_id in rejected_ids:
             return _approach_selection_error("Codex approach selection returned duplicate rejected candidate")
-        rejected_names.add(candidate_name)
-        parsed_rejected.append({"candidate_name": candidate_name, "why_not": rejection["why_not"]})
+        rejected_ids.add(rejected_id)
+        parsed_rejected.append({"candidate_id": rejected_id, "objection": rejection["objection"]})
 
-    if rejected_names != (set(candidate_names) - {chosen}):
+    if rejected_ids != (set(candidate_ids) - {chosen}):
         return _approach_selection_error("Codex approach selection returned incomplete rejected candidates")
 
     return {
-        "chosen": chosen,
-        "decision": parsed["decision"],
-        "accepted_tradeoffs": list(accepted_tradeoffs),
+        "selected_candidate_id": chosen,
+        "arguments": parsed_arguments,
+        "rationale": parsed_rationale,
         "rejected": parsed_rejected,
     }
 
@@ -2639,23 +2923,49 @@ def _parse_implementation_strategy(raw: str) -> dict[str, Any]:
     if set(parsed) != set(IMPLEMENTATION_STRATEGY_FIELDS):
         return _implementation_strategy_error("Codex implementation strategy returned invalid fields")
 
-    for field in ("main_changes", "affected_modules", "data_api_config_changes"):
-        value = parsed.get(field)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            return _implementation_strategy_error(f"Codex implementation strategy returned invalid {field}")
+    systems = parsed.get("systems")
+    if not isinstance(systems, list):
+        return _implementation_strategy_error("Codex implementation strategy returned invalid systems")
+    parsed_systems: list[dict[str, Any]] = []
+    for system in systems:
+        if not isinstance(system, dict) or set(system) != set(IMPLEMENTATION_SYSTEM_FIELDS):
+            return _implementation_strategy_error("Codex implementation strategy returned invalid system")
+        named_content = _parse_implementation_named_content(system.get("named_content"))
+        key_modules = system.get("key_modules")
+        if named_content is None:
+            return _implementation_strategy_error("Codex implementation strategy returned invalid named_content")
+        if not isinstance(key_modules, list) or not all(isinstance(item, str) for item in key_modules):
+            return _implementation_strategy_error("Codex implementation strategy returned invalid key_modules")
+        if not isinstance(system.get("system_name"), str) or not isinstance(system.get("behavior_in_game"), str):
+            return _implementation_strategy_error("Codex implementation strategy returned invalid system strings")
+        parsed_systems.append(
+            {
+                "system_name": system["system_name"],
+                "behavior_in_game": system["behavior_in_game"],
+                "named_content": named_content,
+                "key_modules": list(key_modules),
+            }
+        )
 
-    for field in ("migration_compat", "testing_plan", "observability"):
-        if not isinstance(parsed[field], str):
-            return _implementation_strategy_error(f"Codex implementation strategy returned invalid {field}")
+    persistence = parsed.get("persistence")
+    if not isinstance(persistence, dict) or set(persistence) != set(IMPLEMENTATION_PERSISTENCE_FIELDS):
+        return _implementation_strategy_error("Codex implementation strategy returned invalid persistence")
+    saved_fields = persistence.get("saved_fields")
+    if not isinstance(saved_fields, list) or not all(isinstance(item, str) for item in saved_fields):
+        return _implementation_strategy_error("Codex implementation strategy returned invalid saved_fields")
+    return {"systems": parsed_systems, "persistence": {"saved_fields": list(saved_fields)}}
 
-    return {
-        "main_changes": list(parsed["main_changes"]),
-        "affected_modules": list(parsed["affected_modules"]),
-        "data_api_config_changes": list(parsed["data_api_config_changes"]),
-        "migration_compat": parsed["migration_compat"],
-        "testing_plan": parsed["testing_plan"],
-        "observability": parsed["observability"],
-    }
+
+def _parse_implementation_named_content(value: Any) -> dict[str, list[str]] | None:
+    if not isinstance(value, dict) or set(value) != set(IMPLEMENTATION_NAMED_CONTENT_FIELDS):
+        return None
+    parsed: dict[str, list[str]] = {}
+    for field in IMPLEMENTATION_NAMED_CONTENT_FIELDS:
+        items = value.get(field)
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            return None
+        parsed[field] = list(items)
+    return parsed
 
 
 def _implementation_strategy_error(reason: str) -> dict[str, Any]:
@@ -2672,12 +2982,20 @@ def _parse_right_size_patch_plan(raw: str) -> dict[str, Any]:
         return _right_size_patch_plan_error("Codex patch plan right-sizing returned non-object JSON")
     if set(parsed) != set(RIGHT_SIZE_PATCH_PLAN_FIELDS):
         return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid fields")
-    if not isinstance(parsed["first_slice"], str) or not isinstance(parsed["yagni_note"], str):
-        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid string fields")
-
-    follow_up_slices = parsed.get("follow_up_slices")
-    if not isinstance(follow_up_slices, list) or not all(isinstance(item, str) for item in follow_up_slices):
-        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid follow_up_slices")
+    first_playable = _parse_patch_plan_first_playable(parsed.get("first_playable"))
+    if first_playable is None:
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid first_playable")
+    follow_ups = parsed.get("follow_ups")
+    if not isinstance(follow_ups, list):
+        return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid follow_ups")
+    parsed_follow_ups: list[dict[str, Any]] = []
+    for item in follow_ups:
+        if not isinstance(item, dict) or set(item) != set(PATCH_PLAN_FOLLOW_UP_FIELDS):
+            return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid follow_up")
+        named_content = _parse_game_named_content(item.get("named_content"))
+        if named_content is None or not isinstance(item.get("adds"), str):
+            return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid follow_up values")
+        parsed_follow_ups.append({"adds": item["adds"], "named_content": named_content})
 
     deferred = parsed.get("deferred")
     if not isinstance(deferred, list):
@@ -2693,11 +3011,25 @@ def _parse_right_size_patch_plan(raw: str) -> dict[str, Any]:
             return _right_size_patch_plan_error("Codex patch plan right-sizing returned invalid deferred values")
         parsed_deferred.append({"item": item["item"], "why_safe_to_defer": item["why_safe_to_defer"]})
 
+    return {"first_playable": first_playable, "follow_ups": parsed_follow_ups, "deferred": parsed_deferred}
+
+
+def _parse_patch_plan_first_playable(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != set(PATCH_PLAN_FIRST_PLAYABLE_FIELDS):
+        return None
+    player_can = value.get("player_can")
+    named_content = _parse_game_named_content(value.get("named_content"))
+    win_or_progress_condition = value.get("win_or_progress_condition")
+    how_verified = value.get("how_verified")
+    if not isinstance(player_can, list) or not all(isinstance(item, str) for item in player_can):
+        return None
+    if named_content is None or not isinstance(win_or_progress_condition, str) or not isinstance(how_verified, str):
+        return None
     return {
-        "first_slice": parsed["first_slice"],
-        "follow_up_slices": list(follow_up_slices),
-        "deferred": parsed_deferred,
-        "yagni_note": parsed["yagni_note"],
+        "player_can": list(player_can),
+        "named_content": named_content,
+        "win_or_progress_condition": win_or_progress_condition,
+        "how_verified": how_verified,
     }
 
 
@@ -2716,11 +3048,6 @@ def _parse_surface_risks(raw: str) -> dict[str, Any]:
     if set(parsed) != set(SURFACE_RISKS_FIELDS):
         return _surface_risks_error("Codex risk surfacing returned invalid fields")
 
-    for field in ("assumptions", "open_questions", "spikes", "reviewer_questions"):
-        value = parsed.get(field)
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            return _surface_risks_error(f"Codex risk surfacing returned invalid {field}")
-
     risks = parsed.get("risks")
     if not isinstance(risks, list):
         return _surface_risks_error("Codex risk surfacing returned invalid risks")
@@ -2733,15 +3060,19 @@ def _parse_surface_risks(raw: str) -> dict[str, Any]:
             return _surface_risks_error("Codex risk surfacing returned invalid risk fields")
         if not all(isinstance(item[field], str) for field in SURFACED_RISK_FIELDS):
             return _surface_risks_error("Codex risk surfacing returned invalid risk values")
-        parsed_risks.append({"risk": item["risk"], "mitigation": item["mitigation"]})
+        if item["attaches_to"] not in RISK_ATTACHES_TO:
+            return _surface_risks_error("Codex risk surfacing returned invalid risk attachment")
+        parsed_risks.append(
+            {
+                "id": item["id"],
+                "risk": item["risk"],
+                "mitigation": item["mitigation"],
+                "attaches_to": item["attaches_to"],
+                "target_id": item["target_id"],
+            }
+        )
 
-    return {
-        "assumptions": list(parsed["assumptions"]),
-        "risks": parsed_risks,
-        "open_questions": list(parsed["open_questions"]),
-        "spikes": list(parsed["spikes"]),
-        "reviewer_questions": list(parsed["reviewer_questions"]),
-    }
+    return {"risks": parsed_risks}
 
 
 def _surface_risks_error(reason: str) -> dict[str, Any]:
@@ -2767,20 +3098,31 @@ def _technical_approach_step_failure(step: str, result: Any) -> dict[str, Any] |
 
 def _provided_approach_selection(provided_approach: Any) -> dict[str, Any]:
     return {
-        "chosen": "Requester-provided Technical Approach",
-        "decision": (
-            "Use the requester-provided Technical Approach as the basis and refine it against Reference and "
-            "repository evidence."
-        ),
-        "accepted_tradeoffs": [
-            "Requester intent is preserved; refinement is limited to grounding, filling gaps, and surfacing risks."
+        "selected_candidate_id": "provided_approach",
+        "arguments": [
+            {
+                "role": "support",
+                "about_candidate_id": "provided_approach",
+                "claim": "Use the requester-provided Technical Approach as the primary design node.",
+                "grounds": "The requester supplied an approach to preserve at the RFC boundary.",
+                "warrant": "Receive refines and grounds requester intent instead of discarding it.",
+                "backing": "The RFC receive procedure treats provided Technical Approach content as the basis.",
+                "rebuttal": "Generated alternatives are skipped unless the provided basis is absent.",
+            }
         ],
+        "rationale": {
+            "because": ["Requester intent is preserved as the primary design input."],
+            "under_constraints": ["Refinement remains inside ai_org.rfc and may use Reference and repo evidence."],
+            "accepting_tradeoffs": ["Generated candidate comparison is not performed for this provided basis."],
+        },
         "rejected": [],
         "requester_approach": _json_safe(provided_approach),
     }
 
 
 def _assemble_technical_approach(
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
     selected: Mapping[str, Any],
     candidates: Mapping[str, Any] | None,
     evaluations: Mapping[str, Any] | None,
@@ -2793,128 +3135,268 @@ def _assemble_technical_approach(
     provided_approach: Any | None = None,
     rfc_view: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cross_links: list[dict[str, str]] = []
+    problem = _problem_root_from_normalized(normalized_problem)
+    problem["constraints"] = _constraint_tree_nodes(constraints)
+    problem["prior_art"] = _prior_art_tree_nodes(prior_art)
+    problem["question"] = _question_tree(
+        selected,
+        candidates,
+        evaluations,
+        implementation,
+        patch_plan,
+        risks,
+        cross_links,
+        provided_approach=provided_approach,
+    )
+    problem["open_questions"] = []
+
+    _add_cross_link(cross_links, "question:approach", "problem", "derived_from")
+    for goal in problem["goals"]:
+        _add_cross_link(cross_links, goal["id"], "problem", "satisfies")
+    for constraint in problem["constraints"]["hard"] + problem["constraints"]["soft"]:
+        _add_cross_link(cross_links, constraint["id"], "problem", "derived_from")
+    for pattern in problem["prior_art"]:
+        _add_cross_link(cross_links, pattern["id"], "problem", "derived_from")
+
+    return {"problem": problem, "cross_links": cross_links}
+
+
+CROSS_LINK_TYPES = (
+    "supports",
+    "objects_to",
+    "satisfies",
+    "violates",
+    "depends_on",
+    "mitigates",
+    "implements",
+    "tests",
+    "derived_from",
+    "related_to",
+)
+
+
+def _problem_root_from_normalized(normalized_problem: Mapping[str, Any]) -> dict[str, Any]:
+    goals: list[dict[str, Any]] = []
+    for index, goal in enumerate(normalized_problem.get("success_criteria", []), start=1):
+        if isinstance(goal, Mapping):
+            goal_node = dict(goal)
+            goal_node["id"] = f"goal:{index}"
+            goals.append(goal_node)
     return {
-        "chosen_approach": _chosen_approach(selected),
-        "alternatives_with_why_not": _alternatives_with_why_not(
-            selected,
-            candidates,
-            provided_approach=provided_approach,
-            rfc_view=rfc_view,
-        ),
-        "prior_art_rationale": dict(prior_art),
-        "trade_off_analysis": _trade_off_analysis(evaluations, selected),
-        "implementation_plan": _implementation_plan(implementation),
-        "compat_migration": implementation["migration_compat"],
-        "testing_plan": implementation["testing_plan"],
-        "scoped_patch_plan": dict(patch_plan),
-        "risks_open_questions": dict(risks),
-        "source": source,
+        "id": "problem",
+        "problem": normalized_problem.get("problem", ""),
+        "affected": normalized_problem.get("affected", ""),
+        "current_inadequacy": normalized_problem.get("current_inadequacy", ""),
+        "goals": goals,
+        "non_goals": list(normalized_problem.get("non_goals", [])),
+        "constraints": {"hard": [], "soft": []},
+        "prior_art": [],
+        "question": {"id": "question:approach", "text": "", "candidates": [], "decision": {}},
+        "open_questions": [],
     }
 
 
-def _chosen_approach(selected: Mapping[str, Any]) -> dict[str, Any]:
-    chosen = {
-        "chosen": selected["chosen"],
-        "decision": selected["decision"],
-        "accepted_tradeoffs": list(selected["accepted_tradeoffs"]),
-        "rejected": [dict(item) for item in selected["rejected"]],
+def _constraint_tree_nodes(constraints: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    return {
+        "hard": [
+            _node_with_id(item, f"constraint:hard:{index}")
+            for index, item in enumerate(constraints.get("hard_constraints", []), start=1)
+            if isinstance(item, Mapping)
+        ],
+        "soft": [
+            _node_with_id(item, f"constraint:soft:{index}")
+            for index, item in enumerate(constraints.get("soft_preferences", []), start=1)
+            if isinstance(item, Mapping)
+        ],
     }
-    if "requester_approach" in selected:
-        chosen["requester_approach"] = _json_safe(selected["requester_approach"])
-    return chosen
 
 
-def _alternatives_with_why_not(
+def _prior_art_tree_nodes(prior_art: Mapping[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for index, pattern in enumerate(prior_art.get("patterns", []), start=1):
+        if not isinstance(pattern, Mapping):
+            continue
+        name = pattern.get("name")
+        node_id = f"prior_art:{_slug(str(name)) or index}"
+        nodes.append(_node_with_id(pattern, node_id))
+    return nodes
+
+
+def _question_tree(
     selected: Mapping[str, Any],
     candidates: Mapping[str, Any] | None,
+    evaluations: Mapping[str, Any] | None,
+    implementation: Mapping[str, Any],
+    patch_plan: Mapping[str, Any],
+    risks: Mapping[str, Any],
+    cross_links: list[dict[str, str]],
     *,
     provided_approach: Any | None = None,
-    rfc_view: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate_nodes = _candidate_tree_nodes(candidates, evaluations, selected, risks, cross_links, provided_approach)
+    decision = _decision_tree_node(selected, implementation, patch_plan, risks, cross_links)
+    return {
+        "id": "question:approach",
+        "text": "Which implementation approach best satisfies the problem under the derived constraints?",
+        "candidates": candidate_nodes,
+        "decision": decision,
+    }
+
+
+def _candidate_tree_nodes(
+    candidates: Mapping[str, Any] | None,
+    evaluations: Mapping[str, Any] | None,
+    selected: Mapping[str, Any],
+    risks: Mapping[str, Any],
+    cross_links: list[dict[str, str]],
+    provided_approach: Any | None,
 ) -> list[dict[str, Any]]:
-    rejected = selected.get("rejected", [])
-    candidate_map = _candidate_map(candidates)
-    alternatives: list[dict[str, Any]] = []
-    for item in rejected if isinstance(rejected, list) else []:
-        if not isinstance(item, Mapping):
-            continue
-        candidate_name = item.get("candidate_name")
-        if not isinstance(candidate_name, str):
-            continue
-        alternative: dict[str, Any] = {
-            "candidate_name": candidate_name,
-            "why_not": item.get("why_not", ""),
-        }
-        candidate = candidate_map.get(candidate_name)
-        if candidate:
-            alternative["candidate"] = dict(candidate)
-        alternatives.append(alternative)
+    candidate_items = candidates.get("candidates", []) if isinstance(candidates, Mapping) else []
+    if not candidate_items and provided_approach is not None:
+        candidate_items = [
+            {
+                "id": "provided_approach",
+                "name": "Requester-provided Technical Approach",
+                "kind": "repo_native",
+                "summary": "Preserve and refine the requester-provided Technical Approach.",
+                "first_playable_moment": {
+                    "player_actions": ["Follow the requester-provided approach through implementation planning."],
+                    "named_content": {
+                        "locations": ["Requester-provided scope"],
+                        "enemies": ["Requester-provided conflicts"],
+                        "items_or_spells": ["Requester-provided mechanisms"],
+                    },
+                    "win_or_progress_condition": "The provided approach is grounded into implementation and patch-plan nodes.",
+                },
+                "core_systems": ["RFC receive Technical Approach refinement"],
+                "draws_on": ["Requester-provided Technical Approach"],
+            }
+        ]
+    evaluation_items = evaluations.get("evaluations", []) if isinstance(evaluations, Mapping) else []
+    evaluation_map = {
+        item["candidate_id"]: item
+        for item in evaluation_items
+        if isinstance(item, Mapping) and isinstance(item.get("candidate_id"), str)
+    }
+    argument_map: dict[str, list[dict[str, str]]] = {}
+    for argument in selected.get("arguments", []):
+        if isinstance(argument, Mapping) and isinstance(argument.get("about_candidate_id"), str):
+            argument_map.setdefault(argument["about_candidate_id"], []).append(dict(argument))
 
-    if alternatives or provided_approach is None:
-        return alternatives
+    nodes: list[dict[str, Any]] = []
+    prior_art_links: dict[str, str] = {}
+    for candidate in candidate_items:
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_id = str(candidate["id"])
+        node = dict(candidate)
+        evaluation = dict(evaluation_map.get(candidate_id, {"candidate_id": candidate_id, "scores": {}}))
+        evaluation["id"] = f"evaluation:{candidate_id}"
+        evaluation["arguments"] = argument_map.get(candidate_id, [])
+        node["evaluation"] = evaluation
+        node["risks"] = _risks_for("candidate", candidate_id, risks)
+        nodes.append(node)
+        _add_cross_link(cross_links, candidate_id, "question:approach", "depends_on")
+        _add_cross_link(cross_links, evaluation["id"], candidate_id, "derived_from")
+        for argument in evaluation["arguments"]:
+            link_type = "supports" if argument.get("role") == "support" else "objects_to"
+            _add_cross_link(cross_links, f"argument:{candidate_id}:{len(cross_links)}", candidate_id, link_type)
+        for draw in candidate.get("draws_on", []):
+            if isinstance(draw, str):
+                prior_id = prior_art_links.setdefault(draw, f"prior_art:{_slug(draw)}")
+                _add_cross_link(cross_links, candidate_id, prior_id, "derived_from")
+        for risk in node["risks"]:
+            _add_cross_link(cross_links, risk["id"], candidate_id, "mitigates")
+    return nodes
 
-    provided_alternatives = _provided_alternatives(provided_approach, rfc_view)
+
+def _decision_tree_node(
+    selected: Mapping[str, Any],
+    implementation: Mapping[str, Any],
+    patch_plan: Mapping[str, Any],
+    risks: Mapping[str, Any],
+    cross_links: list[dict[str, str]],
+) -> dict[str, Any]:
+    selected_id = str(selected["selected_candidate_id"])
+    decision_id = f"decision:{selected_id}"
+    implementation_id = f"implementation:{selected_id}"
+    patch_plan_id = f"patch_plan:{selected_id}"
+    implementation_node = dict(implementation)
+    implementation_node["id"] = implementation_id
+    implementation_node["patch_plan"] = _node_with_id(patch_plan, patch_plan_id)
+    implementation_node["risks"] = _risks_for("implementation", implementation_id, risks)
+    decision_node = {
+        "id": decision_id,
+        "selected_candidate_id": selected_id,
+        "arguments": [dict(item) for item in selected.get("arguments", [])],
+        "rationale": {
+            "because": list(selected.get("rationale", {}).get("because", [])),
+            "under_constraints": list(selected.get("rationale", {}).get("under_constraints", [])),
+            "accepting_tradeoffs": list(selected.get("rationale", {}).get("accepting_tradeoffs", [])),
+        },
+        "rejected": [dict(item) for item in selected.get("rejected", [])],
+        "risks": _risks_for("decision", decision_id, risks),
+        "implementation": implementation_node,
+    }
+    _add_cross_link(cross_links, decision_id, "question:approach", "derived_from")
+    _add_cross_link(cross_links, decision_id, selected_id, "supports")
+    _add_cross_link(cross_links, implementation_id, decision_id, "implements")
+    _add_cross_link(cross_links, patch_plan_id, implementation_id, "implements")
+    for rejection in decision_node["rejected"]:
+        _add_cross_link(cross_links, decision_id, rejection["candidate_id"], "objects_to")
+    for risk in decision_node["risks"]:
+        _add_cross_link(cross_links, risk["id"], decision_id, "mitigates")
+    for risk in implementation_node["risks"]:
+        _add_cross_link(cross_links, risk["id"], implementation_id, "mitigates")
+    return decision_node
+
+
+def _risks_for(attachment: str, target_id: str, risks: Mapping[str, Any]) -> list[dict[str, str]]:
+    risk_items = risks.get("risks", []) if isinstance(risks, Mapping) else []
     return [
-        {
-            "candidate_name": alternative,
-            "why_not": "Not selected by the requester-provided Technical Approach basis.",
-        }
-        for alternative in provided_alternatives
+        dict(risk)
+        for risk in risk_items
+        if isinstance(risk, Mapping) and risk.get("attaches_to") == attachment and risk.get("target_id") == target_id
     ]
 
 
-def _candidate_map(candidates: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
-    if not isinstance(candidates, Mapping):
-        return {}
-    candidate_items = candidates.get("candidates")
-    if not isinstance(candidate_items, list):
-        return {}
-    return {
-        candidate["name"]: candidate
-        for candidate in candidate_items
-        if isinstance(candidate, Mapping) and isinstance(candidate.get("name"), str)
-    }
+def _node_with_id(node: Mapping[str, Any], node_id: str) -> dict[str, Any]:
+    copied = dict(node)
+    copied["id"] = node_id
+    return copied
 
 
-def _provided_alternatives(
-    provided_approach: Any,
-    rfc_view: Mapping[str, Any] | None = None,
-) -> list[str]:
-    alternatives: list[str] = []
-    if isinstance(provided_approach, Mapping):
-        value = provided_approach.get("alternatives_with_why_not") or provided_approach.get("alternatives")
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    alternatives.append(item)
-                elif isinstance(item, Mapping):
-                    name = item.get("candidate_name") or item.get("name") or item.get("alternative")
-                    if isinstance(name, str):
-                        alternatives.append(name)
-    if not alternatives and isinstance(rfc_view, Mapping):
-        rfc_alternatives = rfc_view.get("alternatives")
-        if isinstance(rfc_alternatives, list):
-            alternatives.extend(item for item in rfc_alternatives if isinstance(item, str))
-    return alternatives
+def _add_cross_link(cross_links: list[dict[str, str]], from_id: str, to_id: str, link_type: str) -> None:
+    if link_type not in CROSS_LINK_TYPES:
+        raise ValueError(f"invalid cross_link type: {link_type}")
+    link = {"from": from_id, "to": to_id, "type": link_type}
+    if link not in cross_links:
+        cross_links.append(link)
 
 
-def _trade_off_analysis(
-    evaluations: Mapping[str, Any] | None,
+def _validate_risk_targets(
+    risks: Mapping[str, Any],
+    candidates: Mapping[str, Any] | None,
     selected: Mapping[str, Any],
-) -> dict[str, Any]:
-    return {
-        "evaluations": list(evaluations.get("evaluations", [])) if isinstance(evaluations, Mapping) else [],
-        "accepted_tradeoffs": list(selected["accepted_tradeoffs"]),
-        "decision": selected["decision"],
+) -> str | None:
+    candidate_ids = set(_candidate_ids(candidates)) if isinstance(candidates, Mapping) else {"provided_approach"}
+    selected_id = str(selected.get("selected_candidate_id", ""))
+    valid_targets = {
+        "candidate": candidate_ids,
+        "decision": {f"decision:{selected_id}"},
+        "implementation": {f"implementation:{selected_id}"},
     }
-
-
-def _implementation_plan(implementation: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "main_changes": list(implementation["main_changes"]),
-        "affected_modules": list(implementation["affected_modules"]),
-        "data_api_config_changes": list(implementation["data_api_config_changes"]),
-        "observability": implementation["observability"],
-    }
+    for risk in risks.get("risks", []) if isinstance(risks, Mapping) else []:
+        if not isinstance(risk, Mapping):
+            continue
+        attachment = risk.get("attaches_to")
+        target_id = risk.get("target_id")
+        if not isinstance(attachment, str) or not isinstance(target_id, str):
+            return "risk target is invalid"
+        if target_id not in valid_targets.get(attachment, set()):
+            return f"risk {risk.get('id', '')} targets unknown {attachment} node {target_id}"
+    return None
 
 
 def _json_safe(value: Any) -> Any:
