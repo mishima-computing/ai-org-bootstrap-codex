@@ -50,6 +50,29 @@
 # technical-approach decisions). The amateur steers by ANSWERING (intent/preferences), not by AUTHORING.
 # The formed Technical Approach carries: problem/impact, reference-derived prior-art, implementation strategy,
 # alternatives-with-why-not, compatibility/migration, testing plan, scope/patch plan, open questions.
+#
+# TECHNICAL APPROACH — formation procedure (grounded in RFC/PEP + ADR + ATAM + senior-dev practice; TODO, build
+# ONE STEP AT A TIME). Codex STRUCTURES the reasoning and exposes evidence/trade-offs; it must NOT emit a one-shot
+# design claim. Weighting stays judgment-heavy (final priorities / risk tolerance / architectural taste are human):
+#   1. Normalize the problem: problem, affected users/systems, current inadequacy, success criteria, non-goals.
+#   2. Extract constraints: hard constraints + soft preferences (repo architecture, compatibility, data/API
+#      contracts, performance/security/reliability, test constraints, delivery scope).
+#   3. Build a prior-art map from the REFERENCE (design + implementation facets) + repo context: 3-6 patterns,
+#      each {pattern, where-seen, when-applies, tradeoffs, adopt|adapt|reject}. This is where e.g. an engine like
+#      Godot lands as a CANDIDATE — put on the table and judged on merit/fit, NOT on how often it appeared.
+#   4. Generate 2-3 candidate approaches: always a minimal/local one, a repo-native/reference-aligned one, and a
+#      more-general/architectural one when plausible; optionally do-nothing/defer when requirements are weak.
+#   5. Evaluate candidates on a compact matrix: problem fit, repo fit, complexity, quality attributes,
+#      compat/migration, testability, operability, reversibility, risk, evidence.
+#   6. Select with rationale: "Choose X because ... under constraints ..., accepting tradeoff F. Reject Y/Z because."
+#   7. Implementation strategy: main code changes, affected modules, data/API/config changes, migration/compat,
+#      testing plan, observability/operability where relevant.
+#   8. Right-size the patch plan: first safe slice, follow-up slices, explicitly deferred work + why safe to defer
+#      (YAGNI, unless the deferred decision is hard to reverse or affects major quality attributes).
+#   9. Surface risks & open questions: assumptions, risks, unresolved questions, spikes/prototypes, reviewer Qs.
+#  10. Emit the Technical Approach section: chosen approach, alternatives-with-why-not, prior-art rationale,
+#      trade-off analysis, implementation plan, compat/migration, testing plan, scoped patch plan, risks/open Qs.
+# Question-back to the requester (needs_confirmation extended to approach decisions) is deferred — build it LAST.
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 
