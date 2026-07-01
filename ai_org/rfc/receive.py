@@ -78,6 +78,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -88,6 +89,8 @@ from typing import Any, Mapping
 import ai_org.reference as reference
 import ai_org.rfc.codex_exec as codex_exec
 
+
+LOGGER = logging.getLogger(__name__)
 
 COMMON_8_FIELDS = (
     "title",
@@ -318,6 +321,7 @@ PRIOR_ART_DISPOSITION_FIELDS = (
 PRIOR_ART_DISPOSITIONS = ("adopt", "adapt", "reject")
 PRIOR_ART_MAP_FIELDS = ("patterns",)
 MAX_PRIOR_ART_REGENERATIONS = 2
+MAX_PRIOR_ART_REFERENCE_EXPANSIONS = 8
 
 PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2207,9 +2211,10 @@ def _prior_art_key_concepts(
     approach: Mapping[str, Any] | None = None,
 ) -> list[str]:
     concepts: list[str] = []
-    reference_context = dict(context or {})
+    context_values = dict(context or {})
+    reference_context = _reference_stack_context(context_values)
     for field in ("reference_terms", "key_concepts", "concepts", "terms"):
-        _extend_concepts(concepts, reference_context.get(field))
+        _extend_concepts(concepts, context_values.get(field))
 
     extraction_text = (
         _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
@@ -2275,19 +2280,86 @@ def _read_prior_art_reference_facets(
     concepts: list[str],
     context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    reference_context = dict(context or {})
+    reference_context = _reference_stack_context(context)
     facets: list[dict[str, Any]] = []
+    already_present: list[str] = []
+    researched: list[str] = []
+    empty_after_research: list[str] = []
+    skipped_after_cap: list[str] = []
+    expansion_count = 0
     for term in concepts:
-        term_facets: dict[str, Any] = {"term": term, "design": [], "implementation": []}
-        for kind in ("design", "implementation"):
-            lookup = reference.lookup(term, reference_context, kind=kind)
-            candidates = lookup.get("candidates", []) if isinstance(lookup, dict) else []
-            if not candidates:
-                candidates = reference.query({"term": term, "kind": kind})
-            term_facets[kind] = _trim_reference_candidates(candidates)
-        term_facets["status"] = "retrieved" if term_facets["design"] or term_facets["implementation"] else "not_found"
+        term_facets = _lookup_prior_art_reference_facets(term, reference_context)
+        if term_facets["design"] or term_facets["implementation"]:
+            term_facets["status"] = "retrieved"
+            already_present.append(term)
+            facets.append(term_facets)
+            continue
+
+        if expansion_count >= MAX_PRIOR_ART_REFERENCE_EXPANSIONS:
+            term_facets["status"] = "not_researched_cap"
+            skipped_after_cap.append(term)
+            facets.append(term_facets)
+            continue
+
+        expanded = reference.expand(term, reference_context)
+        expansion_count += 1
+        term_facets = _lookup_prior_art_reference_facets(term, reference_context)
+        if not term_facets["design"]:
+            term_facets["design"] = _trim_expanded_reference_candidates(expanded, "design")
+        if not term_facets["implementation"]:
+            term_facets["implementation"] = _trim_expanded_reference_candidates(expanded, "implementation")
+        if term_facets["design"] or term_facets["implementation"]:
+            term_facets["status"] = "researched"
+            researched.append(term)
+        else:
+            term_facets["status"] = "not_found"
+            empty_after_research.append(term)
         facets.append(term_facets)
+    LOGGER.info(
+        "RFC prior-art Reference facets: already_present=%s researched=%s empty_after_research=%s "
+        "skipped_after_cap=%s expansion_cap=%s",
+        already_present,
+        researched,
+        empty_after_research,
+        skipped_after_cap,
+        MAX_PRIOR_ART_REFERENCE_EXPANSIONS,
+    )
     return facets
+
+
+def _reference_stack_context(context: Mapping[str, Any] | None) -> dict[str, str]:
+    context_values = dict(context or {})
+    stack = context_values.get("stack")
+    if isinstance(stack, Mapping):
+        context_values = {**context_values, **stack}
+    return {
+        key: str(value)
+        for key in ("language", "environment", "version")
+        if (value := context_values.get(key)) is not None and str(value).strip()
+    }
+
+
+def _lookup_prior_art_reference_facets(term: str, reference_context: Mapping[str, Any]) -> dict[str, Any]:
+    term_facets: dict[str, Any] = {"term": term, "design": [], "implementation": []}
+    for kind in ("design", "implementation"):
+        lookup = reference.lookup(term, reference_context, kind=kind)
+        candidates = lookup.get("candidates", []) if isinstance(lookup, dict) else []
+        term_facets[kind] = _trim_reference_candidates(candidates)
+    return term_facets
+
+
+def _trim_expanded_reference_candidates(expanded: Any, kind: str) -> list[dict[str, str]]:
+    if not isinstance(expanded, Mapping):
+        return []
+    candidates = expanded.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    matching = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping) and str(candidate.get("kind") or "").strip().lower() == kind
+    ]
+    return _trim_reference_candidates(matching)
 
 
 def _trim_reference_candidates(candidates: Any) -> list[dict[str, str]]:
@@ -2792,7 +2864,30 @@ def _lint_prior_art_map(
     reference_facets: list[dict[str, Any]],
     approach: Mapping[str, Any],
 ) -> list[str]:
-    return _lint_empty_slots(parsed)
+    errors = _lint_empty_slots(parsed)
+    retrieved = _retrieved_reference_facet_index(reference_facets)
+    for pattern in parsed.get("patterns", []):
+        if not isinstance(pattern, Mapping):
+            continue
+        source = pattern.get("source")
+        if not isinstance(source, Mapping):
+            continue
+        concept = str(source.get("reference_concept") or "").strip().lower()
+        facet_kind = str(source.get("facet_kind") or "").strip()
+        available_kinds = retrieved.get(concept, set())
+        if available_kinds and facet_kind == "none":
+            errors.append(
+                "prior_art source uses facet_kind none for "
+                f"{source.get('reference_concept')!r}, but Reference returned "
+                f"{', '.join(sorted(available_kinds))} facets"
+            )
+        elif available_kinds and facet_kind not in available_kinds:
+            errors.append(
+                "prior_art source uses unavailable facet_kind "
+                f"{facet_kind!r} for {source.get('reference_concept')!r}; "
+                f"available: {', '.join(sorted(available_kinds))}"
+            )
+    return errors
 
 
 def _retrieved_reference_facet_index(reference_facets: list[dict[str, Any]]) -> dict[str, set[str]]:

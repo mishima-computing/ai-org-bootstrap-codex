@@ -347,6 +347,121 @@ def test_risk_targets_fail_closed_when_parent_is_unknown(monkeypatch, tmp_path):
     assert "targets unknown implementation node" in result["error"]
 
 
+def test_prior_art_expands_reference_on_miss_and_uses_researched_facets(monkeypatch, tmp_path):
+    expand_calls = []
+    lookup_contexts = []
+    prompts = []
+    stack_context = {"language": "Python", "environment": "CLI", "version": "3.12"}
+    context = {**stack_context, "repo": tmp_path, "repo_root": tmp_path}
+
+    monkeypatch.setattr(receive_module, "_prior_art_key_concepts", lambda *args, **kwargs: ["battle loop"])
+
+    def fake_lookup(term, reference_context, kind=None):
+        lookup_contexts.append(dict(reference_context))
+        assert reference_context == stack_context
+        assert "repo" not in reference_context
+        assert "repo_root" not in reference_context
+        return {"term": term, "candidates": []}
+
+    def fake_expand(term, reference_context):
+        expand_calls.append((term, dict(reference_context)))
+        return {
+            "term": term,
+            "candidates": [
+                _reference_candidate("design", "researched design summary"),
+                _reference_candidate("implementation", "researched implementation summary"),
+            ],
+        }
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompt = kwargs["prompt"]
+        prompts.append(prompt)
+        assert "researched design summary" in prompt
+        assert "researched implementation summary" in prompt
+        assert '"status": "researched"' in prompt
+        facet_kind = "none" if len(prompts) == 1 else "design"
+        return {"ok": True, "raw": json.dumps(_prior_art_map_with_facet("battle loop", facet_kind))}
+
+    monkeypatch.setattr(receive_module.reference, "lookup", fake_lookup)
+    monkeypatch.setattr(receive_module.reference, "expand", fake_expand)
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._build_prior_art_map(_rfc_view(), tmp_path, context, {"normalized_problem": _normalized_problem()})
+
+    assert result["patterns"][0]["source"]["facet_kind"] == "design"
+    assert expand_calls == [("battle loop", stack_context)]
+    assert lookup_contexts
+    assert len(prompts) == 2
+
+
+def test_prior_art_reference_hit_does_not_expand(monkeypatch):
+    expand_calls = []
+    stack_context = {"language": "Python", "environment": "CLI", "version": "3.12"}
+
+    def fake_lookup(term, reference_context, kind=None):
+        if kind == "design":
+            return {"term": term, "candidates": [_reference_candidate("design", "stored design summary")]}
+        return {"term": term, "candidates": []}
+
+    monkeypatch.setattr(receive_module.reference, "lookup", fake_lookup)
+    monkeypatch.setattr(receive_module.reference, "expand", lambda *args, **kwargs: expand_calls.append(args))
+
+    facets = receive_module._read_prior_art_reference_facets(["battle loop"], {**stack_context, "repo": Path(".")})
+
+    assert expand_calls == []
+    assert facets[0]["status"] == "retrieved"
+    assert facets[0]["design"][0]["summary"] == "stored design summary"
+
+
+def test_prior_art_allows_none_only_when_expand_produces_no_facets(monkeypatch, tmp_path):
+    expand_calls = []
+
+    monkeypatch.setattr(receive_module, "_prior_art_key_concepts", lambda *args, **kwargs: ["unknown pattern"])
+    monkeypatch.setattr(
+        receive_module.reference,
+        "lookup",
+        lambda term, reference_context, kind=None: {"term": term, "candidates": []},
+    )
+
+    def fake_expand(term, reference_context):
+        expand_calls.append(term)
+        return {"term": term, "candidates": []}
+
+    monkeypatch.setattr(receive_module.reference, "expand", fake_expand)
+    monkeypatch.setattr(
+        receive_module.codex_exec,
+        "run_json",
+        lambda repo, **kwargs: {"ok": True, "raw": json.dumps(_prior_art_map_with_facet("unknown pattern", "none"))},
+    )
+
+    result = receive_module._build_prior_art_map(_rfc_view(), tmp_path, {}, {"normalized_problem": _normalized_problem()})
+
+    assert expand_calls == ["unknown pattern"]
+    assert result["patterns"][0]["source"]["facet_kind"] == "none"
+
+
+def test_prior_art_reference_expansion_is_capped(monkeypatch):
+    concepts = [f"concept {index}" for index in range(receive_module.MAX_PRIOR_ART_REFERENCE_EXPANSIONS + 2)]
+    expand_calls = []
+
+    monkeypatch.setattr(
+        receive_module.reference,
+        "lookup",
+        lambda term, reference_context, kind=None: {"term": term, "candidates": []},
+    )
+
+    def fake_expand(term, reference_context):
+        expand_calls.append(term)
+        return {"term": term, "candidates": []}
+
+    monkeypatch.setattr(receive_module.reference, "expand", fake_expand)
+
+    facets = receive_module._read_prior_art_reference_facets(concepts, {})
+
+    assert expand_calls == concepts[: receive_module.MAX_PRIOR_ART_REFERENCE_EXPANSIONS]
+    assert [facet["status"] for facet in facets[-2:]] == ["not_researched_cap", "not_researched_cap"]
+
+
 def test_technical_approach_schemas_are_codex_valid():
     for schema in (
         receive_module.NORMALIZE_PROBLEM_SCHEMA,
@@ -460,6 +575,48 @@ def _prior_art_map() -> dict[str, object]:
                 "traces_to": ["normalized_problem.success_criteria[0]"],
             }
         ]
+    }
+
+
+def _prior_art_map_with_facet(reference_concept: str, facet_kind: str) -> dict[str, object]:
+    return {
+        "patterns": [
+            {
+                "name": f"Prior-art pattern {index}",
+                "source": {
+                    "reference_concept": reference_concept,
+                    "facet_kind": facet_kind,
+                    "where": "Reference." if facet_kind != "none" else "RFC and repository.",
+                },
+                "when_applies": "When the RFC needs a grounded implementation direction.",
+                "tradeoffs": {"pros": ["Grounded direction."], "cons": ["Requires validation."]},
+                "disposition": {"choice": "adopt", "why": "It fits the RFC constraints."},
+                "traces_to": ["normalized_problem.success_criteria[0]"],
+            }
+            for index in range(1, 4)
+        ]
+    }
+
+
+def _reference_candidate(kind: str, summary: str) -> dict[str, str]:
+    return {
+        "kind": kind,
+        "term": "battle loop",
+        "summary": summary,
+        "snippet": f"{kind} snippet",
+        "pitfalls": f"{kind} pitfalls",
+        "structure": f"{kind} structure",
+        "rationale": f"{kind} rationale",
+        "when_to_use": f"{kind} use",
+        "tradeoffs": f"{kind} tradeoffs",
+        "implementation_hooks": f"{kind} hooks",
+        "quality_attributes": f"{kind} quality",
+        "evidence": f"{kind} evidence",
+        "delta_claim": f"{kind} delta",
+        "lang_env_version": "Python 3.12",
+        "author_level": "maintainer",
+        "source_url": "https://example.test/reference",
+        "found_via": "test",
     }
 
 
