@@ -103,6 +103,51 @@ EXTENSION_LANGUAGES = {
 MAX_REPOS = 8
 MAX_FILES_PER_REPO = 3
 MAX_FILE_CHARS = 24000
+SEARCH_KEYWORD_MIN_TOKENS = 2
+SEARCH_KEYWORD_MAX_TOKENS = 4
+SEARCH_KEYWORD_QUALIFIER_TOKENS = {
+    "android",
+    "backend",
+    "browser",
+    "c",
+    "c#",
+    "c++",
+    "client",
+    "cpp",
+    "csharp",
+    "css",
+    "desktop",
+    "django",
+    "frontend",
+    "gdscript",
+    "go",
+    "godot",
+    "html",
+    "ios",
+    "java",
+    "javascript",
+    "js",
+    "kotlin",
+    "lua",
+    "mobile",
+    "mmorpg",
+    "node",
+    "nodejs",
+    "php",
+    "python",
+    "react",
+    "rpg",
+    "ruby",
+    "rust",
+    "scala",
+    "server",
+    "swift",
+    "typescript",
+    "unity",
+    "wasm",
+    "web",
+    "webassembly",
+}
 
 # Proven Codex --output-schema constraints used by the other modules: no
 # allOf/anyOf/oneOf, additionalProperties false, and required lists every prop.
@@ -518,13 +563,13 @@ def _codex_search_keywords(term: str, context: Mapping[str, Any]) -> list[str]:
     raw_keywords = result.get("keywords")
     if not isinstance(raw_keywords, list):
         return []
-    term_key = " ".join(str(term).lower().split())
+    term_key = _search_keyword_key(str(term))
     keywords = []
     for value in raw_keywords:
-        keyword = " ".join(str(value).strip().split())
+        keyword = _general_search_keyword(str(value))
         if not keyword:
             continue
-        if keyword.lower() == term_key:
+        if _search_keyword_key(keyword) == term_key:
             continue
         keywords.append(keyword)
     return _unique(keywords)[:8]
@@ -929,12 +974,20 @@ def _baseline_prompt(term: str, context: Mapping[str, Any]) -> str:
 def _search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
     return (
         "Derive effective GitHub repository search keywords for finding high-quality implementations "
-        "that contain this target term's implementation pattern. Do not return the literal term. Prefer "
-        "related systems, mechanics, APIs, or containing features where the implementation actually lives.\n"
+        "that contain this target term's implementation pattern. Keep the reference target term specific, "
+        "but broaden only the search keywords to general implementation concepts. Do not return the literal "
+        "term. Prefer a mix of the direct concept and its common containing system where the implementation "
+        "actually lives.\n"
         f"Reference target term: {term}\n"
         f"Consuming stack context: {_json_for_prompt(context)}\n"
-        "Examples: for 'hit points implementation', return concepts such as turn-based combat system, "
-        "rpg battle system, character stats, damage system, health bar. Return only schema JSON."
+        "Rules: return English keywords only; use 2-4 words per keyword; do not include programming "
+        "languages, frameworks, runtimes, platforms, engines, or domain qualifiers from the consuming stack; "
+        "do not stack many qualifiers. Search is language-agnostic, so terms like javascript, typescript, "
+        "python, react, browser, web, unity, godot, and rpg are invalid keywords.\n"
+        "Examples: for 'save/load system', return save system, game state serialization, save load manager; "
+        "for 'equipment and item inventory system', return inventory system, item inventory; for 'party "
+        "member system', return party system, character roster, unit roster; for 'boss gate progression', "
+        "return progression gating, unlock system, level gate. Return only schema JSON."
     )
 
 
@@ -1316,6 +1369,37 @@ def _clean_search_keywords(values: Any) -> list[str]:
         if keyword:
             keywords.append(keyword)
     return _unique(keywords)
+
+
+def _general_search_keyword(value: str) -> str:
+    tokens = [
+        token
+        for token in _search_keyword_tokens(value)
+        if token not in SEARCH_KEYWORD_QUALIFIER_TOKENS
+    ]
+    if not (SEARCH_KEYWORD_MIN_TOKENS <= len(tokens) <= SEARCH_KEYWORD_MAX_TOKENS):
+        return ""
+    return " ".join(tokens)
+
+
+def _search_keyword_tokens(value: str) -> list[str]:
+    text = str(value or "").lower()
+    text = text.replace("node.js", "nodejs")
+    text = text.replace("c sharp", "csharp")
+    text = text.replace("c plus plus", "cpp")
+    return re.findall(r"[a-z0-9+#]+", text)
+
+
+def _search_keyword_key(value: str) -> str:
+    return " ".join(_search_keyword_tokens(value))
+
+
+def _search_keyword_is_overqualified(value: str) -> bool:
+    tokens = _search_keyword_tokens(value)
+    return (
+        len(tokens) > SEARCH_KEYWORD_MAX_TOKENS
+        or any(token in SEARCH_KEYWORD_QUALIFIER_TOKENS for token in tokens)
+    )
 
 
 def _clean_found_via(value: Any, search_keywords: list[str]) -> str:

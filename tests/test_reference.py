@@ -165,6 +165,71 @@ def test_search_repositories_continues_after_keyword_query_error(monkeypatch):
     assert repos[0]["fullName"] == "quality/Turn-Based-Combat"
 
 
+def test_codex_search_keywords_broadens_overqualified_model_output(monkeypatch):
+    prompts = []
+
+    def codex_json(prompt, schema, output_name):
+        prompts.append(prompt)
+        assert schema == reference.SEARCH_KEYWORDS_SCHEMA
+        assert output_name == "search-keywords.json"
+        return {
+            "keywords": [
+                "browser RPG persistent game state",
+                "javascript RPG state serialization",
+                "party data persistence",
+                "save/load system",
+                "save load manager",
+                "rpg character roster javascript",
+                "turn based combat actors javascript",
+                "inventory system",
+            ]
+        }
+
+    monkeypatch.setattr(reference, "_codex_json", codex_json)
+
+    keywords = reference._codex_search_keywords(
+        "save/load system",
+        {"language": "JavaScript", "environment": "browser", "domain": "RPG"},
+    )
+
+    assert keywords == [
+        "persistent game state",
+        "state serialization",
+        "party data persistence",
+        "save load manager",
+        "character roster",
+        "turn based combat actors",
+        "inventory system",
+    ]
+    _assert_general_search_keywords(keywords)
+    assert "language-agnostic" in prompts[0]
+    assert "do not include programming languages" in prompts[0]
+
+
+def test_search_keyword_overqualification_helper_flags_bad_queries():
+    bad_keywords = [
+        "browser RPG persistent game state",
+        "javascript RPG state serialization",
+        "rpg character roster javascript",
+        "turn based combat actors javascript",
+        "one two three four five",
+    ]
+    good_keywords = [
+        "save system",
+        "game state serialization",
+        "save load manager",
+        "inventory system",
+        "character roster",
+        "progression gating",
+        "unlock system",
+        "level gate",
+    ]
+
+    assert all(reference._search_keyword_is_overqualified(keyword) for keyword in bad_keywords)
+    assert not any(reference._search_keyword_is_overqualified(keyword) for keyword in good_keywords)
+    _assert_general_search_keywords(good_keywords)
+
+
 def test_github_search_rate_limiter_enforces_shared_rolling_window(monkeypatch):
     now = 0.0
     calls = []
@@ -896,3 +961,11 @@ def _assert_required_is_all_properties(schema):
     elif isinstance(schema, list):
         for value in schema:
             _assert_required_is_all_properties(value)
+
+
+def _assert_general_search_keywords(keywords):
+    forbidden = reference.SEARCH_KEYWORD_QUALIFIER_TOKENS
+    for keyword in keywords:
+        tokens = reference._search_keyword_tokens(keyword)
+        assert reference.SEARCH_KEYWORD_MIN_TOKENS <= len(tokens) <= reference.SEARCH_KEYWORD_MAX_TOKENS
+        assert not (set(tokens) & forbidden)
