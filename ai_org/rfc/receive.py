@@ -387,6 +387,29 @@ SELECT_APPROACH_SCHEMA: dict[str, Any] = {
         },
     },
 }
+IMPLEMENTATION_STRATEGY_FIELDS = (
+    "main_changes",
+    "affected_modules",
+    "data_api_config_changes",
+    "migration_compat",
+    "testing_plan",
+    "observability",
+)
+
+IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(IMPLEMENTATION_STRATEGY_FIELDS),
+    "properties": {
+        "main_changes": {"type": "array", "items": {"type": "string"}},
+        "affected_modules": {"type": "array", "items": {"type": "string"}},
+        "data_api_config_changes": {"type": "array", "items": {"type": "string"}},
+        "migration_compat": {"type": "string"},
+        "testing_plan": {"type": "string"},
+        "observability": {"type": "string"},
+    },
+}
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -740,6 +763,35 @@ def _select_approach(
     return _parse_approach_selection(run["raw"], candidate_names)
 
 
+def _implementation_strategy(
+    chosen: Mapping[str, Any],
+    prior_art_map: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    rfc_view: dict[str, Any],
+    repo: str | Path,
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form step 7 of the documented 10-step Technical Approach procedure."""
+    # Step 7 of 10: expand the selected approach into an implementation strategy without planning slices.
+    if not all(isinstance(value, Mapping) for value in (chosen, prior_art_map, constraints)):
+        return _implementation_strategy_error("implementation_strategy requires outputs from steps 2, 3, and 6")
+    if not _is_rfc_view(rfc_view):
+        return _implementation_strategy_error("implementation_strategy requires a grounded common-8 RFC view")
+
+    repo_path = Path(repo).resolve()
+    run = codex_exec.run_json(
+        repo_path,
+        schema=IMPLEMENTATION_STRATEGY_SCHEMA,
+        prompt=_implementation_strategy_prompt(chosen, prior_art_map, constraints, rfc_view, repo_path, context),
+        schema_filename="rfc-implementation-strategy.schema.json",
+        output_filename="rfc-implementation-strategy.json",
+        failure_label="Codex implementation strategy",
+    )
+    if not run["ok"]:
+        return _implementation_strategy_error(run["error"])
+    return _parse_implementation_strategy(run["raw"])
+
+
 def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
@@ -1075,6 +1127,44 @@ def _select_approach_prompt(
         f"\nEvaluation matrix:\n{evaluations_text}\n"
         f"\nConstraints:\n{constraints_text}\n"
         f"\nContext:\n{context_text}\n"
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _implementation_strategy_prompt(
+    chosen: Mapping[str, Any],
+    prior_art_map: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    rfc_view: dict[str, Any],
+    repo: Path,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    prior_art_text = json.dumps(prior_art_map, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    return (
+        "You are forming step 7 of AI Org's 10-step Technical Approach procedure: implementation strategy.\n"
+        "Use the selected approach from step 6, the prior-art map from step 3, the constraints from step 2, "
+        "the grounded common-8 RFC view, and read-only repository inspection from the configured repo root. "
+        "You may inspect module structure and tests to make the strategy concrete. Do not modify files.\n\n"
+        "Expand only the chosen approach into an implementation strategy. Do not generate or re-evaluate "
+        "alternatives, create a patch slice plan, surface risks and open questions, emit the final Technical "
+        "Approach section, or perform later Technical Approach steps.\n\n"
+        "Return these fields:\n"
+        "- main_changes: concrete code changes needed to implement the chosen approach.\n"
+        "- affected_modules: repository modules, packages, tests, or docs expected to be touched.\n"
+        "- data_api_config_changes: data model, public API, schema, protocol, or configuration changes; use an "
+        "empty list when none are expected.\n"
+        "- migration_compat: compatibility and migration strategy, or n/a when irrelevant.\n"
+        "- testing_plan: focused tests and verification commands for the strategy.\n"
+        "- observability: logging, metrics, rollout, operator visibility, or n/a when irrelevant.\n\n"
+        + _format_rfc("Grounded RFC common-8", _rfc_to_view(rfc_view))
+        + f"\nRepository root:\n{repo}\n"
+        + f"\nChosen approach:\n{chosen_text}\n"
+        + f"\nPrior-art map:\n{prior_art_text}\n"
+        + f"\nConstraints:\n{constraints_text}\n"
+        + f"\nContext:\n{context_text}\n"
         + "\nReturn only JSON matching the provided schema."
     )
 
@@ -1553,6 +1643,40 @@ def _parse_approach_selection(raw: str, candidate_names: list[str]) -> dict[str,
 
 
 def _approach_selection_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _parse_implementation_strategy(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _implementation_strategy_error(f"Codex implementation strategy returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _implementation_strategy_error("Codex implementation strategy returned non-object JSON")
+    if set(parsed) != set(IMPLEMENTATION_STRATEGY_FIELDS):
+        return _implementation_strategy_error("Codex implementation strategy returned invalid fields")
+
+    for field in ("main_changes", "affected_modules", "data_api_config_changes"):
+        value = parsed.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return _implementation_strategy_error(f"Codex implementation strategy returned invalid {field}")
+
+    for field in ("migration_compat", "testing_plan", "observability"):
+        if not isinstance(parsed[field], str):
+            return _implementation_strategy_error(f"Codex implementation strategy returned invalid {field}")
+
+    return {
+        "main_changes": list(parsed["main_changes"]),
+        "affected_modules": list(parsed["affected_modules"]),
+        "data_api_config_changes": list(parsed["data_api_config_changes"]),
+        "migration_compat": parsed["migration_compat"],
+        "testing_plan": parsed["testing_plan"],
+        "observability": parsed["observability"],
+    }
+
+
+def _implementation_strategy_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 

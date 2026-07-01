@@ -735,6 +735,110 @@ def test_select_approach_schema_is_codex_valid():
     assert sorted(rejected["required"]) == sorted(rejected["properties"])
 
 
+def test_implementation_strategy_returns_parsed_strategy(monkeypatch, tmp_path):
+    expected = {
+        "main_changes": [
+            "Add IMPLEMENTATION_STRATEGY_SCHEMA beside the other Technical Approach step schemas.",
+            "Add _implementation_strategy with one codex_exec.run_json call and a strict parser.",
+        ],
+        "affected_modules": ["ai_org.rfc.receive", "tests.test_rfc_approach"],
+        "data_api_config_changes": ["New private RFC formation JSON shape for implementation strategy."],
+        "migration_compat": "No runtime migration; this is an additive private helper.",
+        "testing_plan": "Extend tests/test_rfc_approach.py and run pytest tests/.",
+        "observability": "n/a",
+    }
+    calls = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        calls.append((repo, kwargs))
+        return {"ok": True, "raw": json.dumps(expected)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._implementation_strategy(
+        _chosen(),
+        _prior_art_map(),
+        _constraints(),
+        _rfc_view(),
+        tmp_path,
+        {"request_id": "rfc-step-7"},
+    )
+
+    assert result == expected
+    assert result["main_changes"] == expected["main_changes"]
+    assert result["affected_modules"] == ["ai_org.rfc.receive", "tests.test_rfc_approach"]
+    assert result["data_api_config_changes"] == ["New private RFC formation JSON shape for implementation strategy."]
+    assert result["migration_compat"] == "No runtime migration; this is an additive private helper."
+    assert result["testing_plan"] == "Extend tests/test_rfc_approach.py and run pytest tests/."
+    assert result["observability"] == "n/a"
+    assert len(calls) == 1
+    repo, kwargs = calls[0]
+    assert repo == tmp_path.resolve()
+    assert kwargs["schema"] == receive_module.IMPLEMENTATION_STRATEGY_SCHEMA
+    assert kwargs["schema_filename"] == "rfc-implementation-strategy.schema.json"
+    assert kwargs["output_filename"] == "rfc-implementation-strategy.json"
+    assert kwargs["failure_label"] == "Codex implementation strategy"
+    assert "step 7" in kwargs["prompt"]
+    assert "implementation strategy" in kwargs["prompt"]
+    assert "read-only repository inspection" in kwargs["prompt"]
+    assert "Do not modify files" in kwargs["prompt"]
+    assert "Do not generate or re-evaluate alternatives" in kwargs["prompt"]
+    assert "Return only JSON matching the provided schema." in kwargs["prompt"]
+
+
+def test_implementation_strategy_fails_closed_on_invalid_shape(monkeypatch, tmp_path):
+    valid = {
+        "main_changes": ["Add helper."],
+        "affected_modules": ["ai_org.rfc.receive"],
+        "data_api_config_changes": [],
+        "migration_compat": "No migration.",
+        "testing_plan": "Run pytest tests/.",
+        "observability": "n/a",
+    }
+    invalid_outputs = [
+        {key: value for key, value in valid.items() if key != "main_changes"},
+        {**valid, "extra": "not allowed"},
+        {**valid, "main_changes": "Add helper."},
+        {**valid, "affected_modules": [42]},
+        {**valid, "data_api_config_changes": ["Config.", 42]},
+        {**valid, "migration_compat": ["No migration."]},
+        {**valid, "testing_plan": 42},
+        {**valid, "observability": None},
+    ]
+
+    for payload in invalid_outputs:
+        monkeypatch.setattr(
+            receive_module.codex_exec,
+            "run_json",
+            lambda repo, **kwargs: {"ok": True, "raw": json.dumps(payload)},
+        )
+
+        result = receive_module._implementation_strategy(
+            _chosen(),
+            _prior_art_map(),
+            _constraints(),
+            _rfc_view(),
+            tmp_path,
+        )
+
+        assert result["ok"] is False
+        assert "Codex implementation strategy returned" in result["error"]
+
+
+def test_implementation_strategy_schema_is_codex_valid():
+    schema = receive_module.IMPLEMENTATION_STRATEGY_SCHEMA
+    serialized = json.dumps(schema)
+    assert "allOf" not in serialized
+    assert "anyOf" not in serialized
+    assert "oneOf" not in serialized
+    _assert_codex_valid_object_schema(schema)
+
+    assert sorted(schema["required"]) == sorted(receive_module.IMPLEMENTATION_STRATEGY_FIELDS)
+    for field in ("main_changes", "affected_modules", "data_api_config_changes"):
+        assert schema["properties"][field]["type"] == "array"
+        assert schema["properties"][field]["items"]["type"] == "string"
+
+
 def test_receive_imports_reference_without_importing_later_phases():
     source = Path(receive_module.__file__).read_text(encoding="utf-8")
 
@@ -850,6 +954,18 @@ def _evaluations() -> dict[str, object]:
                 "summary": "Best repository fit while keeping the step isolated.",
             },
         ]
+    }
+
+
+def _chosen() -> dict[str, object]:
+    return {
+        "chosen": "Repo Native",
+        "decision": (
+            "Choose Repo Native because the evaluation matrix is strongest under constraints that isolate RFC "
+            "receive, accepting tradeoff of added prompt detail."
+        ),
+        "accepted_tradeoffs": ["Added prompt detail."],
+        "rejected": [{"candidate_name": "Minimal", "why_not": "The matrix shows weaker problem fit."}],
     }
 
 
