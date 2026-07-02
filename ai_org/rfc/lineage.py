@@ -156,12 +156,14 @@ def refine(
             return split_result
         parsed = split_result["split"]
         if parsed["right_sized"]:
+            surplus_children_ignored = parsed.get("surplus_children_ignored", 0)
             return {
                 "ok": True,
                 "status": "right-sized",
                 "branch": branch,
                 "id": _lineage_id(repo_path, branch),
                 "summary_sentence": parsed["summary_sentence"],
+                "surplus_children_ignored": surplus_children_ignored,
             }
         validation = validate_ledger_contract(parsed, scope_items)
         if validation["ok"]:
@@ -498,11 +500,23 @@ def _parse_split(raw: str, branch: str) -> dict[str, Any]:
         return {"ok": False, "error": "Codex lineage split returned invalid right_sized", "branch": branch}
     if not isinstance(parsed.get("summary_sentence"), str) or not isinstance(parsed.get("sizing_reason"), str):
         return {"ok": False, "error": "Codex lineage split returned invalid sizing text", "branch": branch}
+    if parsed["right_sized"]:
+        children = parsed.get("children")
+        surplus_children_ignored = len(children) if isinstance(children, list) else 0
+        return {
+            "ok": True,
+            "split": {
+                **parsed,
+                "children": [],
+                "parent_gate_scope_item_ids": [],
+                "depends_on": [],
+                "elaboration_notes": [],
+                "surplus_children_ignored": surplus_children_ignored,
+            },
+        }
     shape_error = _split_shape_error(parsed)
     if shape_error:
         return {"ok": False, "error": shape_error, "branch": branch}
-    if parsed["right_sized"] and parsed["children"]:
-        return {"ok": False, "error": "right-sized lineage split must not include children", "branch": branch}
     return {"ok": True, "split": parsed}
 
 

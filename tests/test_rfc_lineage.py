@@ -123,6 +123,44 @@ def test_lineage_coverage_validation_retries_then_fails_closed(tmp_path, monkeyp
     assert git_wrapper.file_exists(repo, "ai-org/rfc/feature", "lineage-ledger.json") is False
 
 
+def test_refine_accepts_right_sized_codex_answer_with_surplus_children(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
+    git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+
+    def handler(_prompt: str) -> dict[str, Any]:
+        return {
+            "right_sized": True,
+            "summary_sentence": "The approved plan is one reviewable contribution.",
+            "sizing_reason": "The implementation can be reviewed as a single bounded change.",
+            "children": [
+                _child(
+                    "surplus",
+                    "Surplus child",
+                    "leafed",
+                    ["success_criteria:0"],
+                    ["This child should be ignored."],
+                    ["Battle state"],
+                )
+            ],
+            "parent_gate_scope_item_ids": ["patch_plan:first_playable"],
+            "depends_on": [
+                {"from_child_key": "surplus", "to_child_key": "surplus", "reason": "Schema-forced surplus."}
+            ],
+            "elaboration_notes": ["Schema-forced surplus."],
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = lineage.refine(repo, "feature")
+
+    assert result["ok"] is True
+    assert result["status"] == "right-sized"
+    assert result["surplus_children_ignored"] == 1
+    assert git_wrapper.file_exists(repo, "ai-org/rfc/feature", "lineage-ledger.json") is False
+    assert git_wrapper.branch_exists(repo, "ai-org/rfc/0001-1") is False
+
+
 def test_double_mapped_scope_item_is_rejected():
     scope_items = [{"id": "success_criteria:0", "source": "test", "text": "criterion"}]
     split = _split(
