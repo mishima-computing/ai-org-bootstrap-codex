@@ -1291,58 +1291,138 @@ def _generate_candidates(
 
     repo = _repo_from_context(context)
     candidates: list[dict[str, Any]] = []
+    pruned_candidates: list[dict[str, str]] = []
     seen_ids: set[str] = set()
     seen_kinds: set[str] = set()
     for kind in ("minimal_local", "repo_native", "general_architectural"):
-        feedback: list[str] = []
-        last_error = ""
-        parsed: dict[str, Any] | None = None
-        for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
-            run = codex_exec.run_json(
-                repo,
-                schema=CANDIDATE_APPROACH_SCHEMA,
-                prompt=_generate_candidate_prompt(
-                    normalized_problem,
-                    constraints,
-                    prior_art_map,
-                    kind,
-                    candidates,
-                    context,
-                    accumulated_approach,
-                    feedback if attempt else None,
-                ),
-                schema_filename=f"rfc-candidate-{kind}.schema.json",
-                output_filename=f"rfc-candidate-{kind}.json",
-                failure_label="Codex candidate generation",
-            )
-            if not run["ok"]:
-                return _candidate_generation_error(run["error"])
-            parsed = _parse_candidate_approach(run["raw"], expected_kind=kind)
-            if not parsed.get("ok", True):
-                last_error = parsed["error"]
-                feedback = [last_error]
-                continue
-            lint_errors = _lint_empty_slots(parsed)
-            lint_errors.extend(_lint_candidate_against_org_builder(parsed, constraints))
-            if parsed["id"] in seen_ids:
-                lint_errors.append(f"id duplicates an earlier candidate: {parsed['id']}")
-            if parsed["kind"] in seen_kinds:
-                lint_errors.append(f"kind duplicates an earlier candidate: {parsed['kind']}")
-            if not lint_errors:
-                break
-            last_error = "; ".join(lint_errors)
-            feedback = lint_errors
-            parsed = None
-        if parsed is None or not parsed.get("ok", True):
-            return _candidate_generation_error(
-                "Codex candidate generation remained invalid after "
-                f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
-            )
-        seen_ids.add(parsed["id"])
-        seen_kinds.add(parsed["kind"])
-        candidates.append(parsed)
+        parsed = _generate_candidate_node(
+            repo,
+            normalized_problem,
+            constraints,
+            prior_art_map,
+            kind,
+            expected_kind=kind,
+            candidates=candidates,
+            pruned_candidates=pruned_candidates,
+            seen_ids=seen_ids,
+            seen_kinds=seen_kinds,
+            context=context,
+            accumulated_approach=accumulated_approach,
+        )
+        if not parsed.get("ok", True):
+            return parsed
 
-    return {"candidates": candidates}
+    retry_feedback = _candidate_prune_feedback(pruned_candidates)
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        if len(candidates) >= 2:
+            break
+        parsed = _generate_candidate_node(
+            repo,
+            normalized_problem,
+            constraints,
+            prior_art_map,
+            "additional_feasible",
+            expected_kind=None,
+            candidates=candidates,
+            pruned_candidates=pruned_candidates,
+            seen_ids=seen_ids,
+            seen_kinds=seen_kinds,
+            context=context,
+            accumulated_approach=accumulated_approach,
+            initial_feedback=retry_feedback,
+            schema_suffix=f"additional-{attempt + 1}",
+        )
+        if not parsed.get("ok", True):
+            return parsed
+        retry_feedback = _candidate_prune_feedback(pruned_candidates)
+
+    if not candidates:
+        return _candidate_generation_error(
+            "no feasible candidates remained after pruning ORG_BUILDER_PROFILE conflicts: "
+            + "; ".join(item["objection"] for item in pruned_candidates)
+        )
+
+    result: dict[str, Any] = {"candidates": candidates}
+    if pruned_candidates:
+        result["pruned_candidates"] = pruned_candidates
+    if len(candidates) < 2:
+        result["degradation_notes"] = [
+            "Candidate generation proceeded with one feasible candidate after bounded retries because all "
+            "additional alternatives conflicted with ORG_BUILDER_PROFILE."
+        ]
+    return result
+
+
+def _generate_candidate_node(
+    repo: Path,
+    normalized_problem: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    prior_art_map: Mapping[str, Any],
+    candidate_kind: str,
+    *,
+    expected_kind: str | None,
+    candidates: list[dict[str, Any]],
+    pruned_candidates: list[dict[str, str]],
+    seen_ids: set[str],
+    seen_kinds: set[str],
+    context: Mapping[str, Any] | None,
+    accumulated_approach: Mapping[str, Any] | None,
+    initial_feedback: list[str] | None = None,
+    schema_suffix: str | None = None,
+) -> dict[str, Any]:
+    feedback: list[str] = list(initial_feedback or [])
+    last_error = ""
+    parsed: dict[str, Any] | None = None
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=CANDIDATE_APPROACH_SCHEMA,
+            prompt=_generate_candidate_prompt(
+                normalized_problem,
+                constraints,
+                prior_art_map,
+                candidate_kind,
+                candidates,
+                context,
+                accumulated_approach,
+                feedback if feedback else None,
+            ),
+            schema_filename=f"rfc-candidate-{schema_suffix or candidate_kind}.schema.json",
+            output_filename=f"rfc-candidate-{schema_suffix or candidate_kind}.json",
+            failure_label="Codex candidate generation",
+        )
+        if not run["ok"]:
+            return _candidate_generation_error(run["error"])
+        parsed = _parse_candidate_approach(run["raw"], expected_kind=expected_kind)
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+
+        conflict_objection = _org_builder_candidate_objection(parsed, constraints)
+        if conflict_objection:
+            # Pruning records, it does not punish; the rejected list IS the deliberation record.
+            pruned_candidates.append({"candidate_id": parsed["id"], "objection": conflict_objection})
+            return {"ok": True}
+
+        lint_errors = _lint_empty_slots(parsed)
+        if parsed["id"] in seen_ids or _candidate_id_was_pruned(parsed["id"], pruned_candidates):
+            lint_errors.append(f"id duplicates an earlier candidate: {parsed['id']}")
+        if parsed["kind"] in seen_kinds:
+            lint_errors.append(f"kind duplicates an earlier candidate: {parsed['kind']}")
+        if not lint_errors:
+            seen_ids.add(parsed["id"])
+            seen_kinds.add(parsed["kind"])
+            candidates.append(parsed)
+            return {"ok": True}
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+        parsed = None
+
+    return _candidate_generation_error(
+        "Codex candidate generation remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
+    )
 
 
 def _evaluate_candidates(
@@ -1458,6 +1538,7 @@ def _select_approach(
             continue
         lint_errors = _lint_empty_slots(parsed)
         if not lint_errors:
+            _merge_candidate_generation_rejections(parsed, candidates)
             return parsed
         last_error = "; ".join(lint_errors)
         feedback = lint_errors
@@ -2241,11 +2322,16 @@ def _generate_candidate_prompt(
     feedback_text = ""
     if feedback:
         feedback_text = (
-            "\nPrevious output failed deterministic empty-slot validation. Regenerate this candidate node and fix "
-            "these issues:\n"
+            "\nPrevious output or candidate set needs adjustment. Generate a candidate the org can author as "
+            "text in the worktree and verify headlessly with functional_check. Address these issues:\n"
             + "\n".join(f"- {item}" for item in feedback)
             + "\n"
         )
+    kind_instruction = (
+        "Return exactly one additional feasible candidate. Make it distinct from existing feasible candidates."
+        if candidate_kind == "additional_feasible"
+        else f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates."
+    )
     return (
         "You are forming step 4 of AI Org's Technical Approach derivation tree: generate one candidate node.\n"
         "Use the accumulated approach tree containing the root goals, constraints, and prior-art ancestors, "
@@ -2260,7 +2346,7 @@ def _generate_candidate_prompt(
         "non-headless verification. External fidelity precedent from background_facts may explain what the "
         "franchise or domain uses, but it is evidence only; it cannot rescue a candidate the org cannot author "
         "or verify.\n\n"
-        f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates.\n\n"
+        f"{kind_instruction}\n\n"
         "For each candidate:\n"
         "- id: stable lowercase identifier using letters, numbers, underscores, or hyphens.\n"
         "- name: concise approach name.\n"
@@ -3263,16 +3349,76 @@ ORG_BUILDER_DISALLOWED_STACK_MARKERS = (
 
 
 def _lint_candidate_against_org_builder(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> list[str]:
-    if not _has_org_builder_constraints(constraints):
+    objection = _org_builder_candidate_objection(candidate, constraints)
+    if not objection:
         return []
+    return [objection]
+
+
+def _org_builder_candidate_objection(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> str:
+    if not _has_org_builder_constraints(constraints):
+        return ""
     text = json.dumps(candidate, sort_keys=True, ensure_ascii=True).lower()
     hits = [marker for marker in ORG_BUILDER_DISALLOWED_STACK_MARKERS if marker in text]
     if not hits:
-        return []
-    return [
-        "candidate conflicts with ORG_BUILDER_PROFILE hard constraints and must be pruned or rewritten: "
+        return ""
+    return (
+        "org-profile conflict: candidate mentions "
         + ", ".join(hits)
+        + "; ORG_BUILDER_PROFILE requires Codex text-first worktree authoring and headless "
+        "functional_check verification, so GUI-editor, binary-asset authoring, heavyweight native build, "
+        "or non-headless verification paths must be pruned."
+    )
+
+
+def _candidate_prune_feedback(pruned_candidates: list[dict[str, str]]) -> list[str]:
+    if not pruned_candidates:
+        return [
+            "Fewer than two feasible candidates remain. Propose another candidate the org can author as text "
+            "in the worktree and verify headlessly with functional_check."
+        ]
+    feedback = [
+        "Fewer than two feasible candidates remain after deterministic pruning. Propose another candidate the "
+        "org can author as text in the worktree and verify headlessly with functional_check."
     ]
+    feedback.extend(
+        f"Pruned {item['candidate_id']}: {item['objection']}"
+        for item in pruned_candidates
+        if item.get("candidate_id") and item.get("objection")
+    )
+    return feedback
+
+
+def _candidate_id_was_pruned(candidate_id: str, pruned_candidates: list[dict[str, str]]) -> bool:
+    return any(item.get("candidate_id") == candidate_id for item in pruned_candidates)
+
+
+def _merge_candidate_generation_rejections(selected: dict[str, Any], candidates: Mapping[str, Any]) -> None:
+    rejected = selected.setdefault("rejected", [])
+    rejected_ids = {
+        item.get("candidate_id")
+        for item in rejected
+        if isinstance(item, Mapping) and isinstance(item.get("candidate_id"), str)
+    }
+    for item in candidates.get("pruned_candidates", []) if isinstance(candidates, Mapping) else []:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_id = item.get("candidate_id")
+        objection = item.get("objection")
+        if not isinstance(candidate_id, str) or not isinstance(objection, str) or candidate_id in rejected_ids:
+            continue
+        rejected.append({"candidate_id": candidate_id, "objection": objection})
+        rejected_ids.add(candidate_id)
+
+    notes = candidates.get("degradation_notes", []) if isinstance(candidates, Mapping) else []
+    if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
+        return
+    rationale = selected.get("rationale")
+    if not isinstance(rationale, dict):
+        return
+    tradeoffs = rationale.get("accepting_tradeoffs")
+    if isinstance(tradeoffs, list):
+        tradeoffs.extend(note for note in notes if note not in tradeoffs)
 
 
 def _has_org_builder_constraints(constraints: Mapping[str, Any]) -> bool:

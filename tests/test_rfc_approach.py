@@ -335,6 +335,178 @@ def test_requester_specified_stack_skips_alternatives_and_records_org_conflict_r
     assert "Requester sovereignty makes this non-blocking" in decision["risks"][0]["risk"]
 
 
+def test_org_profile_conflicting_candidate_is_pruned_without_retry(monkeypatch, tmp_path):
+    outputs = [
+        _candidate("feasible_a", "minimal_local", "Feasible A"),
+        _candidate("feasible_b", "repo_native", "Feasible B"),
+        _unity_candidate("general_architectural"),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert [candidate["id"] for candidate in result["candidates"]] == ["feasible_a", "feasible_b"]
+    assert len(prompts) == 3
+    assert result["pruned_candidates"][0]["candidate_id"] == "unity"
+    assert "org-profile conflict" in result["pruned_candidates"][0]["objection"]
+    assert "headless functional_check verification" in result["pruned_candidates"][0]["objection"]
+
+
+def test_org_profile_pruning_retries_only_when_feasible_set_too_small(monkeypatch, tmp_path):
+    outputs = [
+        _unity_candidate("minimal_local"),
+        _unreal_candidate("repo_native"),
+        _candidate("feasible_a", "general_architectural", "Feasible A"),
+        _candidate("feasible_b", "repo_native", "Feasible B"),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert [candidate["id"] for candidate in result["candidates"]] == ["feasible_a", "feasible_b"]
+    assert [item["candidate_id"] for item in result["pruned_candidates"]] == ["unity", "unreal"]
+    assert len(prompts) == 4
+    assert "Fewer than two feasible candidates remain after deterministic pruning" in prompts[3]
+    assert "Pruned unity: org-profile conflict" in prompts[3]
+    assert "author as text in the worktree and verify headlessly" in prompts[3]
+
+
+def test_org_profile_all_conflicts_fail_only_after_candidate_retries(monkeypatch, tmp_path):
+    outputs = [
+        _unity_candidate("minimal_local", candidate_id="unity_minimal"),
+        _unreal_candidate("repo_native", candidate_id="unreal_repo"),
+        _unity_candidate("general_architectural", candidate_id="unity_general"),
+        _unreal_candidate("minimal_local", candidate_id="unreal_retry_1"),
+        _unity_candidate("repo_native", candidate_id="unity_retry_2"),
+        _unreal_candidate("general_architectural", candidate_id="unreal_retry_3"),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert result["ok"] is False
+    assert "no feasible candidates remained after pruning ORG_BUILDER_PROFILE conflicts" in result["error"]
+    assert len(prompts) == 6
+
+
+def test_org_profile_single_feasible_after_retries_proceeds_degraded(monkeypatch, tmp_path):
+    outputs = [
+        _unity_candidate("minimal_local", candidate_id="unity_minimal"),
+        _unreal_candidate("repo_native", candidate_id="unreal_repo"),
+        _candidate("feasible_a", "general_architectural", "Feasible A"),
+        _unreal_candidate("minimal_local", candidate_id="unreal_retry_1"),
+        _unity_candidate("repo_native", candidate_id="unity_retry_2"),
+        _unreal_candidate("general_architectural", candidate_id="unreal_retry_3"),
+    ]
+
+    def fake_run_json(repo: Path, **kwargs):
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert [candidate["id"] for candidate in result["candidates"]] == ["feasible_a"]
+    assert len(result["pruned_candidates"]) == 5
+    assert "degradation_notes" in result
+    assert "one feasible candidate" in result["degradation_notes"][0]
+
+
+def test_pruned_candidates_land_in_final_decision_rejected_list(monkeypatch, tmp_path):
+    candidates = {
+        "candidates": [
+            _candidate("feasible_a", "minimal_local", "Feasible A"),
+            _candidate("feasible_b", "repo_native", "Feasible B"),
+        ],
+        "pruned_candidates": [
+            {
+                "candidate_id": "unity",
+                "objection": (
+                    "org-profile conflict: candidate mentions unity; ORG_BUILDER_PROFILE requires Codex "
+                    "text-first worktree authoring and headless functional_check verification."
+                ),
+            }
+        ],
+        "degradation_notes": ["Candidate generation proceeded with one feasible candidate after bounded retries."],
+    }
+    decision = {
+        **_decision(),
+        "selected_candidate_id": "feasible_b",
+        "arguments": [
+            {
+                **_decision()["arguments"][0],
+                "about_candidate_id": "feasible_b",
+            },
+            {
+                **_decision()["arguments"][1],
+                "about_candidate_id": "feasible_a",
+            },
+        ],
+        "rejected": [{"candidate_id": "feasible_a", "objection": "Lower problem fit."}],
+    }
+
+    def fake_run_json(repo: Path, **kwargs):
+        return {"ok": True, "raw": json.dumps(decision)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    selected = receive_module._select_approach(
+        candidates,
+        {
+            "evaluations": [
+                {"candidate_id": "feasible_a", "scores": _scores()},
+                {"candidate_id": "feasible_b", "scores": _scores()},
+            ]
+        },
+        _constraints_with_org_builder_profile(),
+        {"repo": tmp_path},
+    )
+
+    rejected = selected["rejected"]
+    assert {"candidate_id": "feasible_a", "objection": "Lower problem fit."} in rejected
+    assert rejected[-1]["candidate_id"] == "unity"
+    assert "org-profile conflict" in rejected[-1]["objection"]
+    assert "one feasible candidate" in selected["rationale"]["accepting_tradeoffs"][-1]
+
+
 def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypatch, tmp_path):
     _patch_successful_approach_steps(monkeypatch)
     ticks = iter(float(value) for value in range(100))
@@ -1190,6 +1362,24 @@ def _constraints() -> dict[str, object]:
     }
 
 
+def _constraints_with_org_builder_profile() -> dict[str, object]:
+    constraints = _constraints()
+    constraints["hard_constraints"].append(
+        {
+            "statement": receive_module.ORG_BUILDER_PROFILE[0]["statement"],
+            "derivation": {
+                "from": "org_builder_profile",
+                "trace": receive_module.ORG_BUILDER_PROFILE[0]["trace"],
+            },
+            "implication": {
+                "must": receive_module.ORG_BUILDER_PROFILE[0]["must"],
+                "must_not": receive_module.ORG_BUILDER_PROFILE[0]["must_not"],
+            },
+        }
+    )
+    return constraints
+
+
 def _prior_art_map() -> dict[str, object]:
     return {
         "patterns": [
@@ -1298,6 +1488,20 @@ def _candidate(candidate_id: str, kind: str, name: str) -> dict[str, object]:
         "core_systems": ["battle resolution"],
         "draws_on": ["Reference-first prior-art synthesis"],
     }
+
+
+def _unity_candidate(kind: str, candidate_id: str = "unity") -> dict[str, object]:
+    candidate = _candidate(candidate_id, kind, "Unity Engine")
+    candidate["summary"] = "Unity builds the battle slice with editor-authored scenes and imported assets."
+    candidate["core_systems"] = ["Unity scene workflow", "binary asset import"]
+    return candidate
+
+
+def _unreal_candidate(kind: str, candidate_id: str = "unreal") -> dict[str, object]:
+    candidate = _candidate(candidate_id, kind, "Unreal Engine")
+    candidate["summary"] = "Unreal builds the battle slice with editor-authored maps and native packaging."
+    candidate["core_systems"] = ["Unreal editor workflow", "heavyweight native build"]
+    return candidate
 
 
 def _candidates() -> dict[str, object]:
