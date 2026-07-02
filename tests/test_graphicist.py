@@ -81,8 +81,8 @@ def test_constructive_svg_prompt_includes_side_view_and_rigging_contract():
     assert "PROFILE" in prompt
     assert "legs visible from the side so the gait reads" in prompt
     assert "proper anatomical segmentation" in prompt
-    assert "EACH of the 8 legs as separate segmented parts" in prompt
-    assert "coxa/femur/patella/tibia/tarsus" in prompt
+    assert "count-sensitive defining appendage" in prompt
+    assert "separate segmented parts with visible joints" in prompt
     assert 'own <g id="...">' in prompt
     assert '"leg-L1-upper"' in prompt
     assert "rig manifest XML comment" in prompt
@@ -114,7 +114,7 @@ def test_constructive_svg_accepts_cute_style(monkeypatch, tmp_path):
     assert "closed vector shapes with flat fills" in captured["prompt"]
     assert "SUBJECT FIDELITY" in captured["prompt"]
     assert "defining / identifying features" in captured["prompt"]
-    assert "EXACTLY 8 legs" in captured["prompt"]
+    assert "including exact counts where they matter" in captured["prompt"]
     assert "Procedural texture (feTurbulence)" not in captured["prompt"]
     assert "Cut-in shadow SHAPE" not in captured["prompt"]
 

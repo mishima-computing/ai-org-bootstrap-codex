@@ -602,9 +602,8 @@ def _style_hard_requirement(style: str) -> str:
 def _segmentation_requirement(style: str) -> str:
     if style == "painterly":
         return (
-            "Use proper anatomical segmentation for realism. For example, a spider must have EACH of the 8 legs as "
-            "separate segmented parts with visible joints, including coxa/femur/patella/tibia/tarsus where readable, "
-            "plus distinct cephalothorax and abdomen body segments."
+            "Use proper anatomical segmentation for realism. Preserve each count-sensitive defining appendage as "
+            "separate segmented parts with visible joints, and keep major body masses distinct where readable."
         )
     return (
         "Keep defining body parts segmented enough to rig later, while preserving the requested cute simplified style."
@@ -632,7 +631,7 @@ def _cute_canon_prompt() -> str:
     return """CUTE / APPEAL CANON (Flash-era clean vector):
 - Style priority: ORIGINAL appeal character art with a flat, clean vector-cartoon look. This style overrides painterly texture, noisy overlays, realistic lighting, heavy filters, and filter-heavy shadow stacks.
 - Construction: build closed vector shapes with flat fills and consistent strokes using rounded joins/caps. Put reusable repeated parts in <defs> and place them with <use>, especially eyes, highlights, limbs, and paired details. Group semantic parts such as head, face, body, arms, and legs. Keep the shape count economical, about 12-40 deliberate shapes.
-- SUBJECT FIDELITY: FIRST identify the subject's defining / identifying features, including exact counts where they matter, before simplifying. For example: spider = EXACTLY 8 legs plus cephalothorax/abdomen segmentation, an eye cluster, and chelicerae; cat = pointed ears, whiskers, and tail. These defining features are mandatory and must remain clearly readable in the silhouette. Apply cuteness by stylizing them: round them, enlarge the eyes, soften joints, and thicken limbs. Do not remove or genericize defining features. Spend the economical shape budget on the defining features first; do not drop a defining feature to save shapes. The result must be unmistakably the subject and cute; if forced to choose, keep identity readable.
+- SUBJECT FIDELITY: FIRST identify the subject's defining / identifying features, including exact counts where they matter, before simplifying. These defining features are mandatory and must remain clearly readable in the silhouette. Apply cuteness by stylizing them: round them, enlarge the eyes, soften joints, and thicken limbs. Do not remove or genericize defining features. Spend the economical shape budget on the defining features first; do not drop a defining feature to save shapes. The result must be unmistakably the subject and cute; if forced to choose, keep identity readable.
 - Shape language: choose one dominant family. Use round/bean shapes for the default cute/friendly read, rounded-square shapes for sturdy appeal, or teardrops for energetic/magical appeal. Sharp angles are allowed only as tiny rounded accents. The silhouette must read at about 64px.
 - Cute proportions: normalize the character height to 100 units. Head is 42-55 units tall, body is 32-42, neck is minimal or hidden, and legs are short, thick, and rounded. Eyes are large, 18-28% of head height. Nose and mouth stay small and low on the face.
 - Eye system: layer each eye from outer shape, iris, pupil, large white highlight, tiny secondary highlight, and optional lid. Keep iris and pupil large. Show expression through brows, lids, and mouth, not by changing head anatomy. Default expression is warm, with open eyes and a small smile.
@@ -668,13 +667,6 @@ def _animate_prompt(svg_text, spec, state="walk") -> str:
     spec_text = spec if isinstance(spec, str) else json.dumps(spec, indent=2, sort_keys=True)
     part_ids = _svg_group_ids(svg_text)
     manifest = _svg_manifest_comments(svg_text)
-    spider_guidance = ""
-    if re.search(r"\bspider|arachnid\b", spec_text, flags=re.IGNORECASE):
-        spider_guidance = (
-            "\nSpider animation guidance:\n"
-            "- idle: subtle body bob plus slow leg sway.\n"
-            "- walk: alternating-tetrapod gait. Put legs L1/R2/L3/R4 in one phase and R1/L2/R3/L4 in the opposite phase, with body bob.\n"
-        )
     return f"""Create an animation rig JSON for this segmented SVG.
 
 Spec:
@@ -708,7 +700,7 @@ Rules:
 - Parent core body parts sensibly, with null for the root body part.
 - Include both "idle" and "walk" states even if the requested default state differs.
 - Keyframes use seconds in t, degrees in rot, and optional x/y/sx/sy local pose values.
-{spider_guidance}"""
+"""
 
 
 def _svg_group_ids(svg_text: str) -> list[str]:

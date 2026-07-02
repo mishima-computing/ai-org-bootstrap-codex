@@ -563,21 +563,49 @@ def test_marker_lints_ignore_retro_exclusions_in_context_fields(tmp_path, monkey
     assert codex_calls == ["grounding", "verifier"]
 
 
-def test_retro_marker_in_target_field_trips_latest_default_lint_unless_request_is_retro():
-    request = receive_module._entrance_request(receive({"raw_request": "Make Dragon Quest as the current experience."}))
+def test_latest_default_has_no_deterministic_marker_lint_for_classic_language_or_year():
+    request = receive_module._entrance_request(receive({"raw_request": "Make the current named game experience."}))
     grounded = _rfc_view(
-        "Dragon Quest",
+        "Current Named Game",
         raw_request=request["raw_request"],
-        desired_outcomes_success="Target the 1986 original experience.",
+        problem_or_motivation="The franchise began in 1986 and still has a classic command battle feel.",
+        desired_outcomes_success="Deliver the current game with its classic command battle feel.",
     )
 
     violations = _grounding_lint_violations(request, grounded)
 
-    assert any("C4 latest-default" in violation for violation in violations)
-    retro_request = receive_module._entrance_request(
-        receive({"raw_request": "Make Dragon Quest as the 1986 original experience."})
+    assert not any("C4 latest-default" in violation for violation in violations)
+
+
+def test_latest_default_c4_follows_verifier_verdict(monkeypatch):
+    request = receive_module._entrance_request(receive({"raw_request": "Make the current named game experience."}))
+    grounded = _rfc_view(
+        "Current Named Game",
+        raw_request=request["raw_request"],
+        desired_outcomes_success="Deliver the current game with its classic command battle feel.",
     )
-    assert not any("C4 latest-default" in violation for violation in _grounding_lint_violations(retro_request, grounded))
+
+    failed = _verify_with_latest_default(monkeypatch, request, grounded, latest_default=False)
+    assert failed["ok"] is False
+    assert any("C4 latest-default: verifier marked latest_default=false" in violation for violation in failed["violations"])
+
+    passed = _verify_with_latest_default(monkeypatch, request, grounded, latest_default=True)
+    assert passed == {"ok": True, "violations": []}
+
+
+def test_latest_default_retro_request_exemption_is_semantic_verifier_only(monkeypatch):
+    request = receive_module._entrance_request(
+        receive({"raw_request": "Make the named game as a specific past version."})
+    )
+    grounded = _rfc_view(
+        "Past Version Named Game",
+        raw_request=request["raw_request"],
+        desired_outcomes_success="Target the named game's classic past-version conventions.",
+    )
+
+    assert not any("C4 latest-default" in violation for violation in _grounding_lint_violations(request, grounded))
+    passed = _verify_with_latest_default(monkeypatch, request, grounded, latest_default=True)
+    assert passed == {"ok": True, "violations": []}
 
 
 def test_scope_shrink_markers_are_field_scoped_to_target_fields():
@@ -942,6 +970,27 @@ def _rfc_view(
 
 def _grounding_lint_violations(request: dict[str, object], rfc_view: dict[str, object]) -> list[str]:
     return receive_module._lint_grounding(request, rfc_view, GroundingResult(rfc_view, ""))
+
+
+def _verify_with_latest_default(
+    monkeypatch: pytest.MonkeyPatch,
+    request: dict[str, object],
+    rfc_view: dict[str, object],
+    *,
+    latest_default: bool,
+) -> dict[str, object]:
+    def handler(cmd):
+        assert _schema_kind(cmd[cmd.index("--output-schema") + 1]) == "verifier"
+        return {
+            "faithful_specific": True,
+            "full_scope": True,
+            "non_legal": True,
+            "latest_default": latest_default,
+            "reasons": [] if latest_default else ["The grounded RFC targets an outdated version without requester intent."],
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+    return receive_module._verify_grounding(request, rfc_view, GroundingResult(rfc_view, "Test verifier notes."))
 
 
 def _git(repo: Path, *args: str) -> str:

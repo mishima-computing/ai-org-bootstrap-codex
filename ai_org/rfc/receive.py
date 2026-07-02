@@ -941,27 +941,6 @@ LEGAL_KEYWORDS = (
     "rights holder",
 )
 
-RETRO_MARKERS = (
-    "1986",
-    "famicom",
-    "windows 95",
-    "windows-95",
-    "retro",
-    "classic",
-    "old-school",
-    "old school",
-    "vintage",
-)
-
-RETRO_REQUEST_MARKERS = RETRO_MARKERS + (
-    "older version",
-    "old version",
-    "past version",
-    "specific past version",
-    "specific year",
-)
-
-
 @dataclass
 class GroundingResult:
     rfc_view: dict[str, Any]
@@ -1995,7 +1974,7 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "down to that named thing and preserve its full identity in proposed_rfc, including the title; never "
         "generalize up to a broad category, genre, archetype, or safer-sounding substitute. proposed_rfc must "
         "read as 'faithfully reproduce <the specific named thing>', and a reviewer should be able to tell it "
-        "apart from a generic genre entry. Do not turn 'make an elephant' into 'make a mammal'. Do not rename "
+        "apart from a generic genre entry. Do not turn a named specific target into its broad category. Do not rename "
         "a named thing as 'an original X-style' work.\n\n"
         "Preserve the request's full scope. Do not reduce the request to a vertical slice, short demo, one "
         "area, 10-minute experience, prototype, MVP, first iteration, or other smaller deliverable. Commit "
@@ -2013,8 +1992,7 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "Never set provenance to ai_deliberated in grounding. When provenance is unspecified, leave "
         "build_strategy, engine, framework, language, platform, and rationale empty. If research shows the named "
         "domain, franchise, or product currently uses a stack, preserve that as evidence in background_facts, not as a "
-        "tech_stack decision. For example, 'modern mainline Dragon Quest ships on Unreal Engine' belongs in "
-        "background_facts unless the requester explicitly asked for Unreal.\n\n"
+        "tech_stack decision unless the requester explicitly asked for that stack.\n\n"
         "Default to the latest or current version, conventions, and best practices of the named thing unless "
         "the request explicitly asks for a retro, classic, old, vintage, specific past version, or specific "
         "past year target. This applies across domains: games should target the current experience, modern "
@@ -4696,13 +4674,10 @@ def _lint_grounding(
     if legal_hits >= 3 and legal_hits / word_count >= 0.015:
         violations.append("C3 non-legal lint: legal/IP/trademark/copyright language dominates grounding output")
 
-    if not _request_explicitly_retro(request):
-        retro_markers = _matching_markers(marker_text, RETRO_MARKERS)
-        if retro_markers:
-            violations.append(
-                "C4 latest-default lint: grounded RFC targets dated/retro markers without a retro request "
-                + ", ".join(retro_markers)
-            )
+    # Memento: deterministic gates stay only where they are sound: enumerable,
+    # role-scoped process words such as C1 generalizers and C2 scope hedges.
+    # Datedness is semantic and unbounded, so C4 belongs to the verifier. Never
+    # bake test-subject tokens into this generic mechanism.
 
     violations.extend(_lint_grounding_tech_stack_provenance(request, rfc_view))
 
@@ -4776,8 +4751,10 @@ def _run_grounding_verifier(
         "C1 faithful_specific: the grounded identity stays the specific named thing, not generalized to its category.\n"
         "C2 full_scope: the RFC does not shrink the request to a slice, demo, MVP, prototype, one area, or first iteration.\n"
         "C3 non_legal: IP, trademark, copyright, licensing, or legal risk content does not dominate the output.\n"
-        "C4 latest_default: unless the request explicitly asked for retro, old, classic, vintage, or a specific past "
-        "version/year, the RFC targets the latest/current version, conventions, and best practices of the named thing.\n"
+        "C4 latest_default: using the Original request registry view below as the authority for requester intent, "
+        "return true when the request explicitly asked for retro, old, classic, vintage, or a specific past "
+        "version/year; otherwise return true only when the RFC targets the latest/current version, conventions, "
+        "and best practices of the named thing.\n"
         "Be strict. Return false for any check that is semantically violated, even if wording tries to hide it.\n\n"
         + _format_rfc("Original request registry view", _rfc_to_view(request))
         + "\n"
@@ -4875,14 +4852,6 @@ def _matching_markers(text: str, markers: tuple[str, ...]) -> list[str]:
 
 def _keyword_hit_count(text: str, keywords: tuple[str, ...]) -> int:
     return sum(text.count(keyword.lower()) for keyword in keywords)
-
-
-def _request_explicitly_retro(request: dict[str, Any]) -> bool:
-    text = _grounding_text(_rfc_to_view(request), GroundingResult(_rfc_to_view(request)))
-    if _matching_markers(text, RETRO_REQUEST_MARKERS):
-        return True
-    years = [int(year) for year in re.findall(r"\b(19\d{2}|20[0-2]\d)\b", text)]
-    return any(year < 2026 for year in years)
 
 
 def _with_unresolved_violations(notes: str, violations: list[str]) -> str:
