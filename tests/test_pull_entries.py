@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 
 from ai_org import merge, patch, rfc
+from ai_org import git_wrapper
+from ai_org.rfc import submit as submit_module
 
 
 def test_rfc_pull_reviews_one_unreviewed_rfc(tmp_path, monkeypatch):
@@ -35,6 +38,135 @@ def test_rfc_pull_returns_none_when_no_rfc_is_pending(tmp_path, monkeypatch):
     )
 
     assert rfc.pull(repo) is None
+
+
+def test_rfc_pull_processes_one_inbox_item_then_falls_back_to_review(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    inbox_id = _write_inbox_request(repo, "Build inbox promoted request.")
+    calls = []
+
+    def fake_intake(request, repo_arg, **kwargs):
+        calls.append((request, repo_arg, kwargs))
+        git_wrapper.create_branch_with_files(
+            repo_arg,
+            "ai-org/rfc/inbox-promoted",
+            "main",
+            {
+                "rfc.json": {"working_title": "Inbox Promoted"},
+                "technical-approach.json": {"approach": "test"},
+            },
+            commit_message="rfc: receive Inbox Promoted",
+        )
+        return {
+            "ok": True,
+            "status": "promoted",
+            "id": "inbox-promoted",
+            "branch": "ai-org/rfc/inbox-promoted",
+        }
+
+    review_result = {"status": "reviewed"}
+    review_calls = []
+    monkeypatch.setattr(rfc.receive, "intake", fake_intake)
+    monkeypatch.setattr(
+        rfc.review,
+        "run_rfc_review",
+        lambda repo_arg, rfc_id: review_calls.append((repo_arg, rfc_id)) or review_result,
+    )
+
+    result = rfc.pull(repo)
+
+    assert result["status"] == "promoted"
+    assert calls == [
+        (
+            {"raw_request": "Build inbox promoted request."},
+            repo,
+            {"progress_path": None},
+        )
+    ]
+    assert _git(repo, "show", "ai-org/rfc/inbox-promoted:rfc.json")
+    assert _git(repo, "show", "ai-org/rfc/inbox-promoted:technical-approach.json")
+    processed = submit_module.inbox_dir(repo) / "processed"
+    assert (processed / f"{inbox_id}.json").exists()
+    result_record = json.loads((processed / f"{inbox_id}.result.json").read_text(encoding="utf-8"))
+    assert result_record["status"] == "promoted"
+    assert result_record["rfc_branch"] == "ai-org/rfc/inbox-promoted"
+    assert result_record["rfc_id"] == "inbox-promoted"
+
+    assert rfc.pull(repo) is review_result
+    assert calls == [
+        (
+            {"raw_request": "Build inbox promoted request."},
+            repo,
+            {"progress_path": None},
+        )
+    ]
+    assert review_calls == [(repo, "inbox-promoted")]
+
+
+def test_rfc_pull_needs_work_moves_inbox_record_without_git_branch_or_retry(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    inbox_id = _write_inbox_request(repo, "Build inbox needs work request.")
+    calls = []
+
+    def fake_intake(request, repo_arg, **kwargs):
+        calls.append(request)
+        return {
+            "ok": False,
+            "status": "needs_work",
+            "error": "Could not form approach.",
+            "failed_step": "select_approach",
+        }
+
+    monkeypatch.setattr(rfc.receive, "intake", fake_intake)
+    monkeypatch.setattr(
+        rfc.review,
+        "run_rfc_review",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not review")),
+    )
+
+    result = rfc.pull(repo)
+
+    assert result["status"] == "needs_work"
+    assert _git_status(repo, "show-ref", "--verify", "--quiet", "refs/heads/ai-org/rfc/inbox-needs-work") != 0
+    processed = submit_module.inbox_dir(repo) / "processed"
+    result_record = json.loads((processed / f"{inbox_id}.result.json").read_text(encoding="utf-8"))
+    assert result_record["status"] == "needs_work"
+    assert result_record["error"] == "Could not form approach."
+    assert result_record["failed_step"] == "select_approach"
+    assert rfc.pull(repo) is None
+    assert calls == [{"raw_request": "Build inbox needs work request."}]
+
+
+def test_inbox_state_is_ignored_by_git_after_submit_and_pull_cycle(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "track gitignore")
+    submit_module.submit(repo, "Build an ignored inbox request.")
+
+    def fake_intake(_request, repo_arg, **_kwargs):
+        git_wrapper.create_branch_with_files(
+            repo_arg,
+            "ai-org/rfc/ignored-inbox",
+            "main",
+            {"rfc.json": {"ok": True}, "technical-approach.json": {"ok": True}},
+            commit_message="rfc: receive Ignored Inbox",
+        )
+        return {
+            "ok": True,
+            "status": "promoted",
+            "id": "ignored-inbox",
+            "branch": "ai-org/rfc/ignored-inbox",
+        }
+
+    monkeypatch.setattr(rfc.receive, "intake", fake_intake)
+
+    assert rfc.pull(repo)["status"] == "promoted"
+    status = _git(repo, "status", "--short")
+
+    assert ".ai-org/" not in status
+    assert ".ai-org" not in status
+    assert " .gitignore" in status or ".gitignore" in status
 
 
 def test_patch_pull_implements_one_direction_ok_rfc_without_contribution(tmp_path, monkeypatch):
@@ -175,6 +307,17 @@ def _commit_on_branch(repo: Path, branch: str, subject: str) -> None:
     _git(repo, "checkout", "main")
 
 
+def _write_inbox_request(repo: Path, raw_request: str) -> str:
+    inbox = submit_module.ensure_inbox(repo)
+    inbox_id = raw_request.lower().replace(".", "").replace(" ", "-")
+    path = inbox / f"{inbox_id}.json"
+    path.write_text(
+        json.dumps({"id": inbox_id, "submitted_at": "2026-07-02T00:00:00+00:00", "request": {"raw_request": raw_request}}),
+        encoding="utf-8",
+    )
+    return inbox_id
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -184,3 +327,14 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _git_status(repo: Path, *args: str) -> int:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode

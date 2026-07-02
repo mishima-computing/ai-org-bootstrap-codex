@@ -1,6 +1,10 @@
 # receive.py — the INTAKE GATE: judges whether an incoming REQUEST may become an RFC.
-# This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (send-back):
-#     request --[receive gate]--> promote to RFC | send back for revision | reject.
+# This is NOT a dumb loader/translator. A request is discussed and can be SENT BACK (send-back).
+# The real entrance is:
+#     submit -> off-git inbox -> rfc pull runs intake 1/2/3/4 -> promoted RFC branch | inbox result.
+# Raw requests never create git branches. The off-git inbox is the mailing list; git receives only the
+# promoted, contributor-takeable RFC that survives the receive gate.
+#     inbox request --[receive gate]--> promote to RFC | send back for revision | reject.
 # Only requests that PASS this gate become grounded RFCs. The RFC phase has two parts:
 #     1) receive : intake — can this REQUEST become an RFC at all? (this file)
 #     2) review  : debate the direction of an already-formed RFC. (review.py)
@@ -15,8 +19,9 @@
 #
 # DECISION: these 5 processes happen INSIDE the RFC formation — one codex-driven stage, like review's internal
 # 5-reviewer + Aufheben loop — NOT as 5 separate git stages/branches/commits. Git stores ONLY the result:
-# the promoted, contributor-takeable RFC (ai-org/rfc/<id>: rfc.json) or a send-back/reject marker. Doing
-# the 5 processes inside the RFC (not in git) keeps the git state from exploding.
+# the promoted, contributor-takeable RFC (ai-org/rfc/<id>: rfc.json plus technical-approach.json). Needs-work
+# and rejected requests stay in the processed inbox record, not in git. Doing the 5 processes inside the RFC
+# (not in git) keeps the git state from exploding.
 #
 # Input/output field contract:
 #   entrance REQUEST (rough) requires only raw_request.
@@ -25,12 +30,13 @@
 #   role/belongs/must_not/owner/required_at descriptions; must_not is the anti-dumping boundary that keeps
 #   research prose out of requirement-bearing fields.
 #
-# Shape (to match the other stages): validate the request -> codex grounds it -> git-write the
-# promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
+# Shape (to match the other stages): pull reads one inbox request -> validate the request -> codex grounds it ->
+# git-write only the promoted RFC (ai-org/rfc/<id>: rfc.json), or write the send-back/reject result to the inbox.
 #
 # ==========================================================================================================
 # CANONICAL RECEIVE FLOW - 1/2/3/4 (terum 2026-07-02, CONFIRMED). Read this before touching the Reference wiring.
 # This block is a "Memento tattoo": the correct flow lives HERE, in the code, because ADR/notes get missed.
+#   0. submit                  -> write raw request to the off-git inbox; no branch, no git artifact.
 #   1. validate + ground       -> grounded RFC (what to build: problem + proposal).
 #                                  Provenance discipline: grounding never deliberates the stack. It may only mark
 #                                  tech_stack requester_specified when the original request names the stack, or
@@ -45,7 +51,9 @@
 #                                  set, then judgment chooses among feasible candidates. Fidelity precedent remains
 #                                  evidence; requester-specified stacks override org constraints, with conflicts
 #                                  recorded later as non-blocking risks.
-#   4. promote RFC (with Technical Approach) -> review.
+#   4. promote RFC (with Technical Approach) -> the first git artifact, then review.
+#
+# Dogfood enters through submit + pull. Do not reintroduce throwaway drivers that call intake out-of-band.
 #
 # produce_rfc now executes the flow after confident grounding: it synchronously builds DESIGN Reference facets,
 # starts IMPLEMENTATION Reference research in the background, forms the Technical Approach with the exact design

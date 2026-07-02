@@ -7,10 +7,13 @@ Boundaries are the 30-year Linux org abstraction: **rfc → patch → merge**, p
 flowchart LR
   subgraph shared["shared"]
     GW["git_wrapper.py<br/>single git status window"]
+    REF["reference.py<br/>org-level Reference"]
   end
   subgraph rfc["rfc/ — request → formed RFC"]
+    RSUB["submit.py<br/>off-git inbox entrance"]
     RREC["receive.py<br/>intake + grounding"]
     RREV["review.py<br/>direction debate"]
+    RDEC["decompose.py<br/>right-size RFCs"]
   end
   subgraph patch["patch/ — RFC → impl+accepted contrib"]
     PIMP["implement.py<br/>Contributor writes code"]
@@ -24,7 +27,8 @@ flowchart LR
     GRAPH["graphicist.py<br/>autonomous artist"]
   end
 
-  RREC --> RREV --> PIMP --> PACC --> MSUB --> MMAIN
+  RSUB --> RREC --> RREV --> RDEC --> PIMP --> PACC --> MSUB --> MMAIN
+  RREC -.uses.-> REF
   GW -.used by.-> rfc & patch & merge
 ```
 
@@ -33,14 +37,17 @@ flowchart LR
 |---|---|---|
 | `__init__.py` | 18 | package marker; design note (Git / Linux-community model). |
 | `git_wrapper.py` | 255 | the ONE sanctioned **git gateway/status window**. Git-derivable state comes from refs/topology; git-uncapturable semantic labels live in notes. Public includes branch/ref reads, merge-base/default/current branch helpers, branch file writes, semantic note read/write, and dependency graph derivation. |
+| `reference.py` | 2983 | org-level **Reference** store and lookup lens. Builds design/implementation facets from RFC concepts, persists append-only SQLite/WAL knowledge, supports bounded background research, and provides lookup/expansion used by RFC receive and later patch work. |
 
 ## rfc/ — turn a raw request into a formed, contributor-takeable RFC
 | file | loc | holds |
 |---|---|---|
-| `__init__.py` | 19 | rfc phase **pull** entry (re-exports `pull`). |
+| `__init__.py` | 112 | rfc phase **pull** entry: process one off-git inbox request first, otherwise review one pending RFC branch; also re-exports `decompose`. |
 | `__main__.py` | 15 | `python -m ai_org.rfc` → `pull`. |
+| `submit.py` | 145 | requester-facing entrance. Public: `submit` and `python -m ai_org.rfc.submit <repo> <request>`; parses JSON file, JSON object string, or plain text; writes `<repo>/.ai-org/inbox/<id>.json` or `AI_ORG_INBOX`; prints id + path; appends `.ai-org/` to `.gitignore` when needed without committing. |
+| `decompose.py` | 501 | right-size an RFC after formation. Public: `decompose` (read an RFC branch, split oversized work into child RFC branches with semantic labels, preserve ancestry/topology, leave right-sized RFCs untouched). |
 | `field_registry.py` | 273 | **research-derived RFC field registry**. Single source of truth for RFC handoff fields, per-field `role`/`belongs`/`must_not`/`owner`/`required_at`, JSON schema generation, and `tech_stack` validation. |
-| `receive.py` | 4522 | **intake + grounding**. Public: `receive` (validate entrance: only `raw_request` required), `intake` (validate → `_ground_request` web-research/correct → `promoted` \| `needs_confirmation` \| `rejected`), `produce_rfc` (write grounded registry-shaped `rfc.json` to `ai-org/rfc/<id>`). Key helper: `_ground_request`. |
+| `receive.py` | 5192 | **intake + grounding**. Public: `receive` (validate entrance: only `raw_request` required), `intake` (validate → `_ground_request` web-research/correct → `promoted` \| `needs_work` \| `needs_confirmation` \| `rejected`), `produce_rfc` (write grounded registry-shaped `rfc.json` and `technical-approach.json` to `ai-org/rfc/<id>` only after promotion). Key helper: `_ground_request`. |
 | `review.py` | 484 | **direction debate** of an already-formed RFC. Public: `run_rfc_review` (5 reviewers NEED/APPROACH/COMPAT/SCOPE/MAINTENANCE + Aufheben loop, CAP=5 → `direction-ok` \| `nak`). Helpers: `_review_one`, `_aufheben_consolidate`. |
 
 ## patch/ — produce an implemented AND accepted contribution branch
@@ -65,5 +72,6 @@ flowchart LR
 | `graphicist.py` | 1203 | **autonomous artist / asset tool**. Public: `autonomous_create` (request-only → web-research ART BRIEF → generate → qa → self-critique → optional animate), `constructive_svg` (form-by-construction SVG; styles painterly/cute; views incl side; face canon; segmentation), `animate` (JS rig: rig.json keyframes + FK runtime + preview.html), `fetch_web_image` (Openverse/Wikimedia CC, no key), `render_svg` (headless Chrome), `qa` (model-free PNG checks), `image_model` (raster-model slot, not provisioned). |
 
 ## Each module's runnable entry
-- `python -m ai_org.rfc` / `ai_org.patch` / `ai_org.merge` — each role **pulls** its own next item from git (no central orchestrator).
+- `python -m ai_org.rfc.submit <repo> <request>` — requester writes one raw request to the off-git inbox and receives an id/path receipt.
+- `python -m ai_org.rfc` / `ai_org.patch` / `ai_org.merge` — each role **pulls** its own next item (RFC first checks the off-git inbox, then git RFC branches; patch/merge pull from git).
 - `tests/test_architecture.py` enforces: acyclic imports, no module imports all 3 phases, graphicist isolated.
