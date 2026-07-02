@@ -787,9 +787,9 @@ def test_empty_slot_regenerates_then_accepts(monkeypatch, tmp_path):
     assert "behavior_in_game is empty" in prompts[1]
 
 
-def test_user_facing_success_criteria_must_include_observable_ux_trace():
-    bad = _normalized_problem()
-    criterion = bad["success_criteria"][0]
+def test_user_facing_success_criteria_accept_resolved_ux_trace():
+    problem = _normalized_problem()
+    criterion = problem["success_criteria"][0]
     criterion["verifiable_outcome"] = {
         "expected_state": "The Slime is defeated and meadow_gate_open is true.",
         "evidence": "Internal state records the gate flag.",
@@ -799,10 +799,61 @@ def test_user_facing_success_criteria_must_include_observable_ux_trace():
         "check": "Assert hidden meadow_gate_open is true.",
     }
 
+    assert not receive_module._lint_normalized_problem(problem, _rfc_view())
+
+
+def test_user_facing_success_criteria_reject_unresolved_ux_trace():
+    bad = _normalized_problem()
+    bad["success_criteria"][0]["ux_trace"] = "user_experience_requirements.core_status_surfaces.missing"
+
     errors = receive_module._lint_normalized_problem(bad, _rfc_view())
 
-    assert any("player-facing observable criterion" in error for error in errors)
-    assert not receive_module._lint_normalized_problem(_normalized_problem(), _rfc_view())
+    assert any(
+        "success_criteria[0].ux_trace does not resolve: user_experience_requirements.core_status_surfaces.missing"
+        in error
+        for error in errors
+    )
+
+
+def test_unresolved_ux_trace_feedback_retries_with_bad_path(monkeypatch, tmp_path):
+    bad = _normalized_problem()
+    bad["success_criteria"][0]["ux_trace"] = "user_experience_requirements.core_status_surfaces.missing"
+    good = _normalized_problem()
+    attempts = [bad, good]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(attempts.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._normalize_problem(_rfc_view(), {"repo": tmp_path})
+
+    assert result == good
+    assert len(prompts) == 2
+    assert "user_experience_requirements.core_status_surfaces.missing" in prompts[1]
+
+
+def test_user_facing_success_criteria_reject_all_none_ux_trace():
+    bad = _normalized_problem()
+    bad["success_criteria"][0]["ux_trace"] = "none"
+
+    errors = receive_module._lint_normalized_problem(bad, _rfc_view())
+
+    assert any("player/user criterion with a resolved ux_trace" in error for error in errors)
+
+
+def test_non_user_facing_success_criteria_do_not_require_ux_trace_resolution():
+    problem = _normalized_problem()
+    problem["success_criteria"][0]["ux_trace"] = "none"
+    rfc_view = _rfc_view()
+    rfc_view["user_experience_requirements"]["applicability"] = {
+        "applicability": "not_user_facing",
+        "not_user_facing_reason": "Internal refactor only.",
+    }
+
+    assert not receive_module._lint_normalized_problem(problem, rfc_view)
 
 
 def test_prior_art_term_extraction_sees_user_experience_requirements(monkeypatch, tmp_path):
@@ -1690,6 +1741,7 @@ def _normalized_problem() -> dict[str, object]:
                     "method": "automated_test",
                     "check": "Assert Spark defeats Slime and sets meadow_gate_open true.",
                 },
+                "ux_trace": "user_experience_requirements.core_status_surfaces.player_status",
             }
         ],
         "non_goals": ["Do not add a full campaign."],

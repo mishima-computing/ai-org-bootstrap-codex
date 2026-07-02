@@ -265,6 +265,7 @@ SUCCESS_CRITERION_FIELDS = (
     "capability",
     "verifiable_outcome",
     "verification",
+    "ux_trace",
 )
 SUCCESS_CRITERION_CAPABILITY_FIELDS = ("action", "preconditions")
 SUCCESS_CRITERION_OUTCOME_FIELDS = ("expected_state", "evidence")
@@ -305,6 +306,13 @@ SUCCESS_CRITERION_SCHEMA: dict[str, Any] = {
                 "method": {"type": "string", "enum": list(SUCCESS_CRITERION_VERIFICATION_METHODS)},
                 "check": {"type": "string"},
             },
+        },
+        "ux_trace": {
+            "type": "string",
+            "description": (
+                "Dotted path rooted at user_experience_requirements for the UX section this criterion "
+                "traces to, or exactly none when the criterion is not UX-facing."
+            ),
         },
     },
 }
@@ -2982,18 +2990,20 @@ def _normalize_problem_prompt(
         "Technical Approach steps.\n\n"
         "Write English only. Distill problem and current_inadequacy; do not copy any RFC field verbatim. "
         "Derive success criteria from the RFC intent, but do not copy RFC feature-list bullets as criteria. "
-        "For user_facing deliverables, include at least one player-facing observable criterion tracing to "
-        "user_experience_requirements: it must prove visible/screen/UI/HUD/dialog/feedback evidence, not only "
-        "internal state.\n\n"
+        "For user_facing deliverables, include at least one player/user criterion with ux_trace set to a "
+        "real dotted path inside user_experience_requirements, not none. Use none only for criteria that "
+        "are not UX-facing. Example: a criterion that proves HP appears in the battle HUD uses "
+        "ux_trace=\"user_experience_requirements.core_status_surfaces.player_status\".\n\n"
         "Return these fields:\n"
         "- problem: the core problem, restated crisply.\n"
         "- affected: affected users, operators, contributors, systems, modules, or workflows.\n"
         "- current_inadequacy: what is missing or where the current state falls short.\n"
         "- success_criteria: measurable nested objects. Each criterion must include actor, capability "
-        "{action, preconditions}, verifiable_outcome {expected_state, evidence}, and verification "
+        "{action, preconditions}, verifiable_outcome {expected_state, evidence}, verification "
         "{method, check}. action must be observable; preconditions must be concrete; expected_state must "
         "name the end state that proves success; evidence must state what is observed or measured; method "
-        "must be automated_test, manual_check, or metric; check must be the concrete verification performed.\n"
+        "must be automated_test, manual_check, or metric; check must be the concrete verification performed; "
+        "ux_trace must be a user_experience_requirements dotted path or exactly none.\n"
         "- non_goals: explicit boundaries that should remain out of scope for this RFC.\n\n"
         + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nContext:\n{context_text}\n"
@@ -3956,6 +3966,7 @@ def _parse_success_criterion(value: Any) -> dict[str, Any] | None:
     capability = value.get("capability")
     outcome = value.get("verifiable_outcome")
     verification = value.get("verification")
+    ux_trace = value.get("ux_trace")
     if not isinstance(actor, str):
         return None
     if not isinstance(capability, dict) or set(capability) != set(SUCCESS_CRITERION_CAPABILITY_FIELDS):
@@ -3978,11 +3989,14 @@ def _parse_success_criterion(value: Any) -> dict[str, Any] | None:
     check = verification.get("check")
     if method not in SUCCESS_CRITERION_VERIFICATION_METHODS or not isinstance(check, str):
         return None
+    if not isinstance(ux_trace, str):
+        return None
     return {
         "actor": actor,
         "capability": {"action": action, "preconditions": list(preconditions)},
         "verifiable_outcome": {"expected_state": expected_state, "evidence": evidence},
         "verification": {"method": method, "check": check},
+        "ux_trace": ux_trace,
     }
 
 
@@ -4015,10 +4029,8 @@ def _lint_normalized_problem(parsed: Mapping[str, Any], rfc_view: Mapping[str, A
         ) else None
         if not isinstance(preconditions, list) or not preconditions:
             errors.append(f"{base}.capability.preconditions is empty")
-    if _rfc_is_user_facing(rfc_view) and not _has_player_facing_ux_success_criterion(criteria, rfc_view):
-        errors.append(
-            "success_criteria must include at least one player-facing observable criterion tracing to user_experience_requirements"
-        )
+    if _rfc_is_user_facing(rfc_view):
+        errors.extend(_lint_user_facing_ux_success_criteria(criteria, rfc_view))
     return errors
 
 
@@ -4030,56 +4042,62 @@ def _rfc_is_user_facing(rfc_view: Mapping[str, Any]) -> bool:
     return isinstance(applicability, Mapping) and applicability.get("applicability") == "user_facing"
 
 
-def _has_player_facing_ux_success_criterion(criteria: object, rfc_view: Mapping[str, Any]) -> bool:
+def _lint_user_facing_ux_success_criteria(criteria: object, rfc_view: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
     if not isinstance(criteria, list):
-        return False
-    ux_terms = _user_experience_requirement_phrases(rfc_view)
-    for criterion in criteria:
+        return ["success_criteria must include at least one player/user criterion with a resolved ux_trace"]
+    found = False
+    for index, criterion in enumerate(criteria):
         if not isinstance(criterion, Mapping):
             continue
         actor = str(criterion.get("actor", "")).lower()
         if "player" not in actor and "user" not in actor:
             continue
-        text = " ".join(value for _, value in _walk_normalized_problem_strings(criterion)).lower()
-        if not _contains_observable_ux_language(text):
+        ux_trace = str(criterion.get("ux_trace", "")).strip()
+        if ux_trace == "none":
             continue
-        if "user_experience_requirements" in text or any(term and term in text for term in ux_terms):
-            return True
-    return False
+        resolved = _resolve_user_experience_path(rfc_view, ux_trace)
+        if resolved is None:
+            errors.append(f"success_criteria[{index}].ux_trace does not resolve: {ux_trace}")
+            continue
+        found = True
+    # MEMENTO: UX tracing is declared structurally and resolved mechanically. Never infer it
+    # from prose overlap; two live normalize_problem runs failed from that substring-matching class.
+    if not found:
+        errors.append("success_criteria must include at least one player/user criterion with a resolved ux_trace")
+    return errors
 
 
-def _contains_observable_ux_language(text: str) -> bool:
-    observable_terms = (
-        "observable",
-        "visible",
-        "visibly",
-        "visual",
-        "screen",
-        "screenshot",
-        "hud",
-        "ui",
-        "menu",
-        "dialog",
-        "feedback",
-        "readable",
-        "contrast",
-        "marker",
-        "animation",
-    )
-    return any(term in text for term in observable_terms)
+def _resolve_user_experience_path(rfc_view: Mapping[str, Any], dotted_path: str) -> Any | None:
+    parts = dotted_path.split(".")
+    if len(parts) < 2 or parts[0] != "user_experience_requirements":
+        return None
+    current: Any = rfc_view
+    for part in parts:
+        if isinstance(current, Mapping):
+            if part not in current:
+                return None
+            current = current[part]
+        elif isinstance(current, list):
+            if not part.isdigit():
+                return None
+            index = int(part)
+            if index >= len(current):
+                return None
+            current = current[index]
+        else:
+            return None
+    return current if _has_non_empty_value(current) else None
 
 
-def _user_experience_requirement_phrases(rfc_view: Mapping[str, Any]) -> set[str]:
-    ux = rfc_view.get("user_experience_requirements")
-    if not isinstance(ux, Mapping):
-        return set()
-    phrases = set()
-    for _, value in _walk_normalized_problem_strings(ux):
-        for phrase in _split_source_phrases(value):
-            canonical = _canonical_phrase(phrase)
-            if len(canonical) >= 8:
-                phrases.add(canonical)
-    return phrases
+def _has_non_empty_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return any(_has_non_empty_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_non_empty_value(item) for item in value)
+    return value is not None
 
 
 NON_EMPTY_ARRAY_SLOT_NAMES = frozenset(
@@ -5325,10 +5343,6 @@ def _lint_observable_effects(parsed: Mapping[str, Any]) -> list[str]:
         behavior = str(system.get("behavior_in_game", "")).strip()
         if _canonical_phrase(effect) == _canonical_phrase(behavior):
             errors.append(f"systems[{index}].observable_effect must describe player-facing evidence, not repeat behavior_in_game")
-        if not _contains_observable_ux_language(effect.lower()):
-            errors.append(
-                f"systems[{index}].observable_effect must name observable presentation, feedback, or persistent evidence"
-            )
     return errors
 
 
