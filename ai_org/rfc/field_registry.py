@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 FIELD_OWNERS = ("requester", "grounding", "either")
 REQUIRED_AT_VALUES = ("entrance", "rfc_handoff", "optional")
+LINT_SCOPES = ("target", "context")
 TECH_STACK_BUILD_STRATEGIES = ("", "engine_based", "framework_based", "from_scratch")
 TECH_STACK_CONCRETE_BUILD_STRATEGIES = ("engine_based", "framework_based", "from_scratch")
 TECH_STACK_PROVENANCE = ("requester_specified", "ai_deliberated", "unspecified")
@@ -29,6 +30,7 @@ class FieldRegistryEntry:
     must_not: str
     owner: str
     required_at: str
+    lint_scope: str
     value_type: str = "string"
 
     @property
@@ -43,6 +45,7 @@ class FieldRegistryEntry:
             "must_not": self.must_not,
             "owner": self.owner,
             "required_at": self.required_at,
+            "lint_scope": self.lint_scope,
         }
 
     def schema_description(self) -> str:
@@ -50,7 +53,7 @@ class FieldRegistryEntry:
         # JSON-Schema `description` in a codex --output-schema.
         return (
             f"role={self.role}; belongs={self.belongs}; must_not={self.must_not}; "
-            f"owner={self.owner}; required_at={self.required_at}"
+            f"owner={self.owner}; required_at={self.required_at}; lint_scope={self.lint_scope}"
         )
 
 
@@ -62,6 +65,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "cleaned-up research prose or inferred requirements",
         "requester",
         "entrance",
+        "context",
     ),
     FieldRegistryEntry(
         "working_title",
@@ -70,6 +74,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "full proposal/rationale/domain essay",
         "either",
         "rfc_handoff",
+        "target",
     ),
     FieldRegistryEntry(
         "request_type",
@@ -78,6 +83,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "requirements details",
         "either",
         "optional",
+        "context",
     ),
     FieldRegistryEntry(
         "problem_or_motivation",
@@ -86,6 +92,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "encyclopedia facts that do not explain the problem",
         "grounding",
         "rfc_handoff",
+        "target",
     ),
     FieldRegistryEntry(
         "intended_users_or_jobs",
@@ -94,6 +101,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "staff lists, brand lore, implementation tasks",
         "grounding",
         "rfc_handoff",
+        "target",
     ),
     FieldRegistryEntry(
         "desired_outcomes_success",
@@ -102,6 +110,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "implementation plan",
         "grounding",
         "rfc_handoff",
+        "target",
     ),
     FieldRegistryEntry(
         "affected_area_platform",
@@ -110,6 +119,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "the build-platform choice (that is tech_stack), general context, research notes",
         "either",
         "rfc_handoff",
+        "target",
     ),
     FieldRegistryEntry(
         "tech_stack",
@@ -118,6 +128,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "from_scratch as a silent default; scope/routing; domain facts",
         "either",
         "rfc_handoff",
+        "target",
         "tech_stack",
     ),
     FieldRegistryEntry(
@@ -127,6 +138,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "source lists, research transcript, motivation, proposal, staff/lore/full-history",
         "grounding",
         "rfc_handoff",
+        "context",
     ),
     FieldRegistryEntry(
         "constraints_assumptions",
@@ -135,6 +147,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "proven facts without uncertainty labels",
         "grounding",
         "optional",
+        "context",
         "string_array",
     ),
     FieldRegistryEntry(
@@ -144,6 +157,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "summaries, quotations, conclusions",
         "either",
         "rfc_handoff",
+        "context",
         "string_array",
     ),
     FieldRegistryEntry(
@@ -153,6 +167,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "content consumed downstream as product requirement nouns",
         "grounding",
         "rfc_handoff",
+        "context",
     ),
     FieldRegistryEntry(
         "open_questions",
@@ -161,6 +176,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "future nice-to-haves already out of scope",
         "grounding",
         "rfc_handoff",
+        "context",
         "string_array",
     ),
     FieldRegistryEntry(
@@ -170,6 +186,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "rejected implementation alternatives",
         "grounding",
         "optional",
+        "context",
         "string_array",
     ),
     FieldRegistryEntry(
@@ -179,6 +196,7 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "final design/specification",
         "requester",
         "optional",
+        "context",
     ),
     FieldRegistryEntry(
         "alternatives_considered",
@@ -187,12 +205,15 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "being a required entrance field",
         "grounding",
         "optional",
+        "context",
         "string_array",
     ),
 )
 
 FIELD_REGISTRY_BY_NAME = {entry.name: entry for entry in FIELD_REGISTRY}
 RFC_VIEW_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY)
+LINT_TARGET_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.lint_scope == "target")
+LINT_CONTEXT_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.lint_scope == "context")
 ENTRANCE_REQUIRED_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.required_at == "entrance")
 RFC_HANDOFF_REQUIRED_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.required_at == "rfc_handoff")
 OPTIONAL_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.required_at == "optional")

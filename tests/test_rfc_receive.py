@@ -8,6 +8,7 @@ import pytest
 
 from ai_org.patch.implement import _is_common_8 as _implement_is_registry_rfc
 from ai_org.rfc import receive as receive_module
+from ai_org.rfc.field_registry import FIELD_REGISTRY, LINT_SCOPES
 from ai_org.rfc.receive import (
     COMMON_8_FIELDS,
     GROUNDING_SCHEMA,
@@ -517,6 +518,120 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     assert "branch" not in result
 
 
+def test_marker_lints_ignore_retro_exclusions_in_context_fields(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive_module._entrance_request(receive({"raw_request": "Make Dragon Quest as the current experience."}))
+    grounded = _rfc_view(
+        "Dragon Quest Current Experience",
+        raw_request=request["raw_request"],
+        desired_outcomes_success="Deliver the current Dragon Quest experience.",
+        background_facts="The 1986 first-game release is historical context only.",
+        grounding_provenance="Test fixture grounding.",
+        alternatives_considered=["The original 1986 Dragon Quest was rejected."],
+    )
+    grounded["non_goals_out_of_scope"] = [
+        "A retro-only Dragon Warrior or 1986 first-game target unless the requester asks for that older version."
+    ]
+    grounded["constraints_assumptions"] = ["I assumed the current experience, not classic or retro scope."]
+    codex_calls: list[str] = []
+
+    def handler(cmd):
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        codex_calls.append(kind)
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+        return {
+            "confident": True,
+            "proposed_rfc": grounded,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounded as the current experience.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = receive_module._ground_with_contract(repo, request)
+
+    assert result.confident is True
+    assert result.violations == []
+    assert codex_calls == ["grounding", "verifier"]
+
+
+def test_retro_marker_in_target_field_trips_latest_default_lint_unless_request_is_retro():
+    request = receive_module._entrance_request(receive({"raw_request": "Make Dragon Quest as the current experience."}))
+    grounded = _rfc_view(
+        "Dragon Quest",
+        raw_request=request["raw_request"],
+        desired_outcomes_success="Target the 1986 original experience.",
+    )
+
+    violations = _grounding_lint_violations(request, grounded)
+
+    assert any("C4 latest-default" in violation for violation in violations)
+    retro_request = receive_module._entrance_request(
+        receive({"raw_request": "Make Dragon Quest as the 1986 original experience."})
+    )
+    assert not any("C4 latest-default" in violation for violation in _grounding_lint_violations(retro_request, grounded))
+
+
+def test_scope_shrink_markers_are_field_scoped_to_target_fields():
+    request = receive_module._entrance_request(receive({"raw_request": "Make the full request."}))
+    context_only = _rfc_view("Full Request")
+    context_only["non_goals_out_of_scope"] = ["Not an MVP or short demo."]
+
+    assert not any("C2 full scope" in violation for violation in _grounding_lint_violations(request, context_only))
+
+    target = _rfc_view("Full Request", desired_outcomes_success="Ship an MVP vertical slice.")
+    assert any("C2 full scope" in violation for violation in _grounding_lint_violations(request, target))
+
+
+def test_generalizer_markers_are_field_scoped_to_target_fields():
+    request = receive_module._entrance_request(receive({"raw_request": "Make the named product."}))
+    context_only = _rfc_view("Named Product")
+    context_only["alternatives_considered"] = ["A generic broad category substitute was rejected."]
+
+    assert not any("C1 faithfulness/specificity" in violation for violation in _grounding_lint_violations(request, context_only))
+
+    target = _rfc_view("Named Product", desired_outcomes_success="Build a generic broad category experience.")
+    assert any("C1 faithfulness/specificity" in violation for violation in _grounding_lint_violations(request, target))
+
+
+def test_registry_lint_scope_assignments_cover_every_field():
+    expected_target = {
+        "working_title",
+        "problem_or_motivation",
+        "intended_users_or_jobs",
+        "desired_outcomes_success",
+        "affected_area_platform",
+        "tech_stack",
+    }
+    expected_context = {
+        "raw_request",
+        "request_type",
+        "background_facts",
+        "constraints_assumptions",
+        "references",
+        "grounding_provenance",
+        "open_questions",
+        "non_goals_out_of_scope",
+        "proposal_hint",
+        "alternatives_considered",
+    }
+
+    scopes = {entry.name: entry.lint_scope for entry in FIELD_REGISTRY}
+
+    assert all(scope in LINT_SCOPES for scope in scopes.values())
+    assert {name for name, scope in scopes.items() if scope == "target"} == expected_target
+    assert {name for name, scope in scopes.items() if scope == "context"} == expected_context
+    assert set(scopes) == expected_target | expected_context
+
+
 def test_grounding_ai_deliberated_provenance_regrounds_and_fails_closed(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive({"raw_request": "Make Dragon Quest."})
@@ -823,6 +938,10 @@ def _rfc_view(
         "proposal_hint": proposal_hint,
         "alternatives_considered": alternatives_considered or [],
     }
+
+
+def _grounding_lint_violations(request: dict[str, object], rfc_view: dict[str, object]) -> list[str]:
+    return receive_module._lint_grounding(request, rfc_view, GroundingResult(rfc_view, ""))
 
 
 def _git(repo: Path, *args: str) -> str:

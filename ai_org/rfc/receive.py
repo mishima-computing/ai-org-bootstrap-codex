@@ -137,6 +137,7 @@ import ai_org.rfc.codex_exec as codex_exec
 from ai_org.rfc.field_registry import (
     ENTRANCE_REQUIRED_FIELDS,
     FIELD_REGISTRY,
+    LINT_TARGET_FIELDS,
     OPTIONAL_FIELDS,
     RFC_HANDOFF_REQUIRED_FIELDS,
     RFC_VIEW_FIELDS,
@@ -4662,6 +4663,7 @@ def _lint_grounding(
     grounding_result: GroundingResult,
 ) -> list[str]:
     text = _grounding_text(rfc_view, grounding_result)
+    marker_text = _lint_target_text(rfc_view)
     violations: list[str] = []
 
     empty_required_fields = [
@@ -4675,14 +4677,17 @@ def _lint_grounding(
             + ", ".join(empty_required_fields)
         )
 
-    generalizers = _matching_markers(text, GENERALIZER_MARKERS)
+    # Deterministic marker lints are field-scoped: exclusion/rejection/assumption fields must
+    # be free to name what they exclude, and whole-RFC scans punish correct behavior. The field
+    # registry is the source of truth for which fields commit to the target being built.
+    generalizers = _matching_markers(marker_text, GENERALIZER_MARKERS)
     if generalizers:
         violations.append(
             "C1 faithfulness/specificity lint: grounded RFC uses generalizer markers "
             + ", ".join(generalizers)
         )
 
-    scope_hedges = _matching_markers(text, SCOPE_HEDGE_MARKERS)
+    scope_hedges = _matching_markers(marker_text, SCOPE_HEDGE_MARKERS)
     if scope_hedges:
         violations.append("C2 full scope lint: grounded RFC uses scope-shrinking markers " + ", ".join(scope_hedges))
 
@@ -4692,7 +4697,7 @@ def _lint_grounding(
         violations.append("C3 non-legal lint: legal/IP/trademark/copyright language dominates grounding output")
 
     if not _request_explicitly_retro(request):
-        retro_markers = _matching_markers(text, RETRO_MARKERS)
+        retro_markers = _matching_markers(marker_text, RETRO_MARKERS)
         if retro_markers:
             violations.append(
                 "C4 latest-default lint: grounded RFC targets dated/retro markers without a retro request "
@@ -4848,6 +4853,19 @@ def _grounding_text(rfc_view: dict[str, Any], grounding_result: GroundingResult)
         else:
             parts.append(str(value))
     parts.append(grounding_result.grounding_notes)
+    return f" {' '.join(parts).lower()} "
+
+
+def _lint_target_text(rfc_view: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for field in LINT_TARGET_FIELDS:
+        value = rfc_view.get(field)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        elif isinstance(value, dict):
+            parts.append(json.dumps(value, sort_keys=True, ensure_ascii=True))
+        else:
+            parts.append(str(value or ""))
     return f" {' '.join(parts).lower()} "
 
 
