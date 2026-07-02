@@ -1,4 +1,10 @@
-"""RFC decomposition: split oversized RFCs into topology-encoded child RFCs."""
+"""Deprecated RFC decomposition reference.
+
+Superseded by ai_org.rfc.lineage. This module is kept temporarily for legacy
+tests and comparison while the RFC phase moves to LINEAGE ledgers, serial
+sub-number child IDs, and DAG-only dependency encoding. It is scheduled for
+deletion after downstream callers are gone.
+"""
 from __future__ import annotations
 
 import json

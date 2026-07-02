@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from ai_org import git_wrapper
 from ai_org.rfc import decompose as decomposition
+from ai_org.rfc import lineage
 from ai_org.rfc import receive
 from ai_org.rfc import review
 from ai_org.rfc import submit as submission
@@ -32,12 +33,17 @@ RFC_PREFIX = "ai-org/rfc/"
 
 
 def decompose(repo, rfc_id_or_branch: str, **kwargs):
-    """Decompose an oversized RFC branch into child RFC branches."""
+    """Deprecated: use refine for new RFC lineage splits."""
     return decomposition.decompose(repo, rfc_id_or_branch, **kwargs)
 
 
+def refine(repo, rfc_id_or_branch: str, **kwargs):
+    """Split an oversized direction-ok RFC into lineage child RFC branches."""
+    return lineage.refine(repo, rfc_id_or_branch, **kwargs)
+
+
 def pull(repo, *, progress_path: str | Path | None = None):
-    """Process one inbox request, one author revision, or one RFC review."""
+    """Process one inbox request, author revision, review, or lineage item."""
     intake_result = _pull_inbox(repo, progress_path=progress_path)
     if intake_result is not None:
         return intake_result
@@ -54,6 +60,14 @@ def pull(repo, *, progress_path: str | Path | None = None):
         if _latest_needs_revision_is_head(repo, branch):
             continue
         return review.run_rfc_review(repo, branch.removeprefix(RFC_PREFIX))
+
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if lineage.split_pending(repo, branch):
+            return lineage.refine(repo, branch)
+
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if lineage.coarse_ready(repo, branch):
+            return lineage.elaborate(repo, branch)
     return None
 
 

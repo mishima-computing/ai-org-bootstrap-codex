@@ -13,7 +13,8 @@ flowchart LR
     RSUB["submit.py<br/>off-git inbox entrance"]
     RREC["receive.py<br/>intake + grounding"]
     RREV["review.py<br/>direction debate"]
-    RDEC["decompose.py<br/>right-size RFCs"]
+    RLIN["lineage.py<br/>right-size RFC lineages"]
+    RDEC["decompose.py<br/>deprecated reference"]
   end
   subgraph patch["patch/ — RFC → impl+accepted contrib"]
     PIMP["implement.py<br/>Contributor writes code"]
@@ -27,7 +28,7 @@ flowchart LR
     GRAPH["graphicist.py<br/>autonomous artist"]
   end
 
-  RSUB --> RREC --> RREV --> RDEC --> PIMP --> PACC --> MSUB --> MMAIN
+  RSUB --> RREC --> RREV --> RLIN --> PIMP --> PACC --> MSUB --> MMAIN
   RREC -.uses.-> REF
   GW -.used by.-> rfc & patch & merge
 ```
@@ -42,11 +43,12 @@ flowchart LR
 ## rfc/ — turn a raw request into a formed, contributor-takeable RFC
 | file | loc | holds |
 |---|---|---|
-| `__init__.py` | 112 | rfc phase **pull** entry: process one off-git inbox request first, otherwise review one pending RFC branch; also re-exports `decompose`. |
+| `__init__.py` | 157 | rfc phase **pull** entry: process one off-git inbox request, author reform, review, lineage split, or coarse-child elaboration; re-exports legacy `decompose` and new `refine`. |
 | `__main__.py` | 15 | `python -m ai_org.rfc` → `pull`. |
 | `submit.py` | 145 | requester-facing entrance. Public: `submit` and `python -m ai_org.rfc.submit <repo> <request>`; parses JSON file, JSON object string, or plain text; writes `<repo>/.ai-org/inbox/<id>.json` or `AI_ORG_INBOX`; prints id + path; appends `.ai-org/` to `.gitignore` when needed without committing. |
-| `decompose.py` | 501 | right-size an RFC after formation. Public: `decompose` (read an RFC branch, split oversized work into child RFC branches with semantic labels, preserve ancestry/topology, leave right-sized RFCs untouched). |
+| `decompose.py` | 517 | **deprecated** right-sizing reference, superseded by `lineage.py`; kept temporarily for legacy tests and comparison only. |
 | `field_registry.py` | 273 | **research-derived RFC field registry**. Single source of truth for RFC handoff fields, per-field `role`/`belongs`/`must_not`/`owner`/`required_at`, JSON schema generation, and `tech_stack` validation. |
+| `lineage.py` | 898 | active RFC LINEAGE machinery. Public: `refine` (split a direction-ok oversized technical approach into serial sub-numbered child RFC branches plus `lineage-ledger.json`), `right_sized`, `resolved`, `escalate`, `mark_stale`, `elaborate`, plus pull predicates for split/coarse readiness. Uses typed split-into[AND], depends-on DAGs, parent-retained integration gates, deterministic 100% scope coverage validation, and rolling-wave coarse children. |
 | `receive.py` | 5192 | **intake + grounding**. Public: `receive` (validate entrance: only `raw_request` required), `intake` (validate → `_ground_request` web-research/correct → `promoted` \| `needs_work` \| `needs_confirmation` \| `rejected`), `produce_rfc` (write grounded registry-shaped `rfc.json` and `technical-approach.json` to `ai-org/rfc/<id>` only after promotion). Key helper: `_ground_request`. |
 | `review.py` | 484 | **direction debate** of an already-formed RFC. Public: `run_rfc_review` (5 reviewers NEED/APPROACH/COMPAT/SCOPE/MAINTENANCE + Aufheben loop, CAP=5 → `direction-ok` \| `nak`). Helpers: `_review_one`, `_aufheben_consolidate`. |
 

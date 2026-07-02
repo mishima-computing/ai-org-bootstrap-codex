@@ -1,10 +1,11 @@
 # RFC phase current flow
 
-The RFC phase has three isolated responsibilities:
+The RFC phase has four isolated responsibilities:
 
 - `submit.py` is the requester-facing entrance. It writes raw requests to the off-git inbox at `<repo>/.ai-org/inbox` or `AI_ORG_INBOX` and prints a receipt.
 - `receive.py` accepts a raw request with only `raw_request` required, grounds it into the research-derived RFC field registry, or sends it back with a proposed interpretation and assumptions to confirm or correct.
 - `review.py` debates the direction of an already-formed `rfc.json` and commits `direction-ok` or `nak`.
+- `lineage.py` splits direction-ok oversized Technical Approaches into serial sub-numbered child RFC branches with a parent `lineage-ledger.json`; coarse children are re-elaborated when their dependencies resolve.
 
 ```mermaid
 flowchart TD
@@ -31,7 +32,11 @@ flowchart TD
   REVISE -->|"rounds < CAP"| LOOP
   REVISE -->|"rounds == CAP"| NAK2["commit: rfc: nak"]
 
-  DOK --> NEXT["patch phase pulls the direction-ok RFC"]
+  DOK --> SIZE{right-sized?}
+  SIZE -->|yes| NEXT["patch phase pulls the direction-ok RFC"]
+  SIZE -->|no| LINEAGE["lineage.refine()<br/>write lineage-ledger.json on parent<br/>create child RFC branches NNNN-1, NNNN-2..."]
+  LINEAGE --> LEAF["leaf children inherit direction-ok<br/>coarse children keep exit criteria"]
+  LEAF --> NEXT
   REJ --> INBOXRESULT["processed/&lt;id&gt;.result.json<br/>requester status receipt"]
   CONFIRM --> INBOXRESULT
   NAK0 --> BACK
@@ -52,6 +57,7 @@ flowchart TD
 - `python -m ai_org.rfc.submit <repo> <request>` is the public requester entrance. `<request>` may be a JSON file path, a JSON object string, or plain text. Plain text becomes `{"raw_request": <text>}`.
 - `submit.py` creates `<repo>/.ai-org/inbox/` by default and appends `.ai-org/` to the target repo's `.gitignore` when the entry is absent. It does not commit or stage the `.gitignore` change. If `AI_ORG_INBOX` is set, that external inbox path is used instead.
 - `pull(repo)` processes one unprocessed inbox file before it scans `ai-org/rfc/*` branches for review. If the inbox is empty, pull behaves as before.
+- After the existing pull order (inbox intake, author-pending reform, reviewable RFC), `pull(repo)` takes one lineage item: first a direction-ok serialed RFC that is not right-sized and has no `lineage-ledger.json`, then a coarse child whose dependencies are resolved.
 - `intake(request, repo)` remains the receive gate for raw requests. It returns `status: promoted`, `status: needs_work`, `status: needs_confirmation`, or `status: rejected`.
 - Grounding belongs to intake because it forms the RFC. It may correct a wrong request, such as a mistaken genre reference, before a branch exists.
 - A promoted request is the first git artifact: `ai-org/rfc/<id>` with `rfc.json` and `technical-approach.json`. Needs-work and rejected requests do not create git branches; their status is written to `.ai-org/inbox/processed/<id>.result.json`.
@@ -59,4 +65,10 @@ flowchart TD
 - Each registry field carries `role`, `belongs`, `must_not`, `owner`, and `required_at`. The `must_not` text is the anti-dumping gate: research audit trail belongs in `grounding_provenance`, bounded domain facts belong in `background_facts`, external pointers belong in `references`, and `context` is no longer an RFC intake field.
 - If grounding cannot confidently identify the intended subject or scope, intake still returns its best grounded guess as `proposed_rfc`, lists the `assumptions` behind that guess, and asks the requester to confirm or correct it. `questions` are only for gaps that research genuinely could not infer.
 - `review.py` assumes `rfc.json` is already grounded. It only runs the five-reviewer and Aufheben direction debate.
+- `lineage.py` assumes `technical-approach.json` is approved. It maps the approved `patch_plan`, implementation systems, UX acceptance tests, success criteria, and must-address risks onto children; it does not re-derive a split from RFC prose.
+- Child ids are root-serial sub-numbers, for example root serial `0042` creates `ai-org/rfc/0042-1`, `ai-org/rfc/0042-2`, and nested children such as `0042-1-1`.
+- A split writes `lineage-ledger.json` on the parent branch. The ledger enumerates parent scope items, maps each item to exactly one child id or `parent_gate`, records the depends-on DAG, records each child's `leafed` or `coarse` horizon status, and stores elaboration notes.
+- Git ancestry encodes the primary dependency: serial-chain children branch from their predecessor child branch; parallel children branch from the parent branch. Additional dependencies are stored in child `rfc-metadata.json`.
+- Resolution rolls up: a leaf is resolved when its contribution is accepted and merged; a parent is resolved when all AND children are resolved and the parent has an `rfc: integration-gate passed` marker.
+- `decompose.py` is deprecated and not wired into pull; it remains only as a temporary legacy reference.
 - Codex output schemas remain codex-valid: no `allOf`, `anyOf`, or `oneOf`; `additionalProperties` is false; `required` lists every property.
