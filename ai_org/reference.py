@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from typing import Any, Mapping
 import weakref
 
@@ -58,6 +59,8 @@ DESIGN_CANDIDATE_FIELDS = (
 CANDIDATE_KINDS = {"implementation", "design"}
 REFERENCE_KIND_ORDER = ("implementation", "design")
 REFERENCE_RESEARCH_KINDS_PREFIX = "[reference-kinds:"
+TERM_KEY_FILLER_SUFFIXES = {"system", "systems", "mechanic", "mechanics"}
+TERM_KEY_FILLER_SUFFIX_PATTERN = re.compile(r"(?:^|\s)(" + "|".join(sorted(TERM_KEY_FILLER_SUFFIXES)) + r")$")
 EXAMINED_FIELDS = ("repo", "language", "outcome", "found_via")
 EXAMINED_OUTCOMES = {
     "kept",
@@ -397,6 +400,26 @@ _BACKGROUND_BUILD_EXECUTOR = _DaemonThreadPoolExecutor(
 )
 
 
+def _normalize_term(term: str) -> str:
+    """Return the deterministic matching key for a display term."""
+    text = unicodedata.normalize("NFKC", str(term or ""))
+    text = re.sub(r"\s+", " ", text.lower()).strip()
+    text = _strip_trailing_punctuation(text)
+    while True:
+        match = TERM_KEY_FILLER_SUFFIX_PATTERN.search(text)
+        if not match:
+            return text
+        text = text[: match.start()].rstrip()
+        text = _strip_trailing_punctuation(text)
+
+
+def _strip_trailing_punctuation(value: str) -> str:
+    text = value.rstrip()
+    while text and unicodedata.category(text[-1]).startswith("P"):
+        text = text[:-1].rstrip()
+    return text
+
+
 def lookup(term: str, context: Mapping[str, Any] | None = None, kind: str | None = None) -> dict[str, Any] | None:
     """Read consumption fields for stored candidates matching the consuming stack."""
     entry = audit(term)
@@ -434,8 +457,8 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
     params: list[str] = []
     term = str(filters.get("term") or "").strip()
     if term:
-        where.append("lower(c.term) = lower(?)")
-        params.append(term)
+        where.append("c.term_key = ?")
+        params.append(_normalize_term(term))
 
     author_level = str(filters.get("author_level") or "").strip()
     if author_level:
@@ -460,7 +483,7 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
                 "lower(c.found_via) LIKE lower(?) "
                 "OR EXISTS ("
                 "SELECT 1 FROM research r "
-                "WHERE lower(r.term) = lower(c.term) AND lower(r.search_keywords) LIKE lower(?)"
+                "WHERE r.term_key = c.term_key AND lower(r.search_keywords) LIKE lower(?)"
                 ")"
                 ")"
                 for _value in search_values
@@ -647,7 +670,7 @@ def build_from_rfc(
     hits: list[str] = []
     failed: dict[str, str] = {}
 
-    terms = _extract_reference_terms(text, context)
+    terms = _dedupe_terms_by_key(_extract_reference_terms(text, context))
     if not terms and context.get("_reference_codex_timeouts"):
         failed["__term_extraction__"] = "; ".join(context["_reference_codex_timeouts"])
         return {
@@ -1923,20 +1946,22 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
             _ensure_schema(connection)
             with connection:
                 term = str(entry["term"])
+                term_key = _normalize_term(term)
                 searched_at = time.time()
                 attempt = int(
                     connection.execute(
-                        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM research WHERE lower(term) = lower(?)",
-                        (term,),
+                        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM research WHERE term_key = ?",
+                        (term_key,),
                     ).fetchone()[0]
                 )
                 connection.execute(
                     """
-                    INSERT INTO research(term, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO research(term, term_key, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         term,
+                        term_key,
                         attempt,
                         searched_at,
                         searched_at,
@@ -1951,10 +1976,10 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                         """
                         SELECT 1
                         FROM candidates
-                        WHERE lower(term) = lower(?) AND source_url = ?
+                        WHERE term_key = ? AND source_url = ? AND snippet = ?
                         LIMIT 1
                         """,
-                        (term, stored["source_url"]),
+                        (term_key, stored["source_url"], stored.get("snippet", "")),
                     ).fetchone()
                     if existing is not None:
                         continue
@@ -1962,6 +1987,7 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                         """
                         INSERT INTO candidates(
                             term,
+                            term_key,
                             kind,
                             snippet,
                             summary,
@@ -1981,10 +2007,11 @@ def _write_entry(entry: Mapping[str, Any]) -> None:
                             source_url,
                             found_via
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             term,
+                            term_key,
                             stored["kind"],
                             stored.get("snippet", ""),
                             stored.get("summary", ""),
@@ -2011,16 +2038,17 @@ def _read_entry(term: str) -> dict[str, Any] | None:
     path = _database_path()
     if not path.exists():
         return None
+    term_key = _normalize_term(term)
     try:
         with _connect_existing_database(path) as connection:
             research_rows = connection.execute(
                 """
                 SELECT term, attempt, captured_at, last_searched_at, notes, search_keywords, examined
                 FROM research
-                WHERE lower(term) = lower(?)
+                WHERE term_key = ?
                 ORDER BY attempt, id
                 """,
-                (str(term),),
+                (term_key,),
             ).fetchall()
             if not research_rows:
                 return None
@@ -2030,10 +2058,10 @@ def _read_entry(term: str) -> dict[str, Any] | None:
                     when_not_to_use, tradeoffs, alternatives, implementation_hooks, quality_attributes,
                     evidence, delta_claim, lang_env_version, author_level, source_url, found_via
                 FROM candidates
-                WHERE lower(term) = lower(?)
+                WHERE term_key = ?
                 ORDER BY id
                 """,
-                (str(term),),
+                (term_key,),
             ).fetchall()
     except sqlite3.Error:
         return None
@@ -2085,6 +2113,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             research_columns = _table_columns(connection, "research")
 
         _add_missing_research_columns(connection, research_columns)
+        research_columns = _table_columns(connection, "research")
 
         if candidate_columns and candidate_foreign_keys:
             _migrate_candidates_without_foreign_key(connection)
@@ -2094,18 +2123,25 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             candidate_columns = _table_columns(connection, "candidates")
 
         _add_missing_candidate_columns(connection, candidate_columns)
+        candidate_columns = _table_columns(connection, "candidates")
+        _backfill_term_keys(connection)
 
         connection.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_reference_research_term ON research(term);
+            CREATE INDEX IF NOT EXISTS idx_reference_research_term_key ON research(term_key);
+            CREATE INDEX IF NOT EXISTS idx_reference_research_term_key_attempt ON research(term_key, attempt);
             CREATE INDEX IF NOT EXISTS idx_reference_research_term_attempt ON research(term, attempt);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_term ON candidates(term);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_term_key ON candidates(term_key);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_lang_env_version ON candidates(lang_env_version);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_author_level ON candidates(author_level);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_found_via ON candidates(found_via);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_dedup ON candidates(term, source_url, snippet);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_term_key_dedup ON candidates(term_key, source_url, snippet);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_kind ON candidates(kind);
             CREATE INDEX IF NOT EXISTS idx_reference_candidates_source_url ON candidates(term, source_url);
+            CREATE INDEX IF NOT EXISTS idx_reference_candidates_term_key_source_url ON candidates(term_key, source_url);
             """
         )
     connection.execute("PRAGMA foreign_keys = ON")
@@ -2121,6 +2157,7 @@ def _create_research_table(connection: sqlite3.Connection) -> None:
         CREATE TABLE research (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             term TEXT NOT NULL,
+            term_key TEXT NOT NULL DEFAULT '',
             attempt INTEGER NOT NULL,
             captured_at REAL NOT NULL,
             last_searched_at REAL NOT NULL,
@@ -2136,6 +2173,8 @@ def _add_missing_research_columns(connection: sqlite3.Connection, research_colum
     if "last_searched_at" not in research_columns:
         connection.execute("ALTER TABLE research ADD COLUMN last_searched_at REAL NOT NULL DEFAULT 0")
         connection.execute("UPDATE research SET last_searched_at = captured_at WHERE last_searched_at = 0")
+    if "term_key" not in research_columns:
+        connection.execute("ALTER TABLE research ADD COLUMN term_key TEXT NOT NULL DEFAULT ''")
 
 
 def _create_candidates_table(connection: sqlite3.Connection) -> None:
@@ -2144,6 +2183,7 @@ def _create_candidates_table(connection: sqlite3.Connection) -> None:
         CREATE TABLE candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             term TEXT NOT NULL,
+            term_key TEXT NOT NULL DEFAULT '',
             kind TEXT NOT NULL DEFAULT 'implementation',
             snippet TEXT NOT NULL,
             summary TEXT NOT NULL,
@@ -2169,6 +2209,7 @@ def _create_candidates_table(connection: sqlite3.Connection) -> None:
 
 def _add_missing_candidate_columns(connection: sqlite3.Connection, candidate_columns: set[str]) -> None:
     additions = {
+        "term_key": "TEXT NOT NULL DEFAULT ''",
         "kind": "TEXT NOT NULL DEFAULT 'implementation'",
         "structure": "TEXT NOT NULL DEFAULT ''",
         "rationale": "TEXT NOT NULL DEFAULT ''",
@@ -2192,8 +2233,8 @@ def _migrate_research_to_history(connection: sqlite3.Connection) -> None:
     _create_research_table(connection)
     connection.execute(
         """
-        INSERT INTO research(term, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
-        SELECT term, 1, ?, ?, notes, search_keywords, examined
+        INSERT INTO research(term, term_key, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
+        SELECT term, '', 1, ?, ?, notes, search_keywords, examined
         FROM research_legacy
         ORDER BY lower(term)
         """,
@@ -2210,6 +2251,7 @@ def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> N
         INSERT INTO candidates(
             id,
             term,
+            term_key,
             kind,
             snippet,
             summary,
@@ -2232,6 +2274,7 @@ def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> N
         SELECT
             id,
             term,
+            '',
             'implementation',
             snippet,
             summary,
@@ -2255,6 +2298,18 @@ def _migrate_candidates_without_foreign_key(connection: sqlite3.Connection) -> N
         """
     )
     connection.execute("DROP TABLE candidates_legacy")
+
+
+def _backfill_term_keys(connection: sqlite3.Connection) -> None:
+    for table in ("research", "candidates"):
+        rows = connection.execute(
+            f"SELECT id, term FROM {table} WHERE term_key = '' OR term_key IS NULL"
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                f"UPDATE {table} SET term_key = ? WHERE id = ?",
+                (_normalize_term(str(row["term"] or "")), int(row["id"])),
+            )
 
 
 def _database_path() -> Path:
@@ -2885,6 +2940,18 @@ def _clean_reference_terms(values: Any) -> list[str]:
             continue
         terms.append(term)
     return _unique(terms)[:MAX_REFERENCE_TERMS]
+
+
+def _dedupe_terms_by_key(terms: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for term in terms:
+        key = _normalize_term(term)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(term)
+    return result
 
 
 def _snippet_from_gh_item(item: Mapping[str, Any]) -> str:

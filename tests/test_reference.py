@@ -260,6 +260,17 @@ def test_search_keyword_overqualification_helper_flags_bad_queries():
     _assert_general_search_keywords(good_keywords)
 
 
+def test_normalize_term_folds_only_safe_suffix_variants():
+    key = reference._normalize_term
+
+    assert key("Dungeon Exploration System") == key("dungeon exploration")
+    assert key("Spells and MP Systems") == "spells and mp"
+    assert key("  DUNGEON   EXPLORATION!!!  ") == key("dungeon exploration")
+    assert key("save/load system") == "save/load"
+    assert key("save/load system mechanics") == "save/load"
+    assert key("party recruitment system") != key("party growth system")
+
+
 def test_github_search_rate_limiter_enforces_shared_rolling_window(monkeypatch):
     now = 0.0
     calls = []
@@ -790,6 +801,33 @@ def test_expand_skips_recent_research_and_returns_stored_candidates(monkeypatch,
     assert [attempt["attempt"] for attempt in entry["research"]] == [1]
 
 
+def test_expand_skips_recent_research_across_term_variants(monkeypatch, tmp_path):
+    now = {"value": 1200.0}
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference.time, "time", lambda: now["value"])
+    reference._write_entry(
+        {
+            "term": "dungeon exploration",
+            "search_keywords": ["dungeon exploration"],
+            "examined": [],
+            "candidates": [],
+            "notes": "nothing-fetched: no public repository candidates were fetched.",
+        }
+    )
+
+    now["value"] = 1210.0
+    monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: pytest.fail("baseline should be skipped"))
+    monkeypatch.setattr(reference, "_codex_search_keywords", lambda term, context: pytest.fail("keywords should be skipped"))
+    monkeypatch.setattr(reference, "fetch_candidates", lambda term, context: pytest.fail("implementation fetch should be skipped"))
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: pytest.fail("design fetch should be skipped"))
+
+    entry = reference.expand("Dungeon Exploration System", {"language": "Python"})
+
+    assert entry["term"] == "dungeon exploration"
+    assert entry["candidates"] == []
+    assert [attempt["last_searched_at"] for attempt in entry["research"]] == [1200.0]
+
+
 def test_expand_skips_recent_empty_research_without_searching(monkeypatch, tmp_path):
     now = {"value": 2000.0}
     calls = []
@@ -1038,6 +1076,45 @@ def test_reexpand_appends_new_candidates_dedups_identical_and_preserves_on_empty
     assert preserved["research"][2]["notes"] == "nothing-fetched: no public repository candidates were fetched."
 
 
+def test_candidate_dedup_uses_term_key_source_url_and_snippet(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    first = {
+        "term": "dungeon exploration",
+        "search_keywords": ["dungeon exploration"],
+        "examined": [],
+        "candidates": [
+            {
+                "snippet": "enter_room(); resolve_encounter()",
+                "summary": "Original summary.",
+                "source_url": "https://github.com/example/dungeon/blob/HEAD/explore.py",
+                "lang_env_version": "Python 3.12",
+                "author_level": "high",
+                "pitfalls": "Resolve encounters before rewards.",
+                "found_via": "dungeon exploration",
+            },
+        ],
+        "notes": "",
+    }
+    second = {
+        **first,
+        "term": "dungeon exploration system",
+        "candidates": [
+            {
+                **first["candidates"][0],
+                "summary": "Changed summary that must not overwrite the stored candidate.",
+            },
+        ],
+    }
+
+    reference._write_entry(first)
+    reference._write_entry(second)
+
+    entry = reference.audit("Dungeon Exploration Systems")
+    assert entry is not None
+    assert [attempt["term"] for attempt in entry["research"]] == ["dungeon exploration", "dungeon exploration system"]
+    assert [candidate["summary"] for candidate in entry["candidates"]] == ["Original summary."]
+
+
 def test_expand_records_examined_repos_from_fetch_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
     monkeypatch.setattr(reference, "_codex_baseline", lambda term, context: "hp -= damage")
@@ -1147,6 +1224,42 @@ def test_lookup_filters_by_applicability_and_returns_only_consumption_fields(mon
     assert "examined" not in entry
     assert "notes" not in entry
     assert "found_via" not in entry["candidates"][0]
+
+
+def test_lookup_hits_across_term_phrasing_variants(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    reference._write_entry(
+        {
+            "term": "dungeon exploration",
+            "search_keywords": ["dungeon exploration"],
+            "examined": [
+                {"repo": "example/dungeon", "language": "Python", "outcome": "kept", "found_via": "dungeon exploration"},
+            ],
+            "candidates": [
+                {
+                    "snippet": "enter_room(); resolve_encounter(); reveal_exits()",
+                    "summary": "Rooms resolve encounters before exits are revealed.",
+                    "source_url": "https://github.com/example/dungeon/blob/HEAD/explore.py",
+                    "lang_env_version": "Python 3.12",
+                    "author_level": "high",
+                    "pitfalls": "Do not reveal locked exits before resolving the encounter.",
+                    "found_via": "dungeon exploration",
+                },
+            ],
+            "notes": "stored result",
+        }
+    )
+
+    lookup = reference.lookup("Dungeon Exploration System!!!", {"language": "Python", "version": "3.12"})
+    audit = reference.audit("dungeon exploration system")
+    query_results = reference.query({"term": "Dungeon Exploration System"})
+
+    assert lookup is not None
+    assert lookup["term"] == "dungeon exploration"
+    assert lookup["candidates"][0]["snippet"] == "enter_room(); resolve_encounter(); reveal_exits()"
+    assert audit is not None
+    assert audit["term"] == "dungeon exploration"
+    assert [candidate["term"] for candidate in query_results] == ["dungeon exploration"]
 
 
 def test_audit_returns_management_fields(monkeypatch, tmp_path):
@@ -1261,6 +1374,106 @@ def test_legacy_cascade_schema_migrates_to_candidate_independent_history(monkeyp
     assert preserved is not None
     assert [attempt["attempt"] for attempt in preserved["research"]] == [1, 2]
     assert [candidate["snippet"] for candidate in preserved["candidates"]] == ["setState(prev => prev + 1)"]
+
+
+def test_existing_store_without_term_key_columns_is_backfilled(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE research (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                captured_at REAL NOT NULL,
+                last_searched_at REAL NOT NULL,
+                notes TEXT NOT NULL,
+                search_keywords TEXT NOT NULL,
+                examined TEXT NOT NULL
+            );
+            CREATE TABLE candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'implementation',
+                snippet TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                pitfalls TEXT NOT NULL,
+                structure TEXT NOT NULL DEFAULT '',
+                rationale TEXT NOT NULL DEFAULT '',
+                when_to_use TEXT NOT NULL DEFAULT '',
+                when_not_to_use TEXT NOT NULL DEFAULT '',
+                tradeoffs TEXT NOT NULL DEFAULT '',
+                alternatives TEXT NOT NULL DEFAULT '',
+                implementation_hooks TEXT NOT NULL DEFAULT '',
+                quality_attributes TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                delta_claim TEXT NOT NULL DEFAULT '',
+                lang_env_version TEXT NOT NULL,
+                author_level TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                found_via TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research(term, attempt, captured_at, last_searched_at, notes, search_keywords, examined)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Dungeon Exploration System",
+                1,
+                100.0,
+                100.0,
+                "",
+                json.dumps(["dungeon exploration"]),
+                json.dumps([]),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO candidates(
+                term,
+                snippet,
+                summary,
+                pitfalls,
+                lang_env_version,
+                author_level,
+                source_url,
+                found_via
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Dungeon Exploration System",
+                "enter_room(); resolve_encounter()",
+                "Resolve the room loop before moving deeper.",
+                "Keep exit reveal after encounter resolution.",
+                "Python 3.12",
+                "high",
+                "https://github.com/example/dungeon/blob/HEAD/explore.py",
+                "dungeon exploration",
+            ),
+        )
+
+    lookup = reference.lookup("dungeon exploration", {"language": "Python", "version": "3.12"})
+    second_lookup = reference.lookup("dungeon exploration system", {"language": "Python", "version": "3.12"})
+
+    assert lookup is not None
+    assert second_lookup is not None
+    assert lookup["candidates"][0]["snippet"] == "enter_room(); resolve_encounter()"
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        research_keys = connection.execute("SELECT term_key FROM research").fetchall()
+        candidate_keys = connection.execute("SELECT term_key FROM candidates").fetchall()
+        research_columns = [row["name"] for row in connection.execute("PRAGMA table_info(research)").fetchall()]
+        candidate_columns = [row["name"] for row in connection.execute("PRAGMA table_info(candidates)").fetchall()]
+
+    assert [row["term_key"] for row in research_keys] == ["dungeon exploration"]
+    assert [row["term_key"] for row in candidate_keys] == ["dungeon exploration"]
+    assert research_columns.count("term_key") == 1
+    assert candidate_columns.count("term_key") == 1
 
 
 def test_query_filters_candidates_by_term_lang_author_and_keyword(monkeypatch, tmp_path):
@@ -1430,6 +1643,7 @@ def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch
 
 def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setenv("AI_ORG_REFERENCE_PARALLEL", "1")
     codex_calls = []
     expanded = []
 
@@ -1439,7 +1653,8 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
             "terms": [
                 "OAuth PKCE verifier flow",
                 "browser token exchange",
-                "OAuth PKCE verifier flow",
+                "OAuth PKCE verifier flow system",
+                "browser token exchange mechanics",
             ]
         }
 
@@ -1462,7 +1677,7 @@ def test_build_from_rfc_extracts_terms_once_and_expands_only_returned_terms(monk
     assert len(codex_calls) == 1
     assert codex_calls[0][1] == reference.REFERENCE_TERMS_SCHEMA
     assert codex_calls[0][2] == "reference-terms.json"
-    assert set(expanded) == {"OAuth PKCE verifier flow", "browser token exchange"}
+    assert expanded == ["OAuth PKCE verifier flow", "browser token exchange"]
     assert result["expanded"] == ["OAuth PKCE verifier flow", "browser token exchange"]
     assert set(result["terms"]) == {"OAuth PKCE verifier flow", "browser token exchange"}
     assert "feature" not in expanded
