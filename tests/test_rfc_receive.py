@@ -1014,6 +1014,56 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     assert "must_not=content consumed downstream as product requirement nouns" in provenance_desc
 
 
+def test_reform_rfc_reruns_only_anchored_step_and_writes_v2_response(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    rfc_view = _rfc_view("Reviewable RFC")
+    approach = _reform_approach_tree("old slice")
+    branch = "ai-org/rfc/reviewable-rfc"
+    _git(repo, "checkout", "-B", branch, "main")
+    (repo / "rfc.json").write_text(json.dumps(rfc_view) + "\n", encoding="utf-8")
+    (repo / "technical-approach.json").write_text(json.dumps(approach) + "\n", encoding="utf-8")
+    _git(repo, "add", "rfc.json", "technical-approach.json")
+    _git(repo, "commit", "-m", "initial rfc")
+    _git(repo, "commit", "--allow-empty", "-m", "rfc: needs-revision round 1")
+    _git(repo, "checkout", "main")
+    _write_review_round(repo, "reviewable-rfc", _blocking_objection("patch_plan:candidate:one"))
+    calls: list[str] = []
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unanchored step should not rerun")
+
+    monkeypatch.setattr(receive_module, "_normalize_problem", unexpected)
+    monkeypatch.setattr(receive_module, "_extract_constraints", unexpected)
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", unexpected)
+    monkeypatch.setattr(receive_module, "_generate_candidates", unexpected)
+    monkeypatch.setattr(receive_module, "_select_approach", unexpected)
+    monkeypatch.setattr(receive_module, "_implementation_strategy", unexpected)
+    monkeypatch.setattr(receive_module, "_surface_risks", unexpected)
+
+    def revised_patch_plan(*_args, **_kwargs):
+        calls.append("patch_plan")
+        return {"first_safe_slice": "new slice", "follow_ups": [], "deferred_work": []}
+
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", revised_patch_plan)
+
+    result = receive_module.reform_rfc(repo, "reviewable-rfc")
+
+    assert result["status"] == "reformed"
+    assert calls == ["patch_plan"]
+    assert result["branch"] == branch
+    latest_message = _git(repo, "log", "-1", "--pretty=%B", branch)
+    assert "rfc v2: Reviewable RFC" in latest_message
+    assert "Changes since v1:" in latest_message
+    assert "approach:1" in latest_message
+    revised = json.loads(_git(repo, "show", f"{branch}:technical-approach.json"))
+    assert revised["problem"]["constraints"] == approach["problem"]["constraints"]
+    assert revised["problem"]["question"]["decision"]["implementation"]["patch_plan"]["first_safe_slice"] == "new slice"
+    response = json.loads((repo / ".ai-org/review/reviewable-rfc/round-1-author-v2.json").read_text(encoding="utf-8"))
+    assert response["objections"][0]["status"] == "answered"
+    original = json.loads((repo / ".ai-org/review/reviewable-rfc/round-1.json").read_text(encoding="utf-8"))
+    assert original["objections"][0]["status"] == "open"
+
+
 def _init_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1025,6 +1075,75 @@ def _init_repo(tmp_path: Path) -> Path:
     _git(repo, "commit", "-m", "base")
     _git(repo, "branch", "-M", "main")
     return repo
+
+
+def _write_review_round(repo: Path, rfc_id: str, objection: dict[str, object], *, round_number: int = 1) -> None:
+    directory = repo / ".ai-org" / "review" / rfc_id
+    directory.mkdir(parents=True, exist_ok=True)
+    record = {
+        "rfc_id": rfc_id,
+        "branch": f"ai-org/rfc/{rfc_id}",
+        "round": round_number,
+        "objections": [objection],
+        "verdict": "needs_revision",
+    }
+    (directory / f"round-{round_number}.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
+def _blocking_objection(anchor: str) -> dict[str, object]:
+    return {
+        "objection_id": "approach:1",
+        "anchor_node_ids": [anchor],
+        "axis": "approach",
+        "type": "blocking",
+        "claim": "The patch plan is not reviewable.",
+        "evidence": [{"source_type": "tree_node", "citation": anchor, "consulted_terms": []}],
+        "impact": "The author cannot repost a useful v2.",
+        "requested_author_action": "revise_subtree",
+        "status": "open",
+    }
+
+
+def _reform_approach_tree(first_slice: str) -> dict[str, object]:
+    return {
+        "problem": {
+            "id": "problem",
+            "problem": "Review needs a concrete patch plan.",
+            "affected": "RFC authors.",
+            "current_inadequacy": "The plan is vague.",
+            "goals": [{"id": "goal:1", "criterion": "A reviewer can inspect the first slice."}],
+            "non_goals": [],
+            "constraints": {"hard": [{"id": "constraint:hard:1", "text": "Same branch v2."}], "soft": []},
+            "prior_art": [{"id": "prior_art:lkml", "name": "LKML v2"}],
+            "question": {
+                "id": "question:approach",
+                "candidates": [
+                    {
+                        "id": "candidate:one",
+                        "summary": "Use the author reformation loop.",
+                        "evaluation": {"id": "evaluation:candidate:one", "candidate_id": "candidate:one", "scores": {}},
+                    }
+                ],
+                "decision": {
+                    "id": "decision:candidate:one",
+                    "selected_candidate_id": "candidate:one",
+                    "arguments": [],
+                    "rationale": {"because": ["It fits."], "under_constraints": [], "accepting_tradeoffs": []},
+                    "stack_axes": {},
+                    "rejected": [],
+                    "implementation": {
+                        "id": "implementation:candidate:one",
+                        "main_changes": ["Update RFC files."],
+                        "patch_plan": {"id": "patch_plan:candidate:one", "first_safe_slice": first_slice},
+                        "risks": [],
+                    },
+                    "risks": [],
+                },
+            },
+            "open_questions": [],
+        },
+        "cross_links": [],
+    }
 
 
 def _rfc_view(

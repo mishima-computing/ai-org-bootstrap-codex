@@ -184,6 +184,103 @@ def commit_empty(repo, branch: str, subject: str, *, body: str = "") -> dict[str
             _git_required(repo_path, "checkout", original)
 
 
+def commit_files(
+    repo,
+    branch: str,
+    files: Mapping[str, Any],
+    *,
+    subject: str,
+    body: str = "",
+    allow_empty: bool = False,
+) -> dict[str, str]:
+    """Commit file updates on a branch and restore the original checkout."""
+    repo_path = Path(repo)
+    original = current_branch(repo_path)
+    message_args = ["-m", subject]
+    if body:
+        message_args.extend(["-m", body])
+    try:
+        _git_required(repo_path, "checkout", branch)
+        add_paths: list[str] = []
+        for rel_path, payload in files.items():
+            path = repo_path / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(payload, str):
+                content = payload
+            else:
+                content = json.dumps(payload, indent=2) + "\n"
+            path.write_text(content, encoding="utf-8")
+            add_paths.append(rel_path)
+        _git_required(repo_path, "add", *add_paths)
+        commit_args = ["commit"]
+        if allow_empty:
+            commit_args.append("--allow-empty")
+        commit_args.extend(message_args)
+        _git_required(repo_path, *commit_args)
+        commit = _git_required(repo_path, "rev-parse", "HEAD").stdout.strip()
+        return {"branch": branch, "commit": commit}
+    finally:
+        if original:
+            _git_required(repo_path, "checkout", original)
+
+
+def list_serials(repo) -> list[dict[str, str | int]]:
+    """Return the serial tag registry, ordered by serial number."""
+    result = _git(Path(repo), "for-each-ref", "refs/tags/ai-org/serial", "--format=%(refname:short) %(objectname)")
+    if result.returncode != 0:
+        return []
+    serials: list[dict[str, str | int]] = []
+    for line in result.stdout.splitlines():
+        tag, _, commit = line.partition(" ")
+        number_text = tag.removeprefix("ai-org/serial/")
+        try:
+            number = int(number_text)
+        except ValueError:
+            continue
+        serials.append({"tag": tag, "number": number, "commit": commit.strip()})
+    return sorted(serials, key=lambda item: int(item["number"]))
+
+
+def next_serial(repo) -> str:
+    """Return the next zero-padded org serial from the tag registry."""
+    existing = [int(item["number"]) for item in list_serials(repo)]
+    return f"{max(existing, default=0) + 1:04d}"
+
+
+def serial_for_ref(repo, ref: str) -> str | None:
+    """Return an existing org serial reachable from ref, newest serial first."""
+    serials = sorted(list_serials(repo), key=lambda item: int(item["number"]), reverse=True)
+    for item in serials:
+        tag = str(item["tag"])
+        if is_ancestor(repo, tag, ref):
+            return tag.removeprefix("ai-org/serial/")
+    return None
+
+
+def tag_serial(repo, serial: str, ref: str) -> dict[str, str]:
+    """Create the serial tag at ref unless it already exists."""
+    repo_path = Path(repo)
+    tag = f"ai-org/serial/{serial}"
+    existing = _git(repo_path, "rev-parse", "--verify", f"refs/tags/{tag}")
+    if existing.returncode == 0:
+        return {"tag": tag, "commit": existing.stdout.strip()}
+    target = head_sha(repo_path, ref)
+    if target is None:
+        raise RuntimeError(f"cannot tag missing ref {ref}")
+    _git_required(repo_path, "tag", tag, target)
+    return {"tag": tag, "commit": target}
+
+
+def ensure_serial(repo, ref: str) -> str:
+    """Return the existing reachable serial or assign the next one to ref."""
+    existing = serial_for_ref(repo, ref)
+    if existing:
+        return existing
+    serial = next_serial(repo)
+    tag_serial(repo, serial, ref)
+    return serial
+
+
 def read_semantic(repo, branch: str) -> dict[str, str]:
     """Read git-note semantic labels for a branch head."""
     target = head_sha(repo, branch)

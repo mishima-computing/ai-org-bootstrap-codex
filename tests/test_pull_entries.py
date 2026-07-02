@@ -105,6 +105,58 @@ def test_rfc_pull_processes_one_inbox_item_then_falls_back_to_review(tmp_path, m
     assert review_calls == [(repo, "inbox-promoted")]
 
 
+def test_rfc_pull_orders_inbox_before_author_reform_before_review(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_inbox_request(repo, "Build inbox request.")
+    _commit_on_branch(repo, "ai-org/rfc/waiting-v2", "rfc: needs-revision round 1")
+    _write_review_round(repo, "waiting-v2")
+    _commit_on_branch(repo, "ai-org/rfc/reviewable", "propose rfc")
+    calls: list[str] = []
+
+    def fake_intake(_request, _repo_arg, **_kwargs):
+        calls.append("inbox")
+        return {"status": "needs_work"}
+
+    def fake_reform(_repo_arg, rfc_id):
+        calls.append(f"reform:{rfc_id}")
+        return {"status": "reformed"}
+
+    def fake_review(_repo_arg, rfc_id):
+        calls.append(f"review:{rfc_id}")
+        return {"status": "reviewed"}
+
+    monkeypatch.setattr(rfc.receive, "intake", fake_intake)
+    monkeypatch.setattr(rfc.receive, "reform_rfc", fake_reform)
+    monkeypatch.setattr(rfc.review, "run_rfc_review", fake_review)
+
+    assert rfc.pull(repo)["status"] == "needs_work"
+    assert rfc.pull(repo)["status"] == "reformed"
+    _empty_commit_on_existing_branch(repo, "ai-org/rfc/waiting-v2", "rfc v2: Waiting")
+    assert rfc.pull(repo)["status"] == "reviewed"
+    assert calls == ["inbox", "reform:waiting-v2", "review:reviewable"]
+
+
+def test_needs_revision_branch_is_reviewable_after_v2_commit(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _commit_on_branch(repo, "ai-org/rfc/waiting-v2", "rfc: needs-revision round 1")
+    _write_review_round(repo, "waiting-v2")
+    _empty_commit_on_existing_branch(repo, "ai-org/rfc/waiting-v2", "rfc v2: Waiting")
+    review_calls = []
+    monkeypatch.setattr(
+        rfc.review,
+        "run_rfc_review",
+        lambda repo_arg, rfc_id: review_calls.append((repo_arg, rfc_id)) or {"status": "reviewed"},
+    )
+    monkeypatch.setattr(
+        rfc.receive,
+        "reform_rfc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reform")),
+    )
+
+    assert rfc.pull(repo)["status"] == "reviewed"
+    assert review_calls == [(repo, "waiting-v2")]
+
+
 def test_rfc_pull_needs_work_moves_inbox_record_without_git_branch_or_retry(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     inbox_id = _write_inbox_request(repo, "Build inbox needs work request.")
@@ -309,6 +361,12 @@ def _commit_on_branch(repo: Path, branch: str, subject: str) -> None:
     _git(repo, "checkout", "main")
 
 
+def _empty_commit_on_existing_branch(repo: Path, branch: str, subject: str) -> None:
+    _git(repo, "checkout", branch)
+    _git(repo, "commit", "--allow-empty", "-m", subject)
+    _git(repo, "checkout", "main")
+
+
 def _write_inbox_request(repo: Path, raw_request: str) -> str:
     inbox = submit_module.ensure_inbox(repo)
     inbox_id = raw_request.lower().replace(".", "").replace(" ", "-")
@@ -318,6 +376,31 @@ def _write_inbox_request(repo: Path, raw_request: str) -> str:
         encoding="utf-8",
     )
     return inbox_id
+
+
+def _write_review_round(repo: Path, rfc_id: str) -> None:
+    directory = repo / ".ai-org" / "review" / rfc_id
+    directory.mkdir(parents=True, exist_ok=True)
+    record = {
+        "rfc_id": rfc_id,
+        "branch": f"ai-org/rfc/{rfc_id}",
+        "round": 1,
+        "objections": [
+            {
+                "objection_id": "approach:1",
+                "anchor_node_ids": ["decision:one"],
+                "axis": "approach",
+                "type": "blocking",
+                "claim": "Needs v2.",
+                "evidence": [],
+                "impact": "Review cannot proceed.",
+                "requested_author_action": "revise_subtree",
+                "status": "open",
+            }
+        ],
+        "verdict": "needs_revision",
+    }
+    (directory / "round-1.json").write_text(json.dumps(record) + "\n", encoding="utf-8")
 
 
 def _git(repo: Path, *args: str) -> str:

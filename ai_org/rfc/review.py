@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -65,6 +66,7 @@ AUTHOR_ACTIONS = ["re_explain", "provide_evidence", "revise_subtree", "split_sco
 AXIS_VERDICTS = ["Direction-reviewed-by", "objections_pending"]
 ROUND_VERDICTS = ["direction-ok", "needs_revision", "nak"]
 EVIDENCE_TYPES = ["reference", "prior_decision", "repo_fact", "tree_node", "rfc_field"]
+DEFAULT_MAX_REVIEW_ROUNDS = 5
 
 
 EVIDENCE_SCHEMA: dict[str, Any] = {
@@ -208,6 +210,7 @@ class ReviewResult:
     history: list[dict[str, Any]] = field(default_factory=list)
     escalation_reason: str = ""
     round_record_path: str = ""
+    serial: str = ""
 
 
 def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc.json") -> ReviewResult:
@@ -216,6 +219,19 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
     branch = _rfc_branch(rfc_id_or_branch)
     rfc_id = branch.removeprefix("ai-org/rfc/")
     round_number = _next_round_number(repo_path, rfc_id)
+    bounded = _bounded_rounds_nak_record(repo_path, rfc_id, branch, round_number)
+    if bounded is not None:
+        path = _write_round_record(repo_path, rfc_id, round_number, bounded)
+        _write_marker(repo_path, branch, "rfc: nak", bounded["consolidation"]["nak_reason"])
+        return ReviewResult(
+            "nak",
+            round_number,
+            "",
+            unresolved=[_parse_objection(item) for item in bounded["objections"]],
+            history=[bounded],
+            escalation_reason=bounded["consolidation"]["nak_reason"],
+            round_record_path=str(path),
+        )
 
     rfc_view, rfc_error = _read_rfc_from_git(repo_path, branch, rfc_path)
     approach, approach_error = _read_json_from_git(repo_path, branch, "technical-approach.json")
@@ -271,6 +287,12 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
     open_blocking = [objection for objection in final_objections if objection.status == "open" and objection.type == "blocking"]
     resolved = [axis.axis for axis in axis_reviews if not any(o.axis == axis.axis and o.type == "blocking" for o in final_objections)]
 
+    marker_subject = _marker_subject(status, round_number, branch=branch, repo=repo_path)
+    marker = _write_marker(repo_path, branch, marker_subject, consolidation.summary or consolidation.nak_reason)
+    serial = ""
+    if status == "direction-ok":
+        serial = git_wrapper.ensure_serial(repo_path, marker["commit"])
+
     record = {
         "rfc_id": rfc_id,
         "branch": branch,
@@ -285,14 +307,15 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
         "per_axis_verdicts": {axis.axis: axis.verdict for axis in axis_reviews},
         "consolidation": _consolidation_record(consolidation),
         "verdict": status,
-        "git_result_marker": _marker_subject(status, round_number),
+        "git_result_marker": marker_subject,
+        "git_result_commit": marker["commit"],
+        "serial": serial,
         "deferred": [
             "author-side v2 re-formation and resend loop",
             "Linon PR-gate review",
         ],
     }
     path = _write_round_record(repo_path, rfc_id, round_number, record)
-    _write_marker(repo_path, branch, _marker_subject(status, round_number), consolidation.summary or consolidation.nak_reason)
 
     return ReviewResult(
         status,
@@ -303,6 +326,7 @@ def run_rfc_review(repo: str | Path, rfc_id_or_branch: str, rfc_path: str = "rfc
         history=[record],
         escalation_reason=consolidation.nak_reason if status == "nak" else "",
         round_record_path=str(path),
+        serial=serial,
     )
 
 
@@ -824,16 +848,116 @@ def _write_round_record(repo: Path, rfc_id: str, round_number: int, record: Mapp
     return path
 
 
-def _write_marker(repo: Path, branch: str, subject: str, body: str = "") -> None:
-    git_wrapper.commit_empty(repo, branch, subject, body=body)
+def _write_marker(repo: Path, branch: str, subject: str, body: str = "") -> dict[str, str]:
+    return git_wrapper.commit_empty(repo, branch, subject, body=body)
 
 
-def _marker_subject(status: str, round_number: int) -> str:
+def _marker_subject(status: str, round_number: int, *, branch: str = "", repo: Path | None = None) -> str:
     if status == "direction-ok":
-        return "rfc: direction-ok"
+        serial = git_wrapper.serial_for_ref(repo, branch) if repo is not None and branch else None
+        serial = serial or (git_wrapper.next_serial(repo) if repo is not None else "")
+        suffix = f" serial {serial}" if serial else ""
+        return f"rfc: direction-ok{suffix}"
     if status == "needs_revision":
         return f"rfc: needs-revision round {round_number}"
     return "rfc: nak"
+
+
+def _max_review_rounds() -> int:
+    raw = os.environ.get("AI_ORG_RFC_MAX_REVIEW_ROUNDS", str(DEFAULT_MAX_REVIEW_ROUNDS))
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_REVIEW_ROUNDS
+    return max(value, 1)
+
+
+def _bounded_rounds_nak_record(repo: Path, rfc_id: str, branch: str, round_number: int) -> dict[str, Any] | None:
+    max_rounds = _max_review_rounds()
+    previous = _review_round_records(repo, rfc_id)
+    if len(previous) < max_rounds:
+        return None
+    latest = previous[-1]
+    open_blocking = [
+        objection
+        for objection in latest.get("objections", [])
+        if isinstance(objection, Mapping)
+        and objection.get("type") == "blocking"
+        and objection.get("status") in {"open", "carried-forward"}
+    ]
+    if not open_blocking:
+        return None
+    reason = (
+        f"RFC direction review exceeded the bounded-rounds backstop of {max_rounds} rounds with "
+        "blocking objections still open. Kernel practice has no fixed cap; AI Org diverges here to prevent "
+        "runaway RFC phase loops."
+    )
+    history = [
+        {
+            "round": item.get("round"),
+            "verdict": item.get("verdict"),
+            "open_blocking_objection_ids": [
+                str(objection.get("objection_id"))
+                for objection in item.get("objections", [])
+                if isinstance(objection, Mapping)
+                and objection.get("type") == "blocking"
+                and objection.get("status") in {"open", "carried-forward"}
+            ],
+        }
+        for item in previous
+    ]
+    return {
+        "rfc_id": rfc_id,
+        "branch": branch,
+        "round": round_number,
+        "inputs": {"rfc_path": "rfc.json", "technical_approach_path": "technical-approach.json", "node_ids": []},
+        "axis_reviews": [],
+        "objections": open_blocking,
+        "per_axis_verdicts": {},
+        "consolidation": {
+            "verdict": "nak",
+            "summary": reason,
+            "deduplicated_objections": open_blocking,
+            "contradiction_resolutions": [],
+            "nak_reason": reason,
+            "evidence": [
+                {
+                    "source_type": "prior_decision",
+                    "citation": f"round history: {json.dumps(history, sort_keys=True)}",
+                    "consulted_terms": [],
+                }
+            ],
+            "validation_errors": [],
+        },
+        "verdict": "nak",
+        "git_result_marker": "rfc: nak",
+        "serial": "",
+        "bounded_rounds_backstop": {
+            "max_rounds": max_rounds,
+            "divergence": "Kernel practice has no fixed cap; AI Org adds this runaway backstop.",
+            "history": history,
+        },
+        "deferred": [
+            "Linon PR-gate review",
+        ],
+    }
+
+
+def _review_round_records(repo: Path, rfc_id: str) -> list[dict[str, Any]]:
+    directory = repo / ".ai-org" / "review" / rfc_id
+    records: list[tuple[int, dict[str, Any]]] = []
+    for path in directory.glob("round-*.json"):
+        try:
+            number = int(path.stem.removeprefix("round-"))
+        except ValueError:
+            continue
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            records.append((number, parsed))
+    return [record for _, record in sorted(records)]
 
 
 def _error_round_record(rfc_id: str, branch: str, round_number: int, reason: str) -> dict[str, Any]:
@@ -856,6 +980,7 @@ def _error_round_record(rfc_id: str, branch: str, round_number: int, reason: str
         },
         "verdict": "nak",
         "git_result_marker": "rfc: nak",
+        "serial": "",
         "deferred": [
             "author-side v2 re-formation and resend loop",
             "Linon PR-gate review",

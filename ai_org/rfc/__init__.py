@@ -1,12 +1,18 @@
-"""RFC phase pull entry: process off-git inbox requests, then review RFCs.
+"""RFC phase pull entry: process off-git inbox requests, author revisions, then review RFCs.
 
 Lifecycle:
 1. Requesters run ``python -m ai_org.rfc.submit <repo> <request>``.
 2. ``submit`` writes the raw request to the off-git inbox
    ``<repo>/.ai-org/inbox`` or ``AI_ORG_INBOX``.
 3. ``pull`` takes one unprocessed inbox item first and runs the receive gate.
-4. Only a promoted RFC becomes a git branch at ``ai-org/rfc/<id>``. Requests
+4. A needs-revision branch is author-reformed on the same RFC branch as vN+1.
+5. Only a promoted RFC becomes a git branch at ``ai-org/rfc/<id>``. Requests
    that need work or are rejected stay as processed inbox records.
+
+Memento: LKML-style review means reviewers object and the author reworks; v2 is
+same-branch with a Changes-since body. Review records are append-only. Accepted
+RFCs receive serial tags on direction-ok. AI Org adds a bounded-rounds backstop,
+which diverges from kernel practice to keep the RFC phase from running forever.
 """
 from __future__ import annotations
 
@@ -31,20 +37,43 @@ def decompose(repo, rfc_id_or_branch: str, **kwargs):
 
 
 def pull(repo, *, progress_path: str | Path | None = None):
-    """Process one inbox request, or review one proposed RFC branch."""
+    """Process one inbox request, one author revision, or one RFC review."""
     intake_result = _pull_inbox(repo, progress_path=progress_path)
     if intake_result is not None:
         return intake_result
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
-        if git_wrapper.has_subject(repo, branch, "rfc: direction-ok"):
+        if _is_terminal_rfc(repo, branch):
             continue
-        if git_wrapper.has_subject(repo, branch, "rfc: needs-revision"):
+        if _latest_needs_revision_is_head(repo, branch) and _has_review_round_record(repo, branch):
+            return receive.reform_rfc(repo, branch.removeprefix(RFC_PREFIX))
+
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if _is_terminal_rfc(repo, branch):
             continue
-        if git_wrapper.has_subject(repo, branch, "rfc: nak"):
+        if _latest_needs_revision_is_head(repo, branch):
             continue
         return review.run_rfc_review(repo, branch.removeprefix(RFC_PREFIX))
     return None
+
+
+def _is_terminal_rfc(repo, branch: str) -> bool:
+    return git_wrapper.has_subject(repo, branch, "rfc: direction-ok") or git_wrapper.has_subject(repo, branch, "rfc: nak")
+
+
+def _latest_needs_revision_is_head(repo, branch: str) -> bool:
+    subjects = git_wrapper.log_subjects(repo, branch)
+    for index, subject in enumerate(subjects):
+        if "rfc: direction-ok" in subject or "rfc: nak" in subject:
+            return False
+        if "rfc: needs-revision round " in subject:
+            return index == 0
+    return False
+
+
+def _has_review_round_record(repo, branch: str) -> bool:
+    rfc_id = branch.removeprefix(RFC_PREFIX)
+    return any((Path(repo) / ".ai-org" / "review" / rfc_id).glob("round-*.json"))
 
 
 def _pull_inbox(repo, *, progress_path: str | Path | None = None) -> dict[str, Any] | None:

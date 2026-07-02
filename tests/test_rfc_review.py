@@ -193,6 +193,24 @@ def _install_codex_fake(monkeypatch: pytest.MonkeyPatch, handler):
     monkeypatch.setattr(review.subprocess, "run", fake_run)
 
 
+def _write_round_record(repo: Path, round_number: int, objection: dict[str, object]) -> None:
+    directory = repo / ".ai-org" / "review" / RFC_ID
+    directory.mkdir(parents=True, exist_ok=True)
+    record = {
+        "rfc_id": RFC_ID,
+        "branch": RFC_BRANCH,
+        "round": round_number,
+        "inputs": {"rfc_path": "rfc.json", "technical_approach_path": "technical-approach.json", "node_ids": []},
+        "axis_reviews": [],
+        "objections": [objection],
+        "per_axis_verdicts": {},
+        "consolidation": {},
+        "verdict": "needs_revision",
+        "git_result_marker": f"rfc: needs-revision round {round_number}",
+    }
+    (directory / f"round-{round_number}.json").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+
 def _patch_reference(monkeypatch: pytest.MonkeyPatch, calls: list[str] | None = None) -> None:
     def fake_lookup(term, context=None, kind=None):
         if calls is not None:
@@ -302,6 +320,30 @@ def test_nonblocking_objections_allow_direction_ok_marker_and_round_record(tmp_p
     assert _git(tmp_path, "ls-files", result.round_record_path).stdout == ""
 
 
+def test_direction_ok_assigns_serial_tag_once(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    _patch_reference(monkeypatch)
+
+    def handler(repo, prompt, output_schema):
+        kind = _schema_kind(output_schema)
+        if kind == "aufheben":
+            return _aufheben_payload("direction-ok"), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
+        return _axis_payload(axis), 0
+
+    _install_codex_fake(monkeypatch, handler)
+
+    first = review.run_rfc_review(tmp_path, RFC_ID)
+    second = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert first.serial == "0001"
+    assert second.serial == "0001"
+    tags = _git(tmp_path, "tag", "--list", "ai-org/serial/*").stdout.splitlines()
+    assert tags == ["ai-org/serial/0001"]
+    tag_target = _git(tmp_path, "rev-parse", "ai-org/serial/0001").stdout.strip()
+    assert tag_target == first.history[0]["git_result_commit"]
+
+
 def test_blocking_objections_dedupe_to_needs_revision_marker(tmp_path, monkeypatch):
     _init_repo(tmp_path)
     _patch_reference(monkeypatch)
@@ -325,6 +367,28 @@ def test_blocking_objections_dedupe_to_needs_revision_marker(tmp_path, monkeypat
     record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
     assert record["verdict"] == "needs_revision"
     assert len(record["objections"]) == 1
+
+
+def test_bounded_rounds_escalates_to_nak_without_codex(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("AI_ORG_RFC_MAX_REVIEW_ROUNDS", "2")
+    blocker = _objection("approach")
+    _write_round_record(tmp_path, 1, blocker)
+    _write_round_record(tmp_path, 2, blocker)
+    monkeypatch.setattr(
+        review,
+        "_run_codex",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not call codex")),
+    )
+
+    result = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert result.status == "nak"
+    assert "bounded-rounds backstop" in result.escalation_reason
+    record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
+    assert record["round"] == 3
+    assert record["bounded_rounds_backstop"]["max_rounds"] == 2
+    assert "rfc: nak" in _latest_commit_message(tmp_path)
 
 
 def test_nak_path_is_evidenced_decision_record(tmp_path, monkeypatch):

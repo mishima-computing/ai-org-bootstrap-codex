@@ -129,6 +129,22 @@ def test_create_branch_with_files_notes_and_dependency_graph(tmp_path):
     assert git_wrapper.is_ancestor(repo, "rfc/prep", "rfc/docs") is False
 
 
+def test_serial_registry_uses_tags_and_is_idempotent(tmp_path):
+    repo = _init_repo(tmp_path)
+    _branch_with_commit(repo, "ai-org/rfc/one", "rfc: direction-ok")
+    first_commit = _git(repo, "rev-parse", "ai-org/rfc/one").stdout.strip()
+
+    assert git_wrapper.next_serial(repo) == "0001"
+    assert git_wrapper.ensure_serial(repo, "ai-org/rfc/one") == "0001"
+    assert git_wrapper.ensure_serial(repo, "ai-org/rfc/one") == "0001"
+    assert git_wrapper.list_serials(repo) == [{"tag": "ai-org/serial/0001", "number": 1, "commit": first_commit}]
+
+    _branch_with_commit(repo, "ai-org/rfc/two", "rfc: direction-ok")
+    assert git_wrapper.next_serial(repo) == "0002"
+    assert git_wrapper.ensure_serial(repo, "ai-org/rfc/two") == "0002"
+    assert [item["tag"] for item in git_wrapper.list_serials(repo)] == ["ai-org/serial/0001", "ai-org/serial/0002"]
+
+
 def _init_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()

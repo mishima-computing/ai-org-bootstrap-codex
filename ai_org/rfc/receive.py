@@ -150,6 +150,7 @@ import tempfile
 import time
 from typing import Any, Mapping
 
+from ai_org import git_wrapper
 import ai_org.reference as reference
 import ai_org.rfc.codex_exec as codex_exec
 from ai_org.rfc.field_registry import (
@@ -1198,6 +1199,605 @@ def produce_rfc(
         "technical_approach_path": "technical-approach.json",
         "grounding_notes": grounding.grounding_notes,
     }
+
+
+REFORM_STEP_ORDER = [
+    "problem",
+    "constraints",
+    "prior_art",
+    "candidates",
+    "decision",
+    "implementation",
+    "patch_plan",
+    "risks",
+]
+
+
+def reform_rfc(repo: str | Path, rfc_id_or_branch: str) -> dict[str, Any]:
+    """Author-side v2 re-formation for a needs-revision RFC on the same branch.
+
+    Memento: reviewers only object; the author reworks and reposts v2 on the same
+    RFC branch with a Changes-since body. Review round records are immutable, so
+    author answers are appended as separate response records.
+    """
+    repo_path = Path(repo).resolve()
+    branch = _rfc_branch(rfc_id_or_branch)
+    rfc_id = branch.removeprefix("ai-org/rfc/")
+    latest = _latest_review_round_record(repo_path, rfc_id)
+    if latest is None:
+        return {"ok": False, "status": "no_review_round", "error": f"No review round found for {rfc_id}."}
+
+    open_blocking = _open_blocking_objections(latest)
+    if not open_blocking:
+        return {"ok": False, "status": "no_open_blocking_objections", "round": latest.get("round")}
+
+    rfc_view = _read_json_from_branch(repo_path, branch, "rfc.json")
+    approach = _read_json_from_branch(repo_path, branch, "technical-approach.json")
+    if not isinstance(rfc_view, dict) or not _is_rfc_view(rfc_view):
+        return {"ok": False, "status": "needs_work", "error": f"{branch}:rfc.json is not a grounded RFC view."}
+    if not isinstance(approach, dict):
+        return {"ok": False, "status": "needs_work", "error": f"{branch}:technical-approach.json is missing or invalid."}
+
+    previous_rfc = _json_safe(rfc_view)
+    previous_approach = _json_safe(approach)
+    affected_steps = _affected_reform_steps(approach, open_blocking)
+    revised_rfc = dict(rfc_view)
+    rfc_changed = False
+    if any(str(objection.get("axis")) == "need" for objection in open_blocking):
+        grounded = _ground_with_contract(repo_path, _rfc_with_reform_feedback(revised_rfc, open_blocking))
+        if grounded.violations:
+            return {
+                "ok": False,
+                "status": "needs_work",
+                "error": "RFC re-grounding contract violations remain unresolved.",
+                "failed_step": "rfc_grounding",
+                "violations": grounded.violations,
+            }
+        revised_rfc = grounded.rfc_view
+        rfc_changed = _canonical_json(revised_rfc) != _canonical_json(previous_rfc)
+
+    reform = _reform_technical_approach(repo_path, revised_rfc, approach, open_blocking, affected_steps)
+    if not reform.get("ok", False):
+        return reform
+    revised_approach = reform["technical_approach"]
+    changed_nodes = reform["changed_nodes"]
+    changed = rfc_changed or _canonical_json(revised_approach) != _canonical_json(previous_approach)
+    if rfc_changed:
+        changed_nodes = ["rfc.json", *changed_nodes]
+
+    previous_version = _review_round_number(latest)
+    next_version = previous_version + 1
+    answers = _author_answers(open_blocking, changed_nodes, changed)
+    body = _changes_since_body(previous_version, answers)
+    written = git_wrapper.commit_files(
+        repo_path,
+        branch,
+        {
+            "rfc.json": revised_rfc,
+            "technical-approach.json": revised_approach,
+        },
+        subject=f"rfc v{next_version}: {revised_rfc['working_title']}",
+        body=body,
+        allow_empty=True,
+    )
+    response_path = _write_author_response_record(
+        repo_path,
+        rfc_id,
+        latest,
+        written["commit"],
+        next_version,
+        answers,
+        affected_steps,
+        changed_nodes,
+    )
+    return {
+        "ok": True,
+        "status": "reformed",
+        "id": rfc_id,
+        "branch": branch,
+        "commit": written["commit"],
+        "version": next_version,
+        "review_round": previous_version,
+        "affected_steps": affected_steps,
+        "changed_nodes": changed_nodes,
+        "author_response_path": str(response_path),
+    }
+
+
+revise_rfc = reform_rfc
+
+
+def _rfc_branch(rfc_id_or_branch: str) -> str:
+    if rfc_id_or_branch.startswith("refs/heads/"):
+        return rfc_id_or_branch.removeprefix("refs/heads/")
+    if rfc_id_or_branch.startswith("ai-org/rfc/"):
+        return rfc_id_or_branch
+    return f"ai-org/rfc/{rfc_id_or_branch}"
+
+
+def _latest_review_round_record(repo: Path, rfc_id: str) -> dict[str, Any] | None:
+    directory = repo / ".ai-org" / "review" / rfc_id
+    records: list[tuple[int, dict[str, Any]]] = []
+    for path in directory.glob("round-*.json"):
+        try:
+            number = int(path.stem.removeprefix("round-"))
+        except ValueError:
+            continue
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            records.append((number, parsed))
+    if not records:
+        return None
+    return sorted(records, key=lambda item: item[0])[-1][1]
+
+
+def _review_round_number(record: Mapping[str, Any]) -> int:
+    try:
+        return int(record.get("round", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _open_blocking_objections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(objection)
+        for objection in record.get("objections", [])
+        if isinstance(objection, Mapping)
+        and objection.get("type") == "blocking"
+        and objection.get("status") in {"open", "carried-forward"}
+    ]
+
+
+def _read_json_from_branch(repo: Path, branch: str, path: str) -> Any:
+    raw = git_wrapper.show_file(repo, branch, path)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def _rfc_with_reform_feedback(rfc_view: Mapping[str, Any], objections: list[Mapping[str, Any]]) -> dict[str, Any]:
+    revised = _rfc_to_view(dict(rfc_view))
+    feedback = "; ".join(
+        f"{objection.get('objection_id')}: {objection.get('claim')}"
+        for objection in objections
+        if str(objection.get("axis")) == "need"
+    )
+    if feedback:
+        revised["grounding_provenance"] = (
+            str(revised.get("grounding_provenance", "")).strip()
+            + f" Review feedback for author re-formation: {feedback}"
+        ).strip()[:2000]
+    return revised
+
+
+def _affected_reform_steps(
+    approach: Mapping[str, Any],
+    objections: list[Mapping[str, Any]],
+) -> list[str]:
+    node_steps = _node_step_map(approach)
+    affected: list[str] = []
+    for objection in objections:
+        anchors = objection.get("anchor_node_ids", [])
+        if not isinstance(anchors, list):
+            anchors = []
+        for anchor in anchors:
+            step = node_steps.get(str(anchor)) or _step_for_node_id(str(anchor))
+            if step not in affected:
+                affected.append(step)
+        if str(objection.get("axis")) == "need" and "problem" not in affected:
+            affected.insert(0, "problem")
+    return [step for step in REFORM_STEP_ORDER if step in affected]
+
+
+def _node_step_map(value: Any, inherited_step: str = "problem") -> dict[str, str]:
+    node_map: dict[str, str] = {}
+    if isinstance(value, Mapping):
+        node_id = value.get("id")
+        step = _step_for_node_id(str(node_id)) if isinstance(node_id, str) else inherited_step
+        if isinstance(node_id, str) and node_id:
+            node_map[node_id] = step
+        for key, child in value.items():
+            child_step = _step_for_tree_key(str(key), step)
+            node_map.update(_node_step_map(child, child_step))
+    elif isinstance(value, list):
+        for child in value:
+            node_map.update(_node_step_map(child, inherited_step))
+    return node_map
+
+
+def _step_for_tree_key(key: str, inherited_step: str) -> str:
+    return {
+        "constraints": "constraints",
+        "prior_art": "prior_art",
+        "candidates": "candidates",
+        "evaluation": "candidates",
+        "decision": "decision",
+        "implementation": "implementation",
+        "patch_plan": "patch_plan",
+        "risks": "risks",
+    }.get(key, inherited_step)
+
+
+def _step_for_node_id(node_id: str) -> str:
+    if node_id == "problem" or node_id.startswith("goal:"):
+        return "problem"
+    if node_id.startswith("constraint:"):
+        return "constraints"
+    if node_id.startswith("prior_art:"):
+        return "prior_art"
+    if node_id == "question:approach" or node_id.startswith("candidate:") or node_id.startswith("evaluation:"):
+        return "candidates"
+    if node_id.startswith("decision:"):
+        return "decision"
+    if node_id.startswith("implementation:"):
+        return "implementation"
+    if node_id.startswith("patch_plan:"):
+        return "patch_plan"
+    if node_id.startswith("risk:"):
+        return "risks"
+    return "problem"
+
+
+def _reform_technical_approach(
+    repo: Path,
+    rfc_view: dict[str, Any],
+    approach: Mapping[str, Any],
+    objections: list[Mapping[str, Any]],
+    affected_steps: list[str],
+) -> dict[str, Any]:
+    if not affected_steps:
+        return {"ok": True, "technical_approach": dict(approach), "changed_nodes": []}
+    components = _approach_components(approach)
+    context = _technical_approach_context(
+        {
+            "review_feedback": _json_safe(objections),
+            "review_feedback_by_step": _feedback_by_step(approach, objections, affected_steps),
+        },
+        repo,
+    )
+    changed_nodes: list[str] = []
+
+    for step in affected_steps:
+        before = _canonical_json(_component_node_snapshot(components, step))
+        result = _run_reform_step(step, repo, rfc_view, components, context)
+        failure = _technical_approach_step_failure(step, result)
+        if failure:
+            return {"ok": False, "status": "needs_work", **failure}
+        _store_reform_step_result(components, step, result)
+        if _canonical_json(_component_node_snapshot(components, step)) != before:
+            changed_nodes.extend(_changed_node_ids_for_step(components, step))
+
+    technical_approach = _assemble_from_components(components)
+    return {"ok": True, "technical_approach": technical_approach, "changed_nodes": _dedupe(changed_nodes)}
+
+
+def _feedback_by_step(
+    approach: Mapping[str, Any],
+    objections: list[Mapping[str, Any]],
+    steps: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    node_steps = _node_step_map(approach)
+    routed = {step: [] for step in steps}
+    for objection in objections:
+        objection_steps: set[str] = set()
+        anchors = objection.get("anchor_node_ids", [])
+        if isinstance(anchors, list):
+            objection_steps.update(node_steps.get(str(anchor)) or _step_for_node_id(str(anchor)) for anchor in anchors)
+        if str(objection.get("axis")) == "need":
+            objection_steps.add("problem")
+        for step in steps:
+            if step in objection_steps:
+                routed[step].append(dict(objection))
+    return routed
+
+
+def _approach_components(approach: Mapping[str, Any]) -> dict[str, Any]:
+    problem = dict(approach.get("problem", {})) if isinstance(approach.get("problem"), Mapping) else {}
+    question = dict(problem.get("question", {})) if isinstance(problem.get("question"), Mapping) else {}
+    decision = dict(question.get("decision", {})) if isinstance(question.get("decision"), Mapping) else {}
+    implementation = (
+        dict(decision.get("implementation", {})) if isinstance(decision.get("implementation"), Mapping) else {}
+    )
+    patch_plan = dict(implementation.get("patch_plan", {})) if isinstance(implementation.get("patch_plan"), Mapping) else {}
+    candidates = {"candidates": [dict(item) for item in question.get("candidates", []) if isinstance(item, Mapping)]}
+    evaluations = {
+        "evaluations": [
+            dict(candidate["evaluation"])
+            for candidate in candidates["candidates"]
+            if isinstance(candidate.get("evaluation"), Mapping)
+        ]
+    }
+    selected = {key: value for key, value in decision.items() if key not in {"id", "implementation", "risks"}}
+    if "selected_candidate_id" not in selected and isinstance(decision.get("selected_candidate_id"), str):
+        selected["selected_candidate_id"] = decision["selected_candidate_id"]
+    risks = {"risks": _collect_risks(problem)}
+    return {
+        "problem": problem,
+        "constraints": _constraints_from_tree(problem.get("constraints")),
+        "prior_art": {"patterns": [dict(item) for item in problem.get("prior_art", []) if isinstance(item, Mapping)]},
+        "candidates": candidates,
+        "evaluations": evaluations,
+        "selected": selected,
+        "implementation": {key: value for key, value in implementation.items() if key not in {"id", "patch_plan", "risks"}},
+        "patch_plan": {key: value for key, value in patch_plan.items() if key != "id"},
+        "risks": risks,
+        "source": "reformed",
+        "provided_approach": None,
+    }
+
+
+def _constraints_from_tree(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {"hard_constraints": [], "soft_preferences": []}
+    return {
+        "hard_constraints": [dict(item) for item in value.get("hard", []) if isinstance(item, Mapping)],
+        "soft_preferences": [dict(item) for item in value.get("soft", []) if isinstance(item, Mapping)],
+    }
+
+
+def _collect_risks(value: Any) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    if isinstance(value, Mapping):
+        child = value.get("risks")
+        if isinstance(child, list):
+            risks.extend(dict(item) for item in child if isinstance(item, Mapping))
+        for nested in value.values():
+            if nested is not child:
+                risks.extend(_collect_risks(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            risks.extend(_collect_risks(nested))
+    return risks
+
+
+def _run_reform_step(
+    step: str,
+    repo: Path,
+    rfc_view: dict[str, Any],
+    components: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    if step == "problem":
+        return _normalize_problem(rfc_view, context)
+    if step == "constraints":
+        return _extract_constraints(rfc_view, repo, context, _assemble_from_components(components))
+    if step == "prior_art":
+        return _build_prior_art_map(rfc_view, repo, context, _assemble_from_components(components))
+    if step == "candidates":
+        return _generate_candidates(
+            _normalized_problem_from_tree(components["problem"]),
+            components["constraints"],
+            components["prior_art"],
+            context,
+            _assemble_from_components(components),
+        )
+    if step == "decision":
+        evaluations = components["evaluations"]
+        if not evaluations.get("evaluations"):
+            evaluations = _evaluate_candidates(
+                components["candidates"],
+                _normalized_problem_from_tree(components["problem"]),
+                components["constraints"],
+                context,
+                _assemble_from_components(components),
+            )
+            failure = _technical_approach_step_failure("decision", evaluations)
+            if failure:
+                return failure
+        return _select_approach(
+            components["candidates"],
+            evaluations,
+            components["constraints"],
+            context,
+            _assemble_from_components(components),
+        )
+    if step == "implementation":
+        return _implementation_strategy(
+            components["selected"],
+            components["prior_art"],
+            components["constraints"],
+            rfc_view,
+            repo,
+            context,
+            _assemble_from_components(components),
+        )
+    if step == "patch_plan":
+        return _right_size_patch_plan(
+            components["selected"],
+            components["implementation"],
+            components["constraints"],
+            context,
+            _assemble_from_components(components),
+        )
+    if step == "risks":
+        return _surface_risks(
+            components["selected"],
+            components["implementation"],
+            components["patch_plan"],
+            components["constraints"],
+            context,
+            _assemble_from_components(components),
+        )
+    return {"ok": False, "error": f"unknown re-formation step {step}"}
+
+
+def _store_reform_step_result(components: dict[str, Any], step: str, result: Mapping[str, Any]) -> None:
+    if step == "problem":
+        previous = components["problem"]
+        replacement = _problem_root_from_normalized(result)
+        replacement["constraints"] = previous.get("constraints", {"hard": [], "soft": []})
+        replacement["prior_art"] = previous.get("prior_art", [])
+        replacement["question"] = previous.get("question", {"id": "question:approach", "candidates": [], "decision": {}})
+        replacement["open_questions"] = previous.get("open_questions", [])
+        components["problem"] = replacement
+    elif step == "constraints":
+        components["constraints"] = dict(result)
+        components["problem"]["constraints"] = _constraint_tree_nodes(result)
+    elif step == "prior_art":
+        components["prior_art"] = dict(result)
+        components["problem"]["prior_art"] = _prior_art_tree_nodes(result)
+    elif step == "candidates":
+        components["candidates"] = dict(result)
+    elif step == "decision":
+        components["selected"] = dict(result)
+    elif step == "implementation":
+        components["implementation"] = dict(result)
+    elif step == "patch_plan":
+        components["patch_plan"] = dict(result)
+    elif step == "risks":
+        components["risks"] = dict(result)
+
+
+def _assemble_from_components(components: Mapping[str, Any]) -> dict[str, Any]:
+    cross_links: list[dict[str, str]] = []
+    problem = dict(components["problem"])
+    problem["constraints"] = _constraint_tree_nodes(components["constraints"])
+    problem["prior_art"] = _prior_art_tree_nodes(components["prior_art"])
+    problem["question"] = _question_tree(
+        components["selected"],
+        components["candidates"],
+        components["evaluations"],
+        components["implementation"],
+        components["patch_plan"],
+        components["risks"],
+        cross_links,
+        provided_approach=components.get("provided_approach"),
+    )
+    problem.setdefault("id", "problem")
+    problem.setdefault("open_questions", [])
+    return {"problem": problem, "cross_links": cross_links}
+
+
+def _normalized_problem_from_tree(problem: Mapping[str, Any]) -> dict[str, Any]:
+    goals = problem.get("goals", [])
+    success_criteria = [dict(goal) for goal in goals if isinstance(goal, Mapping)]
+    return {
+        "problem": str(problem.get("problem") or problem.get("summary") or ""),
+        "affected": str(problem.get("affected") or ""),
+        "current_inadequacy": str(problem.get("current_inadequacy") or ""),
+        "success_criteria": success_criteria,
+        "non_goals": list(problem.get("non_goals", [])) if isinstance(problem.get("non_goals"), list) else [],
+    }
+
+
+def _component_node_snapshot(components: Mapping[str, Any], step: str) -> Any:
+    if step == "problem":
+        return {
+            key: value
+            for key, value in components["problem"].items()
+            if key not in {"constraints", "prior_art", "question", "open_questions"}
+        }
+    key = {
+        "decision": "selected",
+        "risks": "risks",
+    }.get(step, step)
+    return components.get(key)
+
+
+def _changed_node_ids_for_step(components: Mapping[str, Any], step: str) -> list[str]:
+    return sorted(
+        node_id
+        for node_id, node_step in _node_step_map(_assemble_from_components(components)).items()
+        if node_step == step
+    )
+
+
+def _author_answers(
+    objections: list[Mapping[str, Any]],
+    changed_nodes: list[str],
+    changed: bool,
+) -> list[dict[str, Any]]:
+    answers: list[dict[str, Any]] = []
+    for objection in objections:
+        objection_id = str(objection.get("objection_id", ""))
+        anchors = [str(anchor) for anchor in objection.get("anchor_node_ids", []) if isinstance(anchor, str)]
+        touched = [node for node in changed_nodes if node == "rfc.json" or node in anchors or _step_for_node_id(node) in {_step_for_node_id(anchor) for anchor in anchors}]
+        if changed and touched:
+            answers.append(
+                {
+                    "objection_id": objection_id,
+                    "status": "answered",
+                    "answer": "changed",
+                    "changed_node_ids": touched,
+                    "justification": "",
+                }
+            )
+        else:
+            answers.append(
+                {
+                    "objection_id": objection_id,
+                    "status": "carried-forward",
+                    "answer": "unchanged-but-justified",
+                    "changed_node_ids": [],
+                    "justification": (
+                        "The author re-ran the anchored formation step with the objection as feedback; "
+                        "the resulting derivation remained unchanged, so this is carried forward for reviewer judgment."
+                    ),
+                }
+            )
+    return answers
+
+
+def _changes_since_body(previous_version: int, answers: list[Mapping[str, Any]]) -> str:
+    lines = [f"Changes since v{previous_version}:"]
+    for answer in answers:
+        changed = ", ".join(answer.get("changed_node_ids", [])) or "none"
+        detail = str(answer.get("justification") or changed)
+        lines.append(f"- {answer.get('objection_id')}: {answer.get('answer')} ({detail})")
+    return "\n".join(lines)
+
+
+def _write_author_response_record(
+    repo: Path,
+    rfc_id: str,
+    round_record: Mapping[str, Any],
+    commit: str,
+    version: int,
+    answers: list[Mapping[str, Any]],
+    affected_steps: list[str],
+    changed_nodes: list[str],
+) -> Path:
+    round_number = _review_round_number(round_record)
+    directory = repo / ".ai-org" / "review" / rfc_id
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"round-{round_number}-author-v{version}.json"
+    status_by_id = {str(answer.get("objection_id")): answer for answer in answers}
+    objections = []
+    for objection in round_record.get("objections", []):
+        if not isinstance(objection, Mapping):
+            continue
+        updated = dict(objection)
+        answer = status_by_id.get(str(updated.get("objection_id")))
+        if answer is not None:
+            updated["status"] = answer["status"]
+            updated["author_answer"] = dict(answer)
+        objections.append(updated)
+    record = {
+        "rfc_id": rfc_id,
+        "review_round": round_number,
+        "author_version": version,
+        "commit": commit,
+        "affected_steps": affected_steps,
+        "changed_node_ids": changed_nodes,
+        "objections": objections,
+        "memento": [
+            "LKML author-reworks rule: reviewers object; author reforms and reposts.",
+            "Same RFC branch vN+1 commit with Changes since vN body; no new branch.",
+            "Review round records remain immutable; this author response is append-only.",
+        ],
+    }
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _normalize_problem(rfc_view: dict[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
