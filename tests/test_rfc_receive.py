@@ -226,6 +226,8 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
             "term_key": "software deliverable specification completeness profile",
             "kept": 2,
             "design_kept": 2,
+            "facets": [{"aspect_name": "battle numbers", "structure": "Declare combat quantities."}],
+            "aspects": [{"aspect_name": "battle numbers", "structure": "Declare combat quantities."}],
         }
 
     def fake_start_background_build(rfc_view, context=None, **kwargs):
@@ -246,10 +248,15 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
         assert repo_path == repo.resolve()
         assert kwargs["context"]["repo"] == repo.resolve()
         assert kwargs["reference_terms"] == ["battle loop"]
+        assert kwargs["completeness_profile"]["facets"][0]["aspect_name"] == "battle numbers"
         assert "language" not in kwargs["context"]
         assert "environment" not in kwargs["context"]
         assert "version" not in kwargs["context"]
-        return {"ok": True, "technical_approach": approach_tree}
+        return {
+            "ok": True,
+            "technical_approach": approach_tree,
+            "external_files": {"domain-spec/battle-numbers.json": {"tables": []}},
+        }
 
     monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
     monkeypatch.setattr(receive_module.reference, "build_completeness_profile", fake_build_completeness_profile)
@@ -271,6 +278,8 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
         "term_key": "software deliverable specification completeness profile",
         "kept": 2,
         "design_kept": 2,
+        "facets": [{"aspect_name": "battle numbers", "structure": "Declare combat quantities."}],
+        "aspects": [{"aspect_name": "battle numbers", "structure": "Declare combat quantities."}],
     }
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
     assert _git(repo, "show", "main:README.md") == "base"
@@ -279,6 +288,7 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     assert _implement_is_registry_rfc(produced)
     assert "custom_priority" not in produced
     assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:technical-approach.json")) == approach_tree
+    assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:domain-spec/battle-numbers.json")) == {"tables": []}
     assert calls == [
         "build_from_rfc",
         "build_completeness_profile",
@@ -1183,6 +1193,7 @@ def _reform_approach_tree(first_slice: str) -> dict[str, object]:
                     "implementation": {
                         "id": "implementation:candidate:one",
                         "main_changes": ["Update RFC files."],
+                        "domain_specification": {"id": "domain_specification", "aspects": []},
                         "patch_plan": {"id": "patch_plan:candidate:one", "first_safe_slice": first_slice},
                         "risks": [],
                     },

@@ -76,6 +76,8 @@ def test_completeness_profile_derives_game_deliverable_kind_from_ux_and_platform
     assert result["term_key"] == "browser command based jrpg game specification completeness profile"
     assert result["kept"] == 1
     assert result["design_kept"] == 1
+    assert result["facets"][0]["aspect_name"] == "job queue architecture"
+    assert result["aspects"] == result["facets"]
     assert calls[0][1]["_reference_design_profile_query"] is True
     assert calls[0][2] == {"force": False, "kinds": ("design",)}
 

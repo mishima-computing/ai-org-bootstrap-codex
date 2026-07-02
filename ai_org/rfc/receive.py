@@ -794,6 +794,75 @@ IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
         },
     },
 }
+DOMAIN_SPECIFICATION_FIELDS = ("aspects",)
+DOMAIN_ASPECT_FIELDS = (
+    "aspect_name",
+    "applicability",
+    "specification_body",
+    "quantities",
+    "tables",
+    "sources",
+)
+DOMAIN_APPLICABILITY_VALUES = ("applies", "not_applicable")
+DOMAIN_QUANTITY_FIELDS = ("name", "value", "unit")
+DOMAIN_TABLE_FIELDS = ("table_name", "columns", "rows")
+DOMAIN_SPEC_TABLE_EXTERNALIZE_ROW_THRESHOLD = 12
+
+DOMAIN_SPECIFICATION_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(DOMAIN_SPECIFICATION_FIELDS),
+    "properties": {
+        "aspects": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(DOMAIN_ASPECT_FIELDS),
+                "properties": {
+                    "aspect_name": {"type": "string"},
+                    "applicability": {
+                        "type": "string",
+                        "enum": list(DOMAIN_APPLICABILITY_VALUES),
+                        "description": "applies means the RFC must specify this aspect; not_applicable means specification_body is the reason it does not apply.",
+                    },
+                    "specification_body": {"type": "string"},
+                    "quantities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": list(DOMAIN_QUANTITY_FIELDS),
+                            "properties": {
+                                "name": {"type": "string"},
+                                "value": {"type": "string"},
+                                "unit": {"type": "string"},
+                            },
+                        },
+                    },
+                    "tables": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": list(DOMAIN_TABLE_FIELDS),
+                            "properties": {
+                                "table_name": {"type": "string"},
+                                "columns": {"type": "array", "items": {"type": "string"}},
+                                "rows": {
+                                    "type": "array",
+                                    "items": {"type": "array", "items": {"type": "string"}},
+                                },
+                            },
+                        },
+                    },
+                    "sources": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+    },
+}
 PATCH_PLAN_DEFERRED_FIELDS = (
     "item",
     "why_safe_to_defer",
@@ -1172,6 +1241,7 @@ def produce_rfc(
         repo_path,
         context=approach_context,
         reference_terms=design_terms,
+        completeness_profile=completeness_profile,
         progress_path=progress_path,
     )
     if approach.get("ok") is False:
@@ -1193,7 +1263,10 @@ def produce_rfc(
         base,
         rfc,
         rfc_path=rfc_path,
-        extra_files={"technical-approach.json": approach["technical_approach"]},
+        extra_files={
+            "technical-approach.json": approach["technical_approach"],
+            **approach.get("external_files", {}),
+        },
         commit_message=f"rfc: receive {rfc['working_title']}",
     )
     return {
@@ -1215,6 +1288,7 @@ REFORM_STEP_ORDER = [
     "candidates",
     "decision",
     "implementation",
+    "domain_specification",
     "patch_plan",
     "risks",
 ]
@@ -1282,6 +1356,7 @@ def reform_rfc(repo: str | Path, rfc_id_or_branch: str) -> dict[str, Any]:
         {
             "rfc.json": revised_rfc,
             "technical-approach.json": revised_approach,
+            **reform.get("external_files", {}),
         },
         subject=f"rfc v{next_version}: {revised_rfc['working_title']}",
         body=body,
@@ -1426,6 +1501,7 @@ def _step_for_tree_key(key: str, inherited_step: str) -> str:
         "evaluation": "candidates",
         "decision": "decision",
         "implementation": "implementation",
+        "domain_specification": "domain_specification",
         "patch_plan": "patch_plan",
         "risks": "risks",
     }.get(key, inherited_step)
@@ -1444,6 +1520,8 @@ def _step_for_node_id(node_id: str) -> str:
         return "decision"
     if node_id.startswith("implementation:"):
         return "implementation"
+    if node_id == "domain_specification" or node_id.startswith("domain_specification:"):
+        return "domain_specification"
     if node_id.startswith("patch_plan:"):
         return "patch_plan"
     if node_id.startswith("risk:"):
@@ -1469,6 +1547,7 @@ def _reform_technical_approach(
         repo,
     )
     changed_nodes: list[str] = []
+    external_files: dict[str, Any] = {}
 
     for step in affected_steps:
         before = _canonical_json(_component_node_snapshot(components, step))
@@ -1476,12 +1555,19 @@ def _reform_technical_approach(
         failure = _technical_approach_step_failure(step, result)
         if failure:
             return {"ok": False, "status": "needs_work", **failure}
+        if step == "domain_specification":
+            result = _externalize_domain_specification(result, external_files)
         _store_reform_step_result(components, step, result)
         if _canonical_json(_component_node_snapshot(components, step)) != before:
             changed_nodes.extend(_changed_node_ids_for_step(components, step))
 
     technical_approach = _assemble_from_components(components)
-    return {"ok": True, "technical_approach": technical_approach, "changed_nodes": _dedupe(changed_nodes)}
+    return {
+        "ok": True,
+        "technical_approach": technical_approach,
+        "changed_nodes": _dedupe(changed_nodes),
+        "external_files": external_files,
+    }
 
 
 def _feedback_by_step(
@@ -1511,6 +1597,11 @@ def _approach_components(approach: Mapping[str, Any]) -> dict[str, Any]:
     implementation = (
         dict(decision.get("implementation", {})) if isinstance(decision.get("implementation"), Mapping) else {}
     )
+    domain_specification = (
+        dict(implementation.get("domain_specification", {}))
+        if isinstance(implementation.get("domain_specification"), Mapping)
+        else {"aspects": []}
+    )
     patch_plan = dict(implementation.get("patch_plan", {})) if isinstance(implementation.get("patch_plan"), Mapping) else {}
     candidates = {"candidates": [dict(item) for item in question.get("candidates", []) if isinstance(item, Mapping)]}
     evaluations = {
@@ -1531,7 +1622,18 @@ def _approach_components(approach: Mapping[str, Any]) -> dict[str, Any]:
         "candidates": candidates,
         "evaluations": evaluations,
         "selected": selected,
-        "implementation": {key: value for key, value in implementation.items() if key not in {"id", "patch_plan", "risks"}},
+        "implementation": {
+            key: value
+            for key, value in implementation.items()
+            if key not in {"id", "domain_specification", "patch_plan", "risks"}
+        },
+        "domain_specification": {
+            "aspects": [
+                {key: value for key, value in item.items() if key != "id"}
+                for item in domain_specification.get("aspects", [])
+                if isinstance(item, Mapping)
+            ]
+        },
         "patch_plan": {key: value for key, value in patch_plan.items() if key != "id"},
         "risks": risks,
         "source": "reformed",
@@ -1614,6 +1716,17 @@ def _run_reform_step(
             context,
             _assemble_from_components(components),
         )
+    if step == "domain_specification":
+        profile_facets = _domain_profile_facets(components.get("domain_specification", {}).get("aspects", []))
+        return _domain_specification(
+            profile_facets,
+            _domain_reference_lookups(profile_facets, context),
+            components["implementation"],
+            components["constraints"],
+            rfc_view,
+            context,
+            _assemble_from_components(components),
+        )
     if step == "patch_plan":
         return _right_size_patch_plan(
             components["selected"],
@@ -1655,6 +1768,8 @@ def _store_reform_step_result(components: dict[str, Any], step: str, result: Map
         components["selected"] = dict(result)
     elif step == "implementation":
         components["implementation"] = dict(result)
+    elif step == "domain_specification":
+        components["domain_specification"] = dict(result)
     elif step == "patch_plan":
         components["patch_plan"] = dict(result)
     elif step == "risks":
@@ -1671,6 +1786,7 @@ def _assemble_from_components(components: Mapping[str, Any]) -> dict[str, Any]:
         components["candidates"],
         components["evaluations"],
         components["implementation"],
+        components["domain_specification"],
         components["patch_plan"],
         components["risks"],
         cross_links,
@@ -2400,6 +2516,7 @@ def form_technical_approach(
     provided_approach: Any | None = None,
     progress_path: str | Path | None = None,
     reference_terms: Any | None = None,
+    completeness_profile: Any | None = None,
     skip_reference_build: bool = False,
 ) -> dict[str, Any]:
     """Form step 10 of the documented 10-step Technical Approach procedure."""
@@ -2419,6 +2536,7 @@ def form_technical_approach(
     steps: dict[str, Any] = {}
     step_order = _technical_approach_step_order(effective_provided_approach)
     steps_completed: list[dict[str, Any]] = []
+    external_files: dict[str, Any] = {}
 
     def start_step() -> float:
         return time.monotonic() if progress_path is not None else 0.0
@@ -2562,6 +2680,33 @@ def form_technical_approach(
     )
     mark_step_completed("implementation_strategy", started_at, partial_tree)
 
+    domain_facets = _domain_profile_facets(completeness_profile)
+    domain_reference_lookups = _domain_reference_lookups(domain_facets, approach_context) if domain_facets else {}
+    started_at = start_step()
+    domain_specification = _domain_specification(
+        domain_facets,
+        domain_reference_lookups,
+        implementation,
+        constraints,
+        rfc_view,
+        approach_context,
+        _approach_snapshot(partial_tree),
+    )
+    failure = _technical_approach_step_failure("domain_specification", domain_specification)
+    if failure:
+        return failure
+    domain_specification = _externalize_domain_specification(domain_specification, external_files)
+    steps["domain_specification"] = domain_specification
+    partial_tree["problem"]["question"] = _partial_question_tree(
+        candidates=candidates,
+        evaluations=evaluations,
+        selected=selected,
+        implementation=implementation,
+        domain_specification=domain_specification,
+        provided_approach=effective_provided_approach,
+    )
+    mark_step_completed("domain_specification", started_at, partial_tree)
+
     started_at = start_step()
     patch_plan = _right_size_patch_plan(
         selected,
@@ -2579,6 +2724,7 @@ def form_technical_approach(
         evaluations=evaluations,
         selected=selected,
         implementation=implementation,
+        domain_specification=domain_specification,
         patch_plan=patch_plan,
         provided_approach=effective_provided_approach,
     )
@@ -2612,6 +2758,7 @@ def form_technical_approach(
         candidates,
         evaluations,
         implementation,
+        domain_specification,
         patch_plan,
         risks,
         [],
@@ -2629,6 +2776,7 @@ def form_technical_approach(
             evaluations,
             prior_art,
             implementation,
+            domain_specification,
             patch_plan,
             risks,
             source,
@@ -2636,6 +2784,7 @@ def form_technical_approach(
             rfc_view=rfc_view,
         ),
         "steps": steps,
+        "external_files": external_files,
     }
 
 
@@ -3268,8 +3417,8 @@ def _right_size_patch_plan_prompt(
             + "\n"
         )
     return (
-        "You are forming step 8 of AI Org's Technical Approach derivation tree: right-size the patch plan.\n"
-        "Use the accumulated approach tree containing the root goals, constraints, selected decision, and implementation strategy, "
+        "You are forming step 9 of AI Org's Technical Approach derivation tree: right-size the patch plan.\n"
+        "Use the accumulated approach tree containing the root goals, constraints, selected decision, implementation strategy, and domain specification, "
         "plus read-only repository inspection from the configured repo root. Do not modify files.\n\n"
         "Turn the implementation strategy into a right-sized, incremental patch plan. Every slice must leave "
         "the system working and should enable behavior incrementally. The first_playable node must be the first safe "
@@ -3291,6 +3440,59 @@ def _right_size_patch_plan_prompt(
         f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
+        + feedback_text
+        + "\nReturn only JSON matching the provided schema."
+    )
+
+
+def _domain_specification_prompt(
+    profile_facets: list[dict[str, Any]],
+    reference_lookups: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    rfc_view: dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
+    feedback: list[str] | None = None,
+) -> str:
+    facets_text = json.dumps(profile_facets, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    lookups_text = json.dumps(reference_lookups, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    strategy_text = json.dumps(implementation_strategy, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    constraints_text = json.dumps(constraints, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+    goals_text = _root_success_criteria_text(accumulated_approach)
+    feedback_text = ""
+    if feedback:
+        feedback_text = (
+            "\nPrevious output failed deterministic validation. Regenerate the domain_specification node and fix "
+            "these issues:\n"
+            + "\n".join(f"- {item}" for item in feedback)
+            + "\n"
+        )
+    return (
+        "You are forming step 8 of AI Org's Technical Approach derivation tree: domain specification.\n"
+        "Use the completeness-profile facets as the exact aspect list to declare. For each aspect, use the "
+        "Reference lookup keyed by aspect_name, the accumulated approach, and the grounded RFC to declare the "
+        "domain quantities, tables, and source trail needed before patch planning. Do not create a patch plan, "
+        "surface risks, or perform later Technical Approach steps. Do not modify files.\n\n"
+        "Return one block per input aspect. Each block must include aspect_name, applicability, "
+        "specification_body, quantities, tables, and sources. Use applicability=applies when the RFC needs a "
+        "contractual declaration for the aspect; then specification_body must be non-empty, and the block must "
+        "include at least one quantity or table and at least one source. Use applicability=not_applicable when "
+        "the aspect is irrelevant; then specification_body is the reason. Tables are first-class receptacles, "
+        "not prose: use tables for row-shaped values and quantities for named scalar values. Every table row "
+        "must have exactly the same width as columns.\n\n"
+        "Write English only. Use aspect_name exactly as supplied so review, lineage, and reform can anchor "
+        "objections to the same aspect.\n\n"
+        + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
+        + f"\nCompleteness-profile facets:\n{facets_text}\n"
+        + f"\nPer-aspect Reference lookups keyed by aspect_name:\n{lookups_text}\n"
+        + f"\nImplementation strategy:\n{strategy_text}\n"
+        + f"\nConstraints:\n{constraints_text}\n"
+        + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
+        + f"\nAccumulated approach so far:\n{approach_text}\n"
+        + f"\nContext:\n{context_text}\n"
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
@@ -3321,9 +3523,9 @@ def _surface_risks_prompt(
             + "\n"
         )
     return (
-        "You are forming step 9 of AI Org's Technical Approach derivation tree: surface risks and open "
+        "You are forming step 10 of AI Org's Technical Approach derivation tree: surface risks and open "
         "questions.\n"
-        "Use the accumulated approach tree containing the root goals, constraints, selected decision, implementation strategy, and right-sized patch "
+        "Use the accumulated approach tree containing the root goals, constraints, selected decision, implementation strategy, domain specification, and right-sized patch "
         "plan, plus read-only repository inspection from the configured "
         "repo root. Do not modify files.\n\n"
         "Surface only delivery or design risks that can be attached to a candidate, decision, or implementation "
@@ -4803,7 +5005,308 @@ def _parse_implementation_named_content(value: Any) -> dict[str, list[str]] | No
     return parsed
 
 
+def _parse_domain_specification(raw: str, expected_facets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _domain_specification_error(f"Codex domain specification returned invalid JSON: {exc}")
+
+    if not isinstance(parsed, dict):
+        return _domain_specification_error("Codex domain specification returned non-object JSON")
+    if set(parsed) != set(DOMAIN_SPECIFICATION_FIELDS):
+        return _domain_specification_error("Codex domain specification returned invalid fields")
+    aspects = parsed.get("aspects")
+    if not isinstance(aspects, list):
+        return _domain_specification_error("Codex domain specification returned invalid aspects")
+
+    expected_names = [facet["aspect_name"] for facet in expected_facets or [] if isinstance(facet.get("aspect_name"), str)]
+    parsed_aspects: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for index, aspect in enumerate(aspects):
+        if not isinstance(aspect, dict) or set(aspect) != set(DOMAIN_ASPECT_FIELDS):
+            return _domain_specification_error(f"Codex domain specification returned invalid aspect fields at aspects[{index}]")
+        aspect_name = aspect.get("aspect_name")
+        applicability = aspect.get("applicability")
+        specification_body = aspect.get("specification_body")
+        if not isinstance(aspect_name, str) or not isinstance(specification_body, str):
+            return _domain_specification_error("Codex domain specification returned invalid aspect strings")
+        if applicability not in DOMAIN_APPLICABILITY_VALUES:
+            return _domain_specification_error("Codex domain specification returned invalid applicability")
+        quantities = _parse_domain_quantities(aspect.get("quantities"))
+        if quantities is None:
+            return _domain_specification_error("Codex domain specification returned invalid quantities")
+        try:
+            tables = _parse_domain_tables(aspect.get("tables"))
+        except ValueError as exc:
+            return _domain_specification_error(str(exc))
+        if tables is None:
+            return _domain_specification_error("Codex domain specification returned invalid tables")
+        sources = aspect.get("sources")
+        if not isinstance(sources, list) or not all(isinstance(source, str) for source in sources):
+            return _domain_specification_error("Codex domain specification returned invalid sources")
+        if aspect_name in seen_names:
+            return _domain_specification_error(f"Codex domain specification returned duplicate aspect_name {aspect_name}")
+        seen_names.add(aspect_name)
+        parsed_aspects.append(
+            {
+                "aspect_name": aspect_name,
+                "applicability": applicability,
+                "specification_body": specification_body,
+                "quantities": quantities,
+                "tables": tables,
+                "sources": list(sources),
+            }
+        )
+
+    if expected_names and seen_names != set(expected_names):
+        missing = sorted(set(expected_names) - seen_names)
+        extra = sorted(seen_names - set(expected_names))
+        return _domain_specification_error(
+            "Codex domain specification returned aspect_name mismatch"
+            + (f"; missing: {', '.join(missing)}" if missing else "")
+            + (f"; extra: {', '.join(extra)}" if extra else "")
+        )
+    return {"aspects": parsed_aspects}
+
+
+def _parse_domain_quantities(value: Any) -> list[dict[str, str]] | None:
+    if not isinstance(value, list):
+        return None
+    quantities: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != set(DOMAIN_QUANTITY_FIELDS):
+            return None
+        if not all(isinstance(item[field], str) for field in DOMAIN_QUANTITY_FIELDS):
+            return None
+        quantities.append({field: item[field] for field in DOMAIN_QUANTITY_FIELDS})
+    return quantities
+
+
+def _parse_domain_tables(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    tables: list[dict[str, Any]] = []
+    for table_index, table in enumerate(value):
+        if not isinstance(table, dict) or set(table) != set(DOMAIN_TABLE_FIELDS):
+            return None
+        table_name = table.get("table_name")
+        columns = table.get("columns")
+        rows = table.get("rows")
+        if not isinstance(table_name, str) or not isinstance(columns, list) or not all(isinstance(column, str) for column in columns):
+            return None
+        if not isinstance(rows, list):
+            return None
+        parsed_rows: list[list[str]] = []
+        for row_index, row in enumerate(rows):
+            if not isinstance(row, list) or not all(isinstance(cell, str) for cell in row):
+                return None
+            if len(row) != len(columns):
+                raise ValueError(
+                    f"domain specification table rows width mismatch at tables[{table_index}].rows[{row_index}]"
+                )
+            parsed_rows.append(list(row))
+        tables.append({"table_name": table_name, "columns": list(columns), "rows": parsed_rows})
+    return tables
+
+
+def _lint_domain_specification(parsed: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for index, aspect in enumerate(parsed.get("aspects", []) if isinstance(parsed, Mapping) else []):
+        if not isinstance(aspect, Mapping):
+            continue
+        prefix = f"aspects[{index}]"
+        applicability = aspect.get("applicability")
+        aspect_name = str(aspect.get("aspect_name") or "").strip()
+        body = str(aspect.get("specification_body") or "").strip()
+        quantities = aspect.get("quantities")
+        tables = aspect.get("tables")
+        sources = aspect.get("sources")
+        if not aspect_name:
+            errors.append(f"{prefix}.aspect_name is empty")
+        if not body:
+            errors.append(f"{prefix}.specification_body is empty")
+        if applicability == "not_applicable":
+            # Reference facet: required all-props payload artifact tolerance. Mode-irrelevant
+            # quantities/tables are ignored by consumers and never fail solely for being present.
+            continue
+        if applicability == "applies":
+            errors.extend(_lint_empty_slots(aspect))
+            has_quantity = isinstance(quantities, list) and bool(quantities)
+            has_table = isinstance(tables, list) and bool(tables)
+            if not has_quantity and not has_table:
+                errors.append(f"{prefix} applies but has no quantity or table")
+            if not isinstance(sources, list) or not any(str(source).strip() for source in sources):
+                errors.append(f"{prefix} applies but has no source")
+    return errors
+
+
+def _domain_profile_facets(profile: Any) -> list[dict[str, Any]]:
+    if isinstance(profile, Mapping):
+        raw_facets = profile.get("facets")
+        if not isinstance(raw_facets, list):
+            raw_facets = profile.get("aspects")
+    else:
+        raw_facets = profile
+    if not isinstance(raw_facets, list):
+        return []
+    facets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_facets, start=1):
+        if isinstance(item, Mapping):
+            aspect_name = str(item.get("aspect_name") or item.get("name") or item.get("term") or "").strip()
+            if not aspect_name:
+                aspect_name = f"aspect {index}"
+            facet = {str(key): _json_safe(value) for key, value in item.items()}
+            facet["aspect_name"] = aspect_name
+        else:
+            aspect_name = str(item or "").strip() or f"aspect {index}"
+            facet = {"aspect_name": aspect_name}
+        if aspect_name in seen:
+            continue
+        seen.add(aspect_name)
+        facets.append(facet)
+    return facets
+
+
+def _domain_reference_lookups(profile_facets: Any, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    lookups: dict[str, Any] = {}
+    reference_context = _reference_stack_context(context)
+    for facet in _domain_profile_facets(profile_facets):
+        aspect_name = str(facet.get("aspect_name") or "").strip()
+        if not aspect_name:
+            continue
+        try:
+            lookup = reference.lookup(aspect_name, reference_context, kind="design")
+        except Exception as exc:
+            lookup = {"status": "failed", "error": _format_prior_art_reference_error(exc), "candidates": []}
+        lookups[aspect_name] = _json_safe(lookup)
+    return lookups
+
+
+def _externalize_domain_specification(
+    domain_specification: Mapping[str, Any],
+    external_files: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    # Memento: hybrid externalization exists because later steps stringify the accumulated
+    # tree; tables are first-class receptacles, but large raw tables belong in side files.
+    aspects: list[dict[str, Any]] = []
+    for aspect in domain_specification.get("aspects", []) if isinstance(domain_specification, Mapping) else []:
+        if not isinstance(aspect, Mapping):
+            continue
+        node = dict(aspect)
+        aspect_name = str(node.get("aspect_name") or "")
+        aspect_slug = _slug(aspect_name)
+        node["id"] = f"domain_specification:{aspect_slug}"
+        if node.get("applicability") == "not_applicable":
+            node["surplus_quantities_ignored"] = len(node.get("quantities", [])) if isinstance(node.get("quantities"), list) else 0
+            node["surplus_tables_ignored"] = len(node.get("tables", [])) if isinstance(node.get("tables"), list) else 0
+            node["quantities"] = []
+            node["tables"] = []
+            aspects.append(node)
+            continue
+        kept_tables: list[dict[str, Any]] = []
+        externalized_tables: list[dict[str, Any]] = []
+        for table in node.get("tables", []) if isinstance(node.get("tables"), list) else []:
+            if not isinstance(table, Mapping):
+                continue
+            rows = table.get("rows")
+            row_count = len(rows) if isinstance(rows, list) else 0
+            if row_count > DOMAIN_SPEC_TABLE_EXTERNALIZE_ROW_THRESHOLD:
+                file_ref = f"domain-spec/{aspect_slug}.json"
+                externalized_tables.append(
+                    {
+                        "table_name": str(table.get("table_name") or ""),
+                        "columns": list(table.get("columns") or []),
+                        "row_count": row_count,
+                        "file_ref": file_ref,
+                    }
+                )
+            else:
+                kept_tables.append(dict(table))
+        if externalized_tables and external_files is not None:
+            file_ref = externalized_tables[0]["file_ref"]
+            external_files[file_ref] = {
+                "aspect_name": aspect_name,
+                "aspect_id": node["id"],
+                "tables": [
+                    dict(table)
+                    for table in node.get("tables", [])
+                    if isinstance(table, Mapping)
+                    and len(table.get("rows", [])) > DOMAIN_SPEC_TABLE_EXTERNALIZE_ROW_THRESHOLD
+                ],
+            }
+        node["tables"] = kept_tables
+        if externalized_tables:
+            node["externalized_tables"] = externalized_tables
+        aspects.append(node)
+    return {"aspects": aspects}
+
+
 def _implementation_strategy_error(reason: str) -> dict[str, Any]:
+    return {"ok": False, "error": reason}
+
+
+def _domain_specification(
+    profile_facets: Any,
+    reference_lookups: Mapping[str, Any],
+    implementation_strategy: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    rfc_view: dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+    accumulated_approach: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form the domain specification receptacle between strategy and patch planning."""
+    # Memento: knowledge without a receptacle evaporates into prose; aspect_name is the shared
+    # key across profile -> lookup -> block -> ledger -> objection.
+    facets = _domain_profile_facets(profile_facets)
+    if not facets:
+        return {"aspects": []}
+    if not all(isinstance(value, Mapping) for value in (reference_lookups, implementation_strategy, constraints)):
+        return _domain_specification_error("domain_specification requires profile facets and outputs from steps 2 and 7")
+    if not _is_rfc_view(rfc_view):
+        return _domain_specification_error("domain_specification requires a grounded registry RFC view")
+
+    repo = _repo_from_context(context)
+    feedback: list[str] = []
+    last_error = ""
+    for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
+        run = codex_exec.run_json(
+            repo,
+            schema=DOMAIN_SPECIFICATION_SCHEMA,
+            prompt=_domain_specification_prompt(
+                facets,
+                reference_lookups,
+                implementation_strategy,
+                constraints,
+                rfc_view,
+                context,
+                accumulated_approach,
+                feedback if attempt else None,
+            ),
+            schema_filename="rfc-domain-specification.schema.json",
+            output_filename="rfc-domain-specification.json",
+            failure_label="Codex domain specification",
+        )
+        if not run["ok"]:
+            return _domain_specification_error(run["error"])
+        parsed = _parse_domain_specification(run["raw"], facets)
+        if not parsed.get("ok", True):
+            last_error = parsed["error"]
+            feedback = [last_error]
+            continue
+        lint_errors = _lint_domain_specification(parsed)
+        if not lint_errors:
+            return parsed
+        last_error = "; ".join(lint_errors)
+        feedback = lint_errors
+
+    return _domain_specification_error(
+        "Codex domain specification remained invalid after "
+        f"{MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1} attempts: {last_error}"
+    )
+
+
+def _domain_specification_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
@@ -5003,6 +5506,7 @@ def _technical_approach_step_order(provided_approach: Any | None) -> list[str]:
         "build_prior_art_map",
         *middle_steps,
         "implementation_strategy",
+        "domain_specification",
         "right_size_patch_plan",
         "surface_risks",
     ]
@@ -5213,6 +5717,7 @@ def _assemble_technical_approach(
     evaluations: Mapping[str, Any] | None,
     prior_art: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    domain_specification: Mapping[str, Any],
     patch_plan: Mapping[str, Any],
     risks: Mapping[str, Any],
     source: str,
@@ -5229,6 +5734,7 @@ def _assemble_technical_approach(
         candidates,
         evaluations,
         implementation,
+        domain_specification,
         patch_plan,
         risks,
         cross_links,
@@ -5258,6 +5764,7 @@ def _partial_question_tree(
     evaluations: Mapping[str, Any] | None = None,
     selected: Mapping[str, Any] | None = None,
     implementation: Mapping[str, Any] | None = None,
+    domain_specification: Mapping[str, Any] | None = None,
     patch_plan: Mapping[str, Any] | None = None,
     provided_approach: Any | None = None,
 ) -> dict[str, Any]:
@@ -5322,6 +5829,8 @@ def _partial_question_tree(
         if isinstance(implementation, Mapping):
             implementation_node = dict(implementation)
             implementation_node["id"] = f"implementation:{selected_id}"
+            if isinstance(domain_specification, Mapping):
+                implementation_node["domain_specification"] = _domain_specification_tree_node(domain_specification)
             if isinstance(patch_plan, Mapping):
                 implementation_node["patch_plan"] = _node_with_id(patch_plan, f"patch_plan:{selected_id}")
             decision["implementation"] = implementation_node
@@ -5400,6 +5909,7 @@ def _question_tree(
     candidates: Mapping[str, Any] | None,
     evaluations: Mapping[str, Any] | None,
     implementation: Mapping[str, Any],
+    domain_specification: Mapping[str, Any],
     patch_plan: Mapping[str, Any],
     risks: Mapping[str, Any],
     cross_links: list[dict[str, str]],
@@ -5407,7 +5917,7 @@ def _question_tree(
     provided_approach: Any | None = None,
 ) -> dict[str, Any]:
     candidate_nodes = _candidate_tree_nodes(candidates, evaluations, selected, risks, cross_links, provided_approach)
-    decision = _decision_tree_node(selected, implementation, patch_plan, risks, cross_links)
+    decision = _decision_tree_node(selected, implementation, domain_specification, patch_plan, risks, cross_links)
     return {
         "id": "question:approach",
         "text": "Which implementation approach best satisfies the problem under the derived constraints?",
@@ -5486,6 +5996,7 @@ def _candidate_tree_nodes(
 def _decision_tree_node(
     selected: Mapping[str, Any],
     implementation: Mapping[str, Any],
+    domain_specification: Mapping[str, Any],
     patch_plan: Mapping[str, Any],
     risks: Mapping[str, Any],
     cross_links: list[dict[str, str]],
@@ -5496,6 +6007,7 @@ def _decision_tree_node(
     patch_plan_id = f"patch_plan:{selected_id}"
     implementation_node = dict(implementation)
     implementation_node["id"] = implementation_id
+    implementation_node["domain_specification"] = _domain_specification_tree_node(domain_specification)
     implementation_node["patch_plan"] = _node_with_id(patch_plan, patch_plan_id)
     implementation_node["risks"] = _risks_for("implementation", implementation_id, risks)
     decision_node = {
@@ -5515,6 +6027,9 @@ def _decision_tree_node(
     _add_cross_link(cross_links, decision_id, "question:approach", "derived_from")
     _add_cross_link(cross_links, decision_id, selected_id, "supports")
     _add_cross_link(cross_links, implementation_id, decision_id, "implements")
+    for aspect in implementation_node["domain_specification"].get("aspects", []):
+        if isinstance(aspect, Mapping) and isinstance(aspect.get("id"), str):
+            _add_cross_link(cross_links, aspect["id"], implementation_id, "derived_from")
     _add_cross_link(cross_links, patch_plan_id, implementation_id, "implements")
     for rejection in decision_node["rejected"]:
         _add_cross_link(cross_links, decision_id, rejection["candidate_id"], "objects_to")
@@ -5538,6 +6053,18 @@ def _node_with_id(node: Mapping[str, Any], node_id: str) -> dict[str, Any]:
     copied = dict(node)
     copied["id"] = node_id
     return copied
+
+
+def _domain_specification_tree_node(domain_specification: Mapping[str, Any]) -> dict[str, Any]:
+    aspects: list[dict[str, Any]] = []
+    for aspect in domain_specification.get("aspects", []) if isinstance(domain_specification, Mapping) else []:
+        if not isinstance(aspect, Mapping):
+            continue
+        node = dict(aspect)
+        aspect_name = str(node.get("aspect_name") or "")
+        node.setdefault("id", f"domain_specification:{_slug(aspect_name)}")
+        aspects.append(node)
+    return {"id": "domain_specification", "aspects": aspects}
 
 
 def _add_cross_link(cross_links: list[dict[str, str]], from_id: str, to_id: str, link_type: str) -> None:

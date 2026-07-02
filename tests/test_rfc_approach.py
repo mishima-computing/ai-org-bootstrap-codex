@@ -91,6 +91,19 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         approaches["right_size_patch_plan"] = accumulated_approach
         return _patch_plan()
 
+    def fake_domain_specification(
+        profile_facets,
+        reference_lookups,
+        implementation,
+        constraints,
+        rfc_view,
+        context=None,
+        accumulated_approach=None,
+    ):
+        calls.append("domain_specification")
+        approaches["domain_specification"] = accumulated_approach
+        return _domain_specification()
+
     def fake_surface_risks(
         chosen,
         implementation,
@@ -109,6 +122,7 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     monkeypatch.setattr(receive_module, "_evaluate_candidates", fake_evaluate_candidates)
     monkeypatch.setattr(receive_module, "_select_approach", fake_select_approach)
     monkeypatch.setattr(receive_module, "_implementation_strategy", fake_implementation_strategy)
+    monkeypatch.setattr(receive_module, "_domain_specification", fake_domain_specification)
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", fake_right_size_patch_plan)
     monkeypatch.setattr(receive_module, "_surface_risks", fake_surface_risks)
 
@@ -127,6 +141,7 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         "evaluate_candidates",
         "select_approach",
         "implementation_strategy",
+        "domain_specification",
         "right_size_patch_plan",
         "surface_risks",
     ):
@@ -141,6 +156,9 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
         "evaluation:repo_native"
     )
     assert approaches["implementation_strategy"]["problem"]["question"]["decision"]["id"] == "decision:repo_native"
+    assert approaches["domain_specification"]["problem"]["question"]["decision"]["implementation"]["systems"][0][
+        "system_name"
+    ] == "Battle loop"
     assert approaches["right_size_patch_plan"]["problem"]["question"]["decision"]["implementation"]["systems"][0][
         "system_name"
     ] == "Battle loop"
@@ -180,6 +198,7 @@ def test_form_technical_approach_builds_derivation_tree(monkeypatch, tmp_path):
     assert {"from": "implementation:repo_native", "to": "decision:repo_native", "type": "implements"} in tree[
         "cross_links"
     ]
+    assert decision["implementation"]["domain_specification"]["aspects"][0]["id"] == "domain_specification:battle-numbers"
     assert {"from": "risk:implementation", "to": "implementation:repo_native", "type": "mitigates"} in tree[
         "cross_links"
     ]
@@ -208,6 +227,7 @@ def test_tech_stack_provenance_controls_candidate_generation(monkeypatch, tmp_pa
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("requester stack should skip candidates")),
     )
     monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
     monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: {"risks": []})
 
@@ -320,6 +340,7 @@ def test_requester_specified_stack_skips_alternatives_and_records_org_conflict_r
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("requester stack should skip alternatives")),
     )
     monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
     monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: {"risks": []})
 
@@ -656,6 +677,7 @@ def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypat
         "evaluate_candidates",
         "select_approach",
         "implementation_strategy",
+        "domain_specification",
         "right_size_patch_plan",
         "surface_risks",
     ]
@@ -692,10 +714,14 @@ def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypat
     implementation_after_step_7 = snapshots[6]["technical_approach"]["problem"]["question"]["decision"]["implementation"]
     assert implementation_after_step_7["id"] == "implementation:repo_native"
     assert "patch_plan" not in implementation_after_step_7
-    assert snapshots[7]["technical_approach"]["problem"]["question"]["decision"]["implementation"]["patch_plan"][
+    assert snapshots[7]["technical_approach"]["problem"]["question"]["decision"]["implementation"]["domain_specification"][
+        "aspects"
+    ][0]["id"] == "domain_specification:battle-numbers"
+    assert "patch_plan" not in snapshots[7]["technical_approach"]["problem"]["question"]["decision"]["implementation"]
+    assert snapshots[8]["technical_approach"]["problem"]["question"]["decision"]["implementation"]["patch_plan"][
         "id"
     ] == "patch_plan:repo_native"
-    final_question = snapshots[8]["technical_approach"]["problem"]["question"]
+    final_question = snapshots[9]["technical_approach"]["problem"]["question"]
     assert final_question["candidates"][1]["risks"][0]["id"] == "risk:candidate"
     assert final_question["decision"]["implementation"]["risks"][0]["id"] == "risk:implementation"
 
@@ -841,6 +867,114 @@ def test_first_playable_requires_presentation_baseline(monkeypatch, tmp_path):
     assert "presentation_baseline is empty" in result["error"]
 
 
+def test_domain_specification_validates_applicable_blocks_and_tolerates_not_applicable_surplus():
+    valid = {
+        "aspects": [
+            {
+                "aspect_name": "battle numbers",
+                "applicability": "applies",
+                "specification_body": "Spark damage and Slime HP are contractual for the first battle.",
+                "quantities": [{"name": "Spark damage", "value": "4", "unit": "hit points"}],
+                "tables": [],
+                "sources": ["Reference battle loop facet"],
+            },
+            {
+                "aspect_name": "economy",
+                "applicability": "not_applicable",
+                "specification_body": "The first battle slice has no shop or currency exchange.",
+                "quantities": [{"name": "", "value": "", "unit": ""}],
+                "tables": [{"table_name": "", "columns": [""], "rows": [[""]]}],
+                "sources": [""],
+            },
+        ]
+    }
+
+    parsed = receive_module._parse_domain_specification(
+        json.dumps(valid),
+        [{"aspect_name": "battle numbers"}, {"aspect_name": "economy"}],
+    )
+
+    assert parsed["aspects"][0]["applicability"] == "applies"
+    assert receive_module._lint_domain_specification(parsed) == []
+    tree = receive_module._externalize_domain_specification(parsed, {})
+    not_applicable = tree["aspects"][1]
+    assert not_applicable["quantities"] == []
+    assert not_applicable["tables"] == []
+    assert not_applicable["surplus_quantities_ignored"] == 1
+    assert not_applicable["surplus_tables_ignored"] == 1
+
+
+def test_domain_specification_rejects_applies_without_data_source_or_matching_row_width():
+    missing_data = {
+        "aspects": [
+            {
+                "aspect_name": "battle numbers",
+                "applicability": "applies",
+                "specification_body": "Spark damage is specified.",
+                "quantities": [],
+                "tables": [],
+                "sources": [],
+            }
+        ]
+    }
+    parsed = receive_module._parse_domain_specification(json.dumps(missing_data), [{"aspect_name": "battle numbers"}])
+
+    lint_errors = receive_module._lint_domain_specification(parsed)
+    assert any("applies but has no quantity or table" in error for error in lint_errors)
+    assert any("applies but has no source" in error for error in lint_errors)
+
+    bad_width = {
+        "aspects": [
+            {
+                "aspect_name": "battle table",
+                "applicability": "applies",
+                "specification_body": "Rows must match columns.",
+                "quantities": [],
+                "tables": [{"table_name": "stats", "columns": ["name", "hp"], "rows": [["Slime"]]}],
+                "sources": ["Reference stats table"],
+            }
+        ]
+    }
+
+    width = receive_module._parse_domain_specification(json.dumps(bad_width), [{"aspect_name": "battle table"}])
+    assert width["ok"] is False
+    assert "rows width mismatch" in width["error"]
+
+
+def test_domain_specification_externalizes_large_tables():
+    large_rows = [[f"Slime {index}", str(index)] for index in range(13)]
+    domain = {
+        "aspects": [
+            {
+                "aspect_name": "encounter table",
+                "applicability": "applies",
+                "specification_body": "Encounter rows are contractual.",
+                "quantities": [],
+                "tables": [{"table_name": "encounters", "columns": ["name", "hp"], "rows": large_rows}],
+                "sources": ["Reference encounter table"],
+            }
+        ]
+    }
+    external_files: dict[str, object] = {}
+
+    tree = receive_module._externalize_domain_specification(domain, external_files)
+
+    aspect = tree["aspects"][0]
+    assert aspect["id"] == "domain_specification:encounter-table"
+    assert aspect["tables"] == []
+    assert aspect["externalized_tables"][0]["row_count"] == 13
+    assert aspect["externalized_tables"][0]["file_ref"] == "domain-spec/encounter-table.json"
+    assert external_files["domain-spec/encounter-table.json"]["tables"][0]["rows"] == large_rows
+
+
+def test_reform_maps_domain_aspect_ids_to_domain_step():
+    assert receive_module._step_for_node_id("domain_specification:battle-numbers") == "domain_specification"
+    assert receive_module._affected_reform_steps(
+        {"problem": {"question": {"decision": {"implementation": {"domain_specification": _domain_specification()}}}}},
+        [{"anchor_node_ids": ["domain_specification:battle-numbers"], "axis": "approach"}],
+    ) == ["domain_specification"]
+
+
 def test_step_prompts_render_accumulated_goals_and_direct_ancestors(tmp_path):
     accumulated = _accumulated_approach_through_patch_plan()
 
@@ -892,6 +1026,15 @@ def test_step_prompts_render_accumulated_goals_and_direct_ancestors(tmp_path):
             {"repo": tmp_path},
             accumulated,
         ),
+        "domain_specification": receive_module._domain_specification_prompt(
+            [{"aspect_name": "battle numbers", "structure": "Declare quantities."}],
+            {"battle numbers": {"candidates": [{"structure": "Damage values are explicit."}]}},
+            _implementation(),
+            _constraints(),
+            _rfc_view(),
+            {"repo": tmp_path},
+            accumulated,
+        ),
         "right_size_patch_plan": receive_module._right_size_patch_plan_prompt(
             _decision(),
             _implementation(),
@@ -921,6 +1064,8 @@ def test_step_prompts_render_accumulated_goals_and_direct_ancestors(tmp_path):
     assert "Evaluation matrix" in prompts["select_approach"]
     assert "evaluation:repo_native" in prompts["implementation_strategy"]
     assert "decision:repo_native" in prompts["implementation_strategy"]
+    assert "Completeness-profile facets" in prompts["domain_specification"]
+    assert "battle numbers" in prompts["domain_specification"]
     assert "Battle loop" in prompts["right_size_patch_plan"]
     assert "Patch plan" in prompts["surface_risks"]
     assert "Run the battle-loop test and assert meadow_gate_open." in prompts["surface_risks"]
@@ -973,6 +1118,7 @@ def test_risk_targets_fail_closed_when_parent_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
     monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
     monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
     monkeypatch.setattr(
         receive_module,
@@ -1006,6 +1152,7 @@ def test_form_technical_approach_builds_reference_then_prior_art_uses_same_terms
     monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
     monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
     monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
     monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: _risks())
     monkeypatch.setattr(
@@ -1445,6 +1592,7 @@ def test_technical_approach_schemas_are_codex_valid():
         receive_module.EVALUATE_CANDIDATES_SCHEMA,
         receive_module.SELECT_APPROACH_SCHEMA,
         receive_module.IMPLEMENTATION_STRATEGY_SCHEMA,
+        receive_module.DOMAIN_SPECIFICATION_SCHEMA,
         receive_module.RIGHT_SIZE_PATCH_PLAN_SCHEMA,
         receive_module.SURFACE_RISKS_SCHEMA,
     ):
@@ -1474,6 +1622,7 @@ def _patch_successful_approach_steps(monkeypatch) -> None:
     monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
     monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
     monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
     monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
     monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: _risks())
 
@@ -1845,6 +1994,22 @@ def _implementation() -> dict[str, object]:
     }
 
 
+def _domain_specification() -> dict[str, object]:
+    return {
+        "aspects": [
+            {
+                "id": "domain_specification:battle-numbers",
+                "aspect_name": "battle numbers",
+                "applicability": "applies",
+                "specification_body": "Spark must defeat the named Slime in the first playable battle.",
+                "quantities": [{"name": "Spark damage", "value": "4", "unit": "hit points"}],
+                "tables": [],
+                "sources": ["Reference battle loop facet"],
+            }
+        ]
+    }
+
+
 def _patch_plan() -> dict[str, object]:
     return {
         "first_playable": {
@@ -1967,6 +2132,7 @@ def _accumulated_approach_through_patch_plan() -> dict[str, object]:
         evaluations=_evaluations(),
         selected=_decision(),
         implementation=_implementation(),
+        domain_specification=_domain_specification(),
         patch_plan=_patch_plan(),
     )
     return {"problem": problem}

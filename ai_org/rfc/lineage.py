@@ -790,6 +790,10 @@ def _scope_items(rfc: Mapping[str, Any], approach: Mapping[str, Any]) -> list[di
     for index, risk in enumerate(_risk_items(approach), start=1):
         risk_id = risk.get("id") if isinstance(risk.get("id"), str) and risk["id"] else str(index)
         _append_text_item(items, f"risk:{risk_id}", "must_address_risk", risk)
+    for aspect in _domain_scope_aspects(approach):
+        aspect_id = str(aspect.get("id") or "").strip()
+        if aspect_id:
+            _append_text_item(items, aspect_id, "domain_specification", aspect)
     deduped: dict[str, dict[str, str]] = {}
     for item in items:
         deduped.setdefault(item["id"], item)
@@ -832,13 +836,57 @@ def _risk_items(value: Any) -> list[Mapping[str, Any]]:
     return risks
 
 
+def _domain_scope_aspects(value: Any) -> list[Mapping[str, Any]]:
+    domain = _find_first_mapping(value, "domain_specification")
+    if not domain:
+        return []
+    aspects = domain.get("aspects")
+    if not isinstance(aspects, list):
+        return []
+    return [
+        aspect
+        for aspect in aspects
+        if isinstance(aspect, Mapping)
+        and aspect.get("applicability") == "applies"
+        and isinstance(aspect.get("id"), str)
+    ]
+
+
 def _approach_split_view(approach: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "patch_plan": _find_first_mapping(approach, "patch_plan") or {},
         "implementation_systems": _find_named_strings(approach, {"systems", "subsystem", "key_modules", "implementation"}),
+        "domain_specification": _domain_split_summary(approach),
         "user_experience_requirements": _find_mappings_named(approach, "user_experience_requirements"),
         "risks": _risk_items(approach),
     }
+
+
+def _domain_split_summary(approach: Mapping[str, Any]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for aspect in _domain_scope_aspects(approach):
+        tables = aspect.get("tables")
+        externalized = aspect.get("externalized_tables")
+        table_items = tables if isinstance(tables, list) else []
+        summary.append(
+            {
+                "id": aspect.get("id", ""),
+                "aspect_name": aspect.get("aspect_name", ""),
+                "specification_body": aspect.get("specification_body", ""),
+                "quantities": aspect.get("quantities", []),
+                "tables": [
+                    {
+                        "table_name": table.get("table_name", ""),
+                        "columns": table.get("columns", []),
+                        "row_count": len(table.get("rows", [])) if isinstance(table, Mapping) else 0,
+                    }
+                    for table in table_items
+                    if isinstance(table, Mapping)
+                ],
+                "externalized_tables": list(externalized) if isinstance(externalized, list) else [],
+            }
+        )
+    return summary
 
 
 def _find_first_mapping(value: Any, target_key: str) -> Mapping[str, Any] | None:

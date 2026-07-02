@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Mapping
 
 from ai_org.rfc.field_registry import (
     RFC_VIEW_FIELDS,
@@ -37,6 +37,9 @@ def run(
         return rfc
 
     rfc_data = rfc["rfc"]
+    technical_approach = _read_technical_approach_from_git(repo_path, rfc_id_or_branch)
+    if not technical_approach["ok"]:
+        return technical_approach
     rfc_id = _rfc_id(rfc_id_or_branch)
     suffix = "" if attempt == 1 else f"-a{attempt}"
     branch_name = branch or f"ai-org/contrib/{rfc_id}{suffix}"
@@ -66,7 +69,7 @@ def run(
                 stdout=worktree_result.stdout,
             )
 
-        prompt = _prompt(rfc_data)
+        prompt = _prompt(rfc_data, technical_approach["technical_approach"], technical_approach["domain_spec_files"])
         if feedback is not None:
             prompt += (
                 "\nA previous attempt was rejected by acceptance with these blockers: "
@@ -173,8 +176,63 @@ def _read_rfc_from_git(repo: Path, rfc_id_or_branch: str, rfc_path: str) -> dict
     return {"ok": True, "rfc": {field: data[field] for field in RFC_FIELDS}}
 
 
-def _prompt(rfc: dict[str, Any]) -> str:
-    return "Implement the RFC in this repository.\nEdit the working tree only. Do not commit.\n\n" + _format_rfc(rfc)
+def _read_technical_approach_from_git(repo: Path, rfc_id_or_branch: str) -> dict:
+    rfc_branch = _rfc_branch(rfc_id_or_branch)
+    result = _git_run(repo, "show", f"{rfc_branch}:technical-approach.json")
+    if result.returncode != 0:
+        return _failure(
+            f"technical-approach.json missing at {rfc_branch}",
+            stderr=result.stderr,
+            stdout=result.stdout,
+        )
+    try:
+        approach = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return _failure(f"technical-approach.json at {rfc_branch} is not parseable JSON: {exc}")
+    if not isinstance(approach, dict):
+        return _failure(f"technical-approach.json at {rfc_branch} must contain a JSON object")
+    domain_files = _read_domain_spec_files(repo, rfc_branch, approach)
+    return {"ok": True, "technical_approach": approach, "domain_spec_files": domain_files}
+
+
+def _read_domain_spec_files(repo: Path, branch: str, approach: Mapping[str, Any]) -> dict[str, Any]:
+    files: dict[str, Any] = {}
+    for file_ref in _domain_spec_file_refs(approach):
+        result = _git_run(repo, "show", f"{branch}:{file_ref}")
+        if result.returncode != 0:
+            files[file_ref] = {"error": "missing referenced domain specification file"}
+            continue
+        try:
+            files[file_ref] = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            files[file_ref] = {"error": f"invalid JSON: {exc}"}
+    return files
+
+
+def _domain_spec_file_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, Mapping):
+        file_ref = value.get("file_ref")
+        if isinstance(file_ref, str) and file_ref.startswith("domain-spec/") and file_ref not in refs:
+            refs.append(file_ref)
+        for child in value.values():
+            refs.extend(ref for ref in _domain_spec_file_refs(child) if ref not in refs)
+    elif isinstance(value, list):
+        for child in value:
+            refs.extend(ref for ref in _domain_spec_file_refs(child) if ref not in refs)
+    return refs
+
+
+def _prompt(
+    rfc: dict[str, Any],
+    technical_approach: Mapping[str, Any] | None = None,
+    domain_spec_files: Mapping[str, Any] | None = None,
+) -> str:
+    text = "Implement the RFC in this repository.\nEdit the working tree only. Do not commit.\n\n" + _format_rfc(rfc)
+    domain_text = _format_domain_specification(technical_approach or {}, domain_spec_files or {})
+    if domain_text:
+        text += "\n\nContributor domain specification:\n" + domain_text
+    return text
 
 
 def _rfc_id(rfc_id_or_branch: str) -> str:
@@ -226,6 +284,73 @@ def _format_alternatives(value: Any) -> str:
     if isinstance(value, list):
         return "\n".join(f"- {item}" for item in value)
     return str(value)
+
+
+def _format_domain_specification(
+    technical_approach: Mapping[str, Any],
+    domain_spec_files: Mapping[str, Any],
+) -> str:
+    domain = _find_domain_specification(technical_approach)
+    if not domain:
+        return ""
+    aspects = domain.get("aspects")
+    if not isinstance(aspects, list) or not aspects:
+        return ""
+    lines: list[str] = []
+    for aspect in aspects:
+        if not isinstance(aspect, Mapping):
+            continue
+        lines.append(f"- {aspect.get('aspect_name', '')} ({aspect.get('applicability', '')})")
+        body = str(aspect.get("specification_body") or "").strip()
+        if body:
+            lines.append(f"  specification_body: {body}")
+        quantities = aspect.get("quantities")
+        if isinstance(quantities, list) and quantities:
+            lines.append("  quantities:")
+            for quantity in quantities:
+                if isinstance(quantity, Mapping):
+                    lines.append(
+                        f"    - {quantity.get('name', '')}: {quantity.get('value', '')} {quantity.get('unit', '')}".rstrip()
+                    )
+        tables = aspect.get("tables")
+        if isinstance(tables, list) and tables:
+            lines.append("  tables:")
+            for table in tables:
+                if isinstance(table, Mapping):
+                    rows = table.get("rows")
+                    lines.append(f"    - {table.get('table_name', '')}: {len(rows) if isinstance(rows, list) else 0} rows")
+        externalized = aspect.get("externalized_tables")
+        if isinstance(externalized, list) and externalized:
+            lines.append("  externalized_tables:")
+            for table in externalized:
+                if isinstance(table, Mapping):
+                    lines.append(
+                        f"    - {table.get('table_name', '')}: {table.get('row_count', 0)} rows in {table.get('file_ref', '')}"
+                    )
+    if domain_spec_files:
+        lines.append("")
+        lines.append("Full externalized domain tables:")
+        for file_ref, payload in domain_spec_files.items():
+            lines.append(f"{file_ref}:")
+            lines.append(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
+    return "\n".join(lines).strip()
+
+
+def _find_domain_specification(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        found = value.get("domain_specification")
+        if isinstance(found, Mapping):
+            return found
+        for child in value.values():
+            nested = _find_domain_specification(child)
+            if nested is not None:
+                return nested
+    elif isinstance(value, list):
+        for child in value:
+            nested = _find_domain_specification(child)
+            if nested is not None:
+                return nested
+    return None
 
 
 def _default_branch(repo: Path) -> str:

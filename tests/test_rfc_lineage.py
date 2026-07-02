@@ -51,6 +51,20 @@ def test_refine_consumes_patch_plan_and_creates_rolling_wave_lineage(tmp_path, m
     assert "Do not derive new scope from prose" in prompt
 
 
+def test_domain_specification_scope_items_and_split_summary_are_aspect_level():
+    approach = _approach()
+
+    scope_items = lineage._scope_items(_rfc(), approach)
+    split_view = lineage._approach_split_view(approach)
+
+    assert [item for item in scope_items if item["id"] == "domain_specification:battle-numbers"]
+    domain_summary = split_view["domain_specification"][0]
+    assert domain_summary["id"] == "domain_specification:battle-numbers"
+    assert domain_summary["tables"] == [{"table_name": "stats", "columns": ["name", "hp"], "row_count": 1}]
+    assert domain_summary["externalized_tables"][0]["row_count"] == 20
+    assert "Slime" not in json.dumps(domain_summary["externalized_tables"])
+
+
 def test_validate_ledger_contract_fails_closed():
     cases = [
         (_contract_split(children=[_child("a", [])], retained=[]), "unmapped_scope_ids"),
@@ -131,6 +145,7 @@ def test_first_playable_cannot_depend_on_declared_coarse_child_and_retries(tmp_p
             "goal:rfc.desired_outcomes_success",
             "patch_plan:first_playable",
             "ux:technical_approach:1:screenshot_checks:1",
+            "domain_specification:battle-numbers",
         ],
         depends_on=["later"],
     )
@@ -190,10 +205,15 @@ def test_resolved_never_requires_child_doc_branch_ancestry_for_sibling_leaves(tm
         "rationale": "Two independent implementation leaves.",
         "parent_retained_scope_ids": [],
         "children": [
-            _proposal_child(
-                "prep",
-                ["goal:rfc.desired_outcomes_success", "patch_plan:first_playable", "ux:technical_approach:1:screenshot_checks:1"],
-            ),
+                _proposal_child(
+                    "prep",
+                    [
+                        "goal:rfc.desired_outcomes_success",
+                        "patch_plan:first_playable",
+                        "ux:technical_approach:1:screenshot_checks:1",
+                        "domain_specification:battle-numbers",
+                    ],
+                ),
             _proposal_child(
                 "battle",
                 [
@@ -461,6 +481,28 @@ def _approach() -> dict[str, object]:
                 "decision": {
                     "implementation": {
                         "systems": [{"name": "battle", "key_modules": ["game.battle"]}],
+                        "domain_specification": {
+                            "id": "domain_specification",
+                            "aspects": [
+                                {
+                                    "id": "domain_specification:battle-numbers",
+                                    "aspect_name": "battle numbers",
+                                    "applicability": "applies",
+                                    "specification_body": "Spark damage and enemy HP are contractual.",
+                                    "quantities": [{"name": "Spark damage", "value": "4", "unit": "hit points"}],
+                                    "tables": [{"table_name": "stats", "columns": ["name", "hp"], "rows": [["Slime", "4"]]}],
+                                    "sources": ["Reference battle loop"],
+                                    "externalized_tables": [
+                                        {
+                                            "table_name": "encounters",
+                                            "columns": ["name", "hp"],
+                                            "row_count": 20,
+                                            "file_ref": "domain-spec/battle-numbers.json",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
                         "user_experience_requirements": {
                             **empty_user_experience_requirements(),
                             "acceptance_tests": {
@@ -499,7 +541,12 @@ def _split_all_scope() -> dict[str, object]:
         "children": [
             _proposal_child(
                 "prep",
-                ["goal:rfc.desired_outcomes_success", "patch_plan:first_playable", "ux:technical_approach:1:screenshot_checks:1"],
+                [
+                    "goal:rfc.desired_outcomes_success",
+                    "patch_plan:first_playable",
+                    "ux:technical_approach:1:screenshot_checks:1",
+                    "domain_specification:battle-numbers",
+                ],
             ),
             _proposal_child(
                 "battle",
@@ -597,6 +644,7 @@ def _expected_scope_ids() -> list[str]:
         "patch_plan:first_playable",
         "patch_plan:follow_up:1",
         "patch_plan:deferred:1",
+        "domain_specification:battle-numbers",
         "risk:state-drift",
     ]
 

@@ -909,6 +909,7 @@ def _completeness_profile_result(
     candidates = entry.get("candidates")
     kept = [candidate for candidate in candidates if isinstance(candidate, Mapping)] if isinstance(candidates, list) else []
     design_kept = [candidate for candidate in kept if _candidate_kind(candidate) == "design"]
+    facets = [_completeness_profile_facet(candidate) for candidate in design_kept]
     return {
         "status": status,
         "deliverable_kind": deliverable_kind,
@@ -916,6 +917,28 @@ def _completeness_profile_result(
         "term_key": _normalize_term(term),
         "kept": len(kept),
         "design_kept": len(design_kept),
+        "facets": facets,
+        "aspects": facets,
+    }
+
+
+def _completeness_profile_facet(candidate: Mapping[str, Any]) -> dict[str, str]:
+    aspect_name = (
+        str(candidate.get("aspect_name") or "").strip()
+        or str(candidate.get("name") or "").strip()
+        or str(candidate.get("found_via") or "").strip()
+        or str(candidate.get("delta_claim") or "").strip()
+        or str(candidate.get("structure") or "").strip()
+    )
+    if len(aspect_name) > 120:
+        aspect_name = aspect_name[:117].rstrip() + "..."
+    return {
+        "aspect_name": aspect_name or "unnamed specification aspect",
+        "structure": str(candidate.get("structure") or ""),
+        "rationale": str(candidate.get("rationale") or ""),
+        "when_to_use": str(candidate.get("when_to_use") or ""),
+        "quality_attributes": str(candidate.get("quality_attributes") or ""),
+        "source_url": str(candidate.get("source_url") or ""),
     }
 
 

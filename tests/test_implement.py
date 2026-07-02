@@ -41,6 +41,41 @@ def _rfc_view(title: str = "Add Feature File") -> dict[str, object]:
     }
 
 
+def _technical_approach() -> dict[str, object]:
+    return {
+        "problem": {
+            "question": {
+                "decision": {
+                    "implementation": {
+                        "domain_specification": {
+                            "id": "domain_specification",
+                            "aspects": [
+                                {
+                                    "id": "domain_specification:feature-marker",
+                                    "aspect_name": "feature marker",
+                                    "applicability": "applies",
+                                    "specification_body": "The marker file must contain the implemented text.",
+                                    "quantities": [{"name": "marker files", "value": "1", "unit": "file"}],
+                                    "tables": [],
+                                    "sources": ["RFC fixture"],
+                                    "externalized_tables": [
+                                        {
+                                            "table_name": "marker rows",
+                                            "columns": ["file", "content"],
+                                            "row_count": 1,
+                                            "file_ref": "domain-spec/feature-marker.json",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -70,7 +105,13 @@ def _repo(tmp_path: Path, rfc_id: str = RFC_ID, title: str = "Add Feature File")
         ),
         encoding="utf-8",
     )
-    _git(repo, "add", "rfc.json")
+    (repo / "technical-approach.json").write_text(json.dumps(_technical_approach()), encoding="utf-8")
+    (repo / "domain-spec").mkdir()
+    (repo / "domain-spec" / "feature-marker.json").write_text(
+        json.dumps({"tables": [{"table_name": "marker rows", "columns": ["file", "content"], "rows": [["feature.txt", "implemented"]]}]}),
+        encoding="utf-8",
+    )
+    _git(repo, "add", "rfc.json", "technical-approach.json", "domain-spec/feature-marker.json")
     _git(repo, "commit", "-m", "rfc")
     _git(repo, "checkout", "main")
     return repo
@@ -107,6 +148,10 @@ def test_run_reads_rfc_branch_lets_codex_edit_worktree_and_commits_branch(tmp_pa
     assert "working_title:\nAdd Feature File" in codex_calls[0][-1]
     assert "proposal_hint:\nCreate feature.txt with the implemented marker." in codex_calls[0][-1]
     assert "alternatives_considered:\n- Leave the repo without a feature marker." in codex_calls[0][-1]
+    assert "Contributor domain specification" in codex_calls[0][-1]
+    assert "feature marker" in codex_calls[0][-1]
+    assert "domain-spec/feature-marker.json" in codex_calls[0][-1]
+    assert '"rows": [' in codex_calls[0][-1]
 
 
 def test_run_uses_stable_rfc_id_for_contribution_branch_not_refined_title(tmp_path, monkeypatch):
