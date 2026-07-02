@@ -9,6 +9,7 @@ import pytest
 
 from ai_org import git_wrapper
 from ai_org import rfc as rfc_package
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 
 decompose_module = importlib.import_module("ai_org.rfc.decompose")
@@ -181,6 +182,7 @@ def _rfc(title: str, problem: str) -> dict[str, object]:
             "rationale": "Use the repository's existing Python modules.",
             "provenance": "requester_specified",
         },
+        "user_experience_requirements": empty_user_experience_requirements(),
         "background_facts": "Test RFC.",
         "constraints_assumptions": [],
         "references": [],

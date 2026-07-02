@@ -11,7 +11,13 @@ import subprocess
 import tempfile
 from typing import Any
 
-from ai_org.rfc.field_registry import RFC_VIEW_FIELDS, STRING_ARRAY_FIELDS, STRING_FIELDS, validate_tech_stack
+from ai_org.rfc.field_registry import (
+    RFC_VIEW_FIELDS,
+    STRING_ARRAY_FIELDS,
+    STRING_FIELDS,
+    validate_tech_stack,
+    validate_user_experience_requirements,
+)
 
 RFC_FIELDS = RFC_VIEW_FIELDS
 
@@ -198,6 +204,7 @@ def _is_common_8(value: object) -> bool:
             for field in STRING_ARRAY_FIELDS
         )
         and validate_tech_stack(value.get("tech_stack"))
+        and validate_user_experience_requirements(value.get("user_experience_requirements"))
     )
 
 

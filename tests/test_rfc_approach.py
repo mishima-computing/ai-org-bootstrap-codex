@@ -730,6 +730,7 @@ def test_empty_slot_regenerates_then_accepts(monkeypatch, tmp_path):
                 {
                     "system_name": "Battle loop",
                     "behavior_in_game": "",
+                    "observable_effect": "Visible battle feedback appears.",
                     "named_content": {"entities": ["Slime"], "content_items": ["Spark spell"]},
                     "key_modules": ["game.battle"],
                 }
@@ -758,6 +759,86 @@ def test_empty_slot_regenerates_then_accepts(monkeypatch, tmp_path):
     assert result == _implementation()
     assert len(prompts) == 2
     assert "behavior_in_game is empty" in prompts[1]
+
+
+def test_user_facing_success_criteria_must_include_observable_ux_trace():
+    bad = _normalized_problem()
+    criterion = bad["success_criteria"][0]
+    criterion["verifiable_outcome"] = {
+        "expected_state": "The Slime is defeated and meadow_gate_open is true.",
+        "evidence": "Internal state records the gate flag.",
+    }
+    criterion["verification"] = {
+        "method": "automated_test",
+        "check": "Assert hidden meadow_gate_open is true.",
+    }
+
+    errors = receive_module._lint_normalized_problem(bad, _rfc_view())
+
+    assert any("player-facing observable criterion" in error for error in errors)
+    assert not receive_module._lint_normalized_problem(_normalized_problem(), _rfc_view())
+
+
+def test_prior_art_term_extraction_sees_user_experience_requirements(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_extract(text, context):
+        captured["text"] = text
+        return ["persistent visible gate state"]
+
+    monkeypatch.setattr(receive_module.reference, "_extract_reference_terms", fake_extract)
+
+    terms = receive_module._prior_art_key_concepts(_rfc_view(), {}, {"normalized_problem": _normalized_problem()})
+
+    assert "persistent visible gate state" in terms
+    assert "Gate locked and open states have persistent visible evidence" in captured["text"]
+
+
+def test_observable_effect_empty_slot_retries(monkeypatch, tmp_path):
+    invalid = _implementation()
+    invalid["systems"][0]["observable_effect"] = ""
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        payload = invalid if len(prompts) == 1 else _implementation()
+        return {"ok": True, "raw": json.dumps(payload)}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._implementation_strategy(
+        _decision(),
+        _prior_art_map(),
+        _constraints(),
+        _rfc_view(),
+        tmp_path,
+        {"repo": tmp_path},
+    )
+
+    assert result == _implementation()
+    assert "observable_effect is empty" in prompts[1]
+
+
+def test_first_playable_requires_presentation_baseline(monkeypatch, tmp_path):
+    invalid = _patch_plan()
+    invalid["first_playable"]["presentation_baseline"] = ""
+
+    monkeypatch.setattr(
+        receive_module.codex_exec,
+        "run_json",
+        lambda repo, **kwargs: {"ok": True, "raw": json.dumps(invalid)},
+    )
+
+    result = receive_module._right_size_patch_plan(
+        _decision(),
+        _implementation(),
+        _constraints(),
+        {"repo": tmp_path},
+        _accumulated_approach_through_patch_plan(),
+    )
+
+    assert result["ok"] is False
+    assert "presentation_baseline is empty" in result["error"]
 
 
 def test_step_prompts_render_accumulated_goals_and_direct_ancestors(tmp_path):
@@ -851,6 +932,7 @@ def test_empty_slot_fails_closed_after_bounded_regeneration(monkeypatch, tmp_pat
             {
                 "system_name": "Battle loop",
                 "behavior_in_game": "",
+                "observable_effect": "Visible battle feedback appears.",
                 "named_content": {"entities": ["Slime"], "content_items": ["Spark spell"]},
                 "key_modules": ["game.battle"],
             }
@@ -1427,6 +1509,7 @@ def _rfc_view() -> dict[str, object]:
             "rationale": "",
             "provenance": "unspecified",
         },
+        "user_experience_requirements": _ux_requirements(),
         "background_facts": "The first playable slice centers on a Slime and Spark spell.",
         "constraints_assumptions": ["Keep the battle loop small enough for automated tests."],
         "references": [],
@@ -1451,8 +1534,8 @@ def _normalized_problem() -> dict[str, object]:
                     "preconditions": ["The player is in Green Meadow with Spark learned."],
                 },
                 "verifiable_outcome": {
-                    "expected_state": "The Slime is defeated and the meadow gate opens.",
-                    "evidence": "Battle log records Spark damage and gate state changes to open.",
+                    "expected_state": "The Slime is defeated and the meadow gate visibly opens according to user_experience_requirements.",
+                    "evidence": "Battle log records Spark damage, visible feedback appears, and gate state changes to open.",
                 },
                 "verification": {
                     "method": "automated_test",
@@ -1753,6 +1836,7 @@ def _implementation() -> dict[str, object]:
             {
                 "system_name": "Battle loop",
                 "behavior_in_game": "Player casts Spark, Slime takes damage, and the meadow gate opens on victory.",
+                "observable_effect": "Spark damage appears in the battle log, Slime defeat is visible, and the meadow gate visibly opens.",
                 "named_content": {"entities": ["Player", "Slime"], "content_items": ["Spark", "Meadow gate"]},
                 "key_modules": ["game.battle", "game.state"],
             }
@@ -1770,6 +1854,7 @@ def _patch_plan() -> dict[str, object]:
                 "enemies": ["Slime"],
                 "items_or_spells": ["Spark"],
             },
+            "presentation_baseline": "The first playable shows HP, MP, Spark feedback, Slime defeat, and persistent visible gate state from user_experience_requirements.",
             "win_or_progress_condition": "Slime defeated and meadow gate opens.",
             "how_verified": "Run the battle-loop test and assert meadow_gate_open.",
         },
@@ -1780,6 +1865,75 @@ def _patch_plan() -> dict[str, object]:
             }
         ],
         "deferred": [{"item": "Full campaign map.", "why_safe_to_defer": "The first battle loop is independent."}],
+    }
+
+
+def _ux_requirements() -> dict[str, object]:
+    return {
+        "applicability": {"applicability": "user_facing", "not_user_facing_reason": ""},
+        "experience_identity": {
+            "named_reference": "Playable RPG battle slice with readable status surfaces.",
+            "genre_conventions": "JRPG status, command, battle-log, and map-readability conventions.",
+            "must_resemble": "Visible HP, MP, enemy, spell, gate, and objective state.",
+            "must_not_resemble": "Mechanics that only change hidden variables.",
+        },
+        "presentation_model": {
+            "camera_and_view": "Readable map and battle view.",
+            "world_readability": "The meadow, Slime, Spark effect, and gate state are visible.",
+            "ui_taxonomy_notes": "Non-diegetic HUD and battle log with spatial gate evidence.",
+        },
+        "core_status_surfaces": {
+            "player_status": "Player HP, MP, and learned spells are visible.",
+            "opposition_status": "Slime damage and defeat state are visible.",
+            "inventory_resources": "Spell resources remain visible or inspectable.",
+            "objective_progress": "Gate objective progress is visible.",
+            "location_identity": "Green Meadow identity is visible.",
+        },
+        "entity_affordances": {
+            "interactive_entities": "Player actions show valid targets.",
+            "exits_and_transitions": "The meadow gate is a visible transition.",
+            "gates_and_locks": "Gate locked and open states have persistent visible evidence.",
+            "hazards_and_bosses": "Enemy threat is visible before action.",
+            "collectibles": "Rewards visibly change after victory.",
+            "decorative_elements": "Decorations never resemble gate or enemy state.",
+        },
+        "action_feedback_matrix": [
+            {"action_verb": "cast Spark", "feedback_requirement": "Battle log and damage feedback appear."},
+            {"action_verb": "open gate", "feedback_requirement": "Gate visibly changes and remains open."},
+        ],
+        "progression_legibility": {
+            "current_goal_visibility": "Defeat Slime and open the gate is visible.",
+            "locked_state_feedback": "A closed gate communicates blocked progress.",
+            "unlocked_state_feedback": "An open gate communicates progress.",
+            "flag_observability": "meadow_gate_open has persistent visible evidence.",
+            "ending_state_consistency": "Victory state matches Slime defeated and gate open.",
+        },
+        "hud_and_ui_flow": {
+            "primary_hud": "HP and MP are visible during battle.",
+            "secondary_screens": "Status and spell details are inspectable.",
+            "menu_flow": "Command choice supports casting Spark.",
+            "dialog_flow": "Battle text is player-readable.",
+            "failure_and_recovery": "Failure explains what happened and allows retry.",
+        },
+        "visual_language_constraints": {
+            "contrast": "HUD, battle log, enemy, and gate state are readable.",
+            "palette_role": "Color reinforces but does not solely encode state.",
+            "silhouette_readability": "Slime and gate silhouettes are distinct.",
+            "labels_and_markers": "Objective, enemy, and gate markers are readable.",
+            "animation_minimums": "Spark, damage, defeat, and gate opening have visible feedback.",
+        },
+        "accessibility_baseline": {
+            "controls": "Battle commands use simple inputs.",
+            "text_readability": "HUD and log text are readable.",
+            "color_independence": "Damage and gate state do not rely on color alone.",
+            "audio_independence": "Audio feedback has visual text equivalents.",
+            "pacing": "Battle log and dialog are player-paced.",
+        },
+        "acceptance_tests": {
+            "screenshot_checks": ["When battle starts, visible HP, MP, Slime, and command surfaces appear."],
+            "interaction_checks": ["When Spark is cast, visible damage feedback and battle log entries appear."],
+            "playtest_checks": ["When Slime is defeated, persistent visible gate-open evidence appears."],
+        },
     }
 
 

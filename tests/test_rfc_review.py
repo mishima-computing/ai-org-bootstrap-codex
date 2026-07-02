@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ai_org.rfc import review
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 
 RFC_ID = "manual-rfc"
@@ -31,6 +32,7 @@ def _rfc_view() -> dict[str, object]:
             "rationale": "Use the repository's existing Python modules.",
             "provenance": "requester_specified",
         },
+        "user_experience_requirements": empty_user_experience_requirements(),
         "background_facts": "The target repo is read-only during review.",
         "constraints_assumptions": [],
         "references": [],

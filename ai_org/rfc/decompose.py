@@ -8,7 +8,14 @@ from typing import Any, Mapping
 
 from ai_org import git_wrapper
 import ai_org.rfc.codex_exec as codex_exec
-from ai_org.rfc.field_registry import RFC_VIEW_FIELDS, STRING_ARRAY_FIELDS, STRING_FIELDS, rfc_view_schema, validate_tech_stack
+from ai_org.rfc.field_registry import (
+    RFC_VIEW_FIELDS,
+    STRING_ARRAY_FIELDS,
+    STRING_FIELDS,
+    rfc_view_schema,
+    validate_tech_stack,
+    validate_user_experience_requirements,
+)
 
 
 RFC_FIELDS = RFC_VIEW_FIELDS
@@ -259,6 +266,8 @@ def _child_error(value: object) -> str:
             return f"Codex decomposition returned child with invalid {field}"
     if not validate_tech_stack(value["tech_stack"]):
         return "Codex decomposition returned child with invalid tech_stack"
+    if not validate_user_experience_requirements(value["user_experience_requirements"]):
+        return "Codex decomposition returned child with invalid user_experience_requirements"
     for field in ("depends_on", "provides"):
         if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
             return f"Codex decomposition returned child with invalid {field}"
@@ -453,6 +462,7 @@ def _is_rfc_view(value: object) -> bool:
             for field in STRING_ARRAY_FIELDS
         )
         and validate_tech_stack(value.get("tech_stack"))
+        and validate_user_experience_requirements(value.get("user_experience_requirements"))
     )
 
 

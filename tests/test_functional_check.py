@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from ai_org.patch import functional_check
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -43,6 +44,7 @@ def _repo(tmp_path: Path) -> Path:
                     "rationale": "Use the repository's existing Python file layout.",
                     "provenance": "requester_specified",
                 },
+                "user_experience_requirements": empty_user_experience_requirements(),
                 "background_facts": "Acceptance checks reachability.",
                 "constraints_assumptions": [],
                 "references": [],

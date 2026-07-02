@@ -36,7 +36,13 @@ import tempfile
 from typing import Any, Mapping
 
 from ai_org import git_wrapper, reference
-from ai_org.rfc.field_registry import RFC_VIEW_FIELDS, STRING_ARRAY_FIELDS, STRING_FIELDS, validate_tech_stack
+from ai_org.rfc.field_registry import (
+    RFC_VIEW_FIELDS,
+    STRING_ARRAY_FIELDS,
+    STRING_FIELDS,
+    validate_tech_stack,
+    validate_user_experience_requirements,
+)
 
 
 @dataclass(frozen=True)
@@ -783,6 +789,7 @@ def _is_rfc_view(value: object) -> bool:
             for field in STRING_ARRAY_FIELDS
         )
         and validate_tech_stack(value.get("tech_stack"))
+        and validate_user_experience_requirements(value.get("user_experience_requirements"))
     )
 
 

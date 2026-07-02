@@ -124,6 +124,16 @@
 #  10. Emit the Technical Approach section: chosen approach, alternatives-with-why-not, prior-art rationale,
 #      trade-off analysis, implementation plan, compat/migration, testing plan, scoped patch plan, risks/open Qs.
 # Question-back to the requester (needs_confirmation extended to approach decisions) is deferred — build it LAST.
+#
+# USER EXPERIENCE REQUIREMENTS MEMENTO: the requester may give only one line. Grounding derives the
+# graphics/UI/UX contract from research, named-reference identity, genre conventions, PLAY/HEP usability
+# heuristics, game-feel feedback, UI layer taxonomy, JRPG readability conventions when relevant, and Game
+# Accessibility Guidelines basics. Keep altitude split: RFC records observable behavior, states, feedback
+# channels, conventions, and tests; art bible owns exact palettes/sprite dimensions/typography; implementation
+# owns component and file names. Anti-decorative principle: No presentation element may obscure, contradict, or
+# masquerade as game state. Every consequential mechanic must have an observable signifier, every consequential
+# action timely feedback, and every persistent state change persistent evidence. A real external build failed
+# exactly where this spec was silent: mechanically complete state existed, but the player could not perceive it.
 """RFC receive — validate and ground an entrance request into an RFC."""
 from __future__ import annotations
 
@@ -153,9 +163,11 @@ from ai_org.rfc.field_registry import (
     STRING_FIELDS,
     TECH_STACK_CONCRETE_BUILD_STRATEGIES,
     TECH_STACK_FIELDS,
+    USER_EXPERIENCE_REQUIREMENTS_FIELDS,
     entrance_defaults,
     rfc_view_schema,
     validate_tech_stack,
+    validate_user_experience_requirements,
 )
 
 
@@ -727,6 +739,7 @@ IMPLEMENTATION_STRATEGY_FIELDS = (
 IMPLEMENTATION_SYSTEM_FIELDS = (
     "system_name",
     "behavior_in_game",
+    "observable_effect",
     "named_content",
     "key_modules",
 )
@@ -761,6 +774,7 @@ IMPLEMENTATION_STRATEGY_SCHEMA: dict[str, Any] = {
                         },
                     },
                     "key_modules": {"type": "array", "items": {"type": "string"}},
+                    "observable_effect": {"type": "string"},
                 },
             },
         },
@@ -785,6 +799,7 @@ PATCH_PLAN_FOLLOW_UP_FIELDS = (
 PATCH_PLAN_FIRST_PLAYABLE_FIELDS = (
     "player_can",
     "named_content",
+    "presentation_baseline",
     "win_or_progress_condition",
     "how_verified",
 )
@@ -816,6 +831,7 @@ RIGHT_SIZE_PATCH_PLAN_SCHEMA: dict[str, Any] = {
                         "items_or_spells": {"type": "array", "items": {"type": "string"}},
                     },
                 },
+                "presentation_baseline": {"type": "string"},
                 "win_or_progress_condition": {"type": "string"},
                 "how_verified": {"type": "string"},
             },
@@ -1078,6 +1094,10 @@ def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
             _optional_list_field(data, field)
     if "tech_stack" in data and not validate_tech_stack(data["tech_stack"], require_choice=False):
         raise ValueError("Request field 'tech_stack' must contain the structured tech stack sub-tags.")
+    if "user_experience_requirements" in data and not validate_user_experience_requirements(
+        data["user_experience_requirements"]
+    ):
+        raise ValueError("Request field 'user_experience_requirements' must contain the structured UX sub-tags.")
 
     return data
 
@@ -1652,6 +1672,7 @@ def _implementation_strategy(
             feedback = [last_error]
             continue
         lint_errors = _lint_empty_slots(parsed)
+        lint_errors.extend(_lint_observable_effects(parsed))
         if not lint_errors:
             return parsed
         last_error = "; ".join(lint_errors)
@@ -2138,6 +2159,19 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "graphics, scope, and conventions; security should target current standards and patches; SaaS should "
         "use current stacks and practices; libraries should use current APIs. Do not gratuitously target an "
         "outdated incarnation when the latest sensible target is available.\n\n"
+        "Derive proposed_rfc.user_experience_requirements yourself. The requester may give only one line; do "
+        "not ask them to supply graphics/UI/UX requirements when research and conventions can derive them. For "
+        "named, franchise, or genre requests use this five-step derivation: (1) reference identity: capture the "
+        "named thing's researched look and interaction conventions, such as Dragon Quest-style status windows "
+        "with LV/HP/MP/gold, command menus, visible low-HP signals, explicit doors/stairs/chests/talk/search "
+        "verbs, and NPC-clue navigation when that reference applies; (2) genre contract: add the genre's "
+        "readability and feedback conventions; (3) presentation obligations: every NPC, exit, gate, boss, flag, "
+        "and objective must be visually represented and visibly change when state changes; (4) accessibility "
+        "baseline: readable text, contrast, non-color-only communication, remappable or simple controls, and "
+        "player-paced dialog; (5) verification: screenshot, interaction, and playtest criteria proving mechanics "
+        "are perceivable, not merely implemented. Presentation fidelity is part of the named thing's identity; "
+        "do not strip the look while keeping only mechanics. Empty or vague UX sections for a user_facing "
+        "deliverable are contract violations and will fail closed.\n\n"
         "Always do the research and commit to the most-likely interpretation as proposed_rfc, even when the "
         "request is ambiguous or under-specified. Do not send back blank open questions instead of grounding. "
         "If you are confident, set confident=true and make proposed_rfc the grounded registry-shaped RFC view "
@@ -2191,7 +2225,10 @@ def _normalize_problem_prompt(
         "Do not propose an implementation approach, alternatives, patch plan, reviewer decision, or later "
         "Technical Approach steps.\n\n"
         "Write English only. Distill problem and current_inadequacy; do not copy any RFC field verbatim. "
-        "Derive success criteria from the RFC intent, but do not copy RFC feature-list bullets as criteria.\n\n"
+        "Derive success criteria from the RFC intent, but do not copy RFC feature-list bullets as criteria. "
+        "For user_facing deliverables, include at least one player-facing observable criterion tracing to "
+        "user_experience_requirements: it must prove visible/screen/UI/HUD/dialog/feedback evidence, not only "
+        "internal state.\n\n"
         "Return these fields:\n"
         "- problem: the core problem, restated crisply.\n"
         "- affected: affected users, operators, contributors, systems, modules, or workflows.\n"
@@ -2578,9 +2615,15 @@ def _implementation_strategy_prompt(
         "Expand only the chosen approach into an implementation strategy. Do not generate or re-evaluate "
         "alternatives, create a patch slice plan, surface risks and open questions, emit the final Technical "
         "Approach section, or perform later Technical Approach steps.\n\n"
+        "Anti-decorative rule: No presentation element may obscure, contradict, or masquerade as game state. "
+        "Every consequential mechanic must have an observable signifier, every consequential action timely "
+        "feedback, and every persistent state change persistent evidence. For each system, observable_effect "
+        "must name what the player can see/hear/read or inspect as evidence; it may not restate internal "
+        "behavior_in_game.\n\n"
         "Return these fields:\n"
-        "- systems: each system has system_name, behavior_in_game, named_content with entities and "
-        "content_items, and key_modules. Tie named content and system behavior to specific root goals where natural.\n"
+        "- systems: each system has system_name, behavior_in_game, observable_effect, named_content with "
+        "entities and content_items, and key_modules. Tie named content and system behavior to specific root "
+        "goals where natural.\n"
         "- persistence: saved_fields that must survive reload or handoff; name the field or state explicitly and align it with any success criterion that requires durable state.\n\n"
         + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
         + f"\nRepository root:\n{repo}\n"
@@ -2628,8 +2671,11 @@ def _right_size_patch_plan_prompt(
         "operability, or maintainability. Do not surface risks and open questions, emit the final Technical "
         "Approach section, or perform later Technical Approach steps.\n\n"
         "Return these fields:\n"
-        "- first_playable: player_can, named_content locations/enemies/items_or_spells, win_or_progress_condition, "
-        "and how_verified. Include per-item trace text in how_verified where natural so each verification maps to a specific success criterion.\n"
+        "- first_playable: player_can, named_content locations/enemies/items_or_spells, presentation_baseline, "
+        "win_or_progress_condition, and how_verified. presentation_baseline must state which UX requirements "
+        "are already visible in the first playable, so mechanically complete but invisible behavior cannot "
+        "qualify. Include per-item trace text in how_verified where natural so each verification maps to a "
+        "specific success criterion.\n"
         "- follow_ups: later additions, each with adds and named_content.\n"
         "- deferred: intentionally deferred work, each with item and why_safe_to_defer.\n"
         f"Chosen approach:\n{chosen_text}\n"
@@ -3160,7 +3206,71 @@ def _lint_normalized_problem(parsed: Mapping[str, Any], rfc_view: Mapping[str, A
         ) else None
         if not isinstance(preconditions, list) or not preconditions:
             errors.append(f"{base}.capability.preconditions is empty")
+    if _rfc_is_user_facing(rfc_view) and not _has_player_facing_ux_success_criterion(criteria, rfc_view):
+        errors.append(
+            "success_criteria must include at least one player-facing observable criterion tracing to user_experience_requirements"
+        )
     return errors
+
+
+def _rfc_is_user_facing(rfc_view: Mapping[str, Any]) -> bool:
+    ux = rfc_view.get("user_experience_requirements")
+    if not isinstance(ux, Mapping):
+        return False
+    applicability = ux.get("applicability")
+    return isinstance(applicability, Mapping) and applicability.get("applicability") == "user_facing"
+
+
+def _has_player_facing_ux_success_criterion(criteria: object, rfc_view: Mapping[str, Any]) -> bool:
+    if not isinstance(criteria, list):
+        return False
+    ux_terms = _user_experience_requirement_phrases(rfc_view)
+    for criterion in criteria:
+        if not isinstance(criterion, Mapping):
+            continue
+        actor = str(criterion.get("actor", "")).lower()
+        if "player" not in actor and "user" not in actor:
+            continue
+        text = " ".join(value for _, value in _walk_normalized_problem_strings(criterion)).lower()
+        if not _contains_observable_ux_language(text):
+            continue
+        if "user_experience_requirements" in text or any(term and term in text for term in ux_terms):
+            return True
+    return False
+
+
+def _contains_observable_ux_language(text: str) -> bool:
+    observable_terms = (
+        "observable",
+        "visible",
+        "visibly",
+        "visual",
+        "screen",
+        "screenshot",
+        "hud",
+        "ui",
+        "menu",
+        "dialog",
+        "feedback",
+        "readable",
+        "contrast",
+        "marker",
+        "animation",
+    )
+    return any(term in text for term in observable_terms)
+
+
+def _user_experience_requirement_phrases(rfc_view: Mapping[str, Any]) -> set[str]:
+    ux = rfc_view.get("user_experience_requirements")
+    if not isinstance(ux, Mapping):
+        return set()
+    phrases = set()
+    for _, value in _walk_normalized_problem_strings(ux):
+        for phrase in _split_source_phrases(value):
+            canonical = _canonical_phrase(phrase)
+            if len(canonical) >= 8:
+                phrases.add(canonical)
+    return phrases
 
 
 NON_EMPTY_ARRAY_SLOT_NAMES = frozenset(
@@ -4049,12 +4159,17 @@ def _parse_implementation_strategy(raw: str) -> dict[str, Any]:
             return _implementation_strategy_error("Codex implementation strategy returned invalid named_content")
         if not isinstance(key_modules, list) or not all(isinstance(item, str) for item in key_modules):
             return _implementation_strategy_error("Codex implementation strategy returned invalid key_modules")
-        if not isinstance(system.get("system_name"), str) or not isinstance(system.get("behavior_in_game"), str):
+        if (
+            not isinstance(system.get("system_name"), str)
+            or not isinstance(system.get("behavior_in_game"), str)
+            or not isinstance(system.get("observable_effect"), str)
+        ):
             return _implementation_strategy_error("Codex implementation strategy returned invalid system strings")
         parsed_systems.append(
             {
                 "system_name": system["system_name"],
                 "behavior_in_game": system["behavior_in_game"],
+                "observable_effect": system["observable_effect"],
                 "named_content": named_content,
                 "key_modules": list(key_modules),
             }
@@ -4083,6 +4198,28 @@ def _parse_implementation_named_content(value: Any) -> dict[str, list[str]] | No
 
 def _implementation_strategy_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
+
+
+def _lint_observable_effects(parsed: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    systems = parsed.get("systems")
+    if not isinstance(systems, list):
+        return errors
+    for index, system in enumerate(systems):
+        if not isinstance(system, Mapping):
+            continue
+        effect = str(system.get("observable_effect", "")).strip()
+        if not effect:
+            errors.append(f"systems[{index}].observable_effect is empty")
+            continue
+        behavior = str(system.get("behavior_in_game", "")).strip()
+        if _canonical_phrase(effect) == _canonical_phrase(behavior):
+            errors.append(f"systems[{index}].observable_effect must describe player-facing evidence, not repeat behavior_in_game")
+        if not _contains_observable_ux_language(effect.lower()):
+            errors.append(
+                f"systems[{index}].observable_effect must name observable presentation, feedback, or persistent evidence"
+            )
+    return errors
 
 
 def _parse_right_size_patch_plan(raw: str) -> dict[str, Any]:
@@ -4132,15 +4269,22 @@ def _parse_patch_plan_first_playable(value: Any) -> dict[str, Any] | None:
         return None
     player_can = value.get("player_can")
     named_content = _parse_game_named_content(value.get("named_content"))
+    presentation_baseline = value.get("presentation_baseline")
     win_or_progress_condition = value.get("win_or_progress_condition")
     how_verified = value.get("how_verified")
     if not isinstance(player_can, list) or not all(isinstance(item, str) for item in player_can):
         return None
-    if named_content is None or not isinstance(win_or_progress_condition, str) or not isinstance(how_verified, str):
+    if (
+        named_content is None
+        or not isinstance(presentation_baseline, str)
+        or not isinstance(win_or_progress_condition, str)
+        or not isinstance(how_verified, str)
+    ):
         return None
     return {
         "player_can": list(player_can),
         "named_content": named_content,
+        "presentation_baseline": presentation_baseline,
         "win_or_progress_condition": win_or_progress_condition,
         "how_verified": how_verified,
     }
@@ -4861,7 +5005,7 @@ def _parse_grounding_result(raw: str, original_rfc_view: dict[str, Any]) -> Grou
     questions = parsed.get("questions")
     if not isinstance(confident, bool):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid confident: {raw}")
-    if not _is_rfc_view(proposed_rfc):
+    if not _is_grounding_candidate_view(proposed_rfc):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid proposed_rfc: {raw}")
     if not isinstance(assumptions, list) or not all(isinstance(assumption, str) for assumption in assumptions):
         return _grounding_fail_closed(original_rfc_view, f"Grounding returned invalid assumptions: {raw}")
@@ -4882,6 +5026,23 @@ def _with_working_title_fallback(value: Any, original_rfc_view: dict[str, Any]) 
     repaired = dict(value)
     repaired["working_title"] = _derive_working_title(repaired, original_rfc_view)
     return repaired
+
+
+def _is_grounding_candidate_view(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(RFC_VIEW_FIELDS)
+        and all(isinstance(value[field], str) for field in STRING_FIELDS)
+        and all(
+            isinstance(value[field], list) and all(isinstance(item, str) for item in value[field])
+            for field in STRING_ARRAY_FIELDS
+        )
+        and validate_tech_stack(value.get("tech_stack"))
+        and validate_user_experience_requirements(
+            value.get("user_experience_requirements"),
+            require_completeness=False,
+        )
+    )
 
 
 def _derive_working_title(rfc_view: Mapping[str, Any], original_rfc_view: Mapping[str, Any]) -> str:
@@ -5003,8 +5164,21 @@ def _lint_grounding(
     # bake test-subject tokens into this generic mechanism.
 
     violations.extend(_lint_grounding_tech_stack_provenance(request, rfc_view))
+    violations.extend(_lint_grounding_user_experience_requirements(rfc_view))
 
     return violations
+
+
+def _lint_grounding_user_experience_requirements(rfc_view: Mapping[str, Any]) -> list[str]:
+    ux = rfc_view.get("user_experience_requirements")
+    if not isinstance(ux, Mapping):
+        return ["C0 user-experience completeness lint: user_experience_requirements is not a structured object"]
+    if not validate_user_experience_requirements(ux):
+        return [
+            "C0 user-experience completeness lint: user_facing deliverables require non-empty UX sections, "
+            "action feedback rows, and screenshot/interaction/playtest checks; not_user_facing deliverables require a reason"
+        ]
+    return []
 
 
 def _lint_grounding_tech_stack_provenance(request: Mapping[str, Any], rfc_view: Mapping[str, Any]) -> list[str]:
@@ -5253,6 +5427,8 @@ def _registry_rfc(data: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"RFC field {field!r} must be a list of strings.")
     if not validate_tech_stack(data["tech_stack"]):
         raise ValueError("RFC field 'tech_stack' must contain valid structured sub-tags.")
+    if not validate_user_experience_requirements(data["user_experience_requirements"]):
+        raise ValueError("RFC field 'user_experience_requirements' must contain valid structured sub-tags.")
     for field in RFC_HANDOFF_REQUIRED_FIELDS:
         value = data[field]
         if isinstance(value, str) and not value.strip():

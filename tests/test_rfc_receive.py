@@ -130,6 +130,34 @@ def test_engine_based_tech_stack_requires_real_engine_product_name():
     assert not receive_module.validate_tech_stack({**engine_based, "engine": "browser standards"})
 
 
+def test_user_experience_requirements_validator_enforces_applicability_completeness():
+    user_facing = _ux_requirements()
+    assert receive_module.validate_user_experience_requirements(user_facing)
+
+    empty_identity = {
+        **user_facing,
+        "experience_identity": {**user_facing["experience_identity"], "named_reference": ""},
+    }
+    assert not receive_module.validate_user_experience_requirements(empty_identity)
+
+    empty_acceptance = {
+        **user_facing,
+        "acceptance_tests": {**user_facing["acceptance_tests"], "playtest_checks": []},
+    }
+    assert not receive_module.validate_user_experience_requirements(empty_acceptance)
+
+    not_user_facing = receive_module.entrance_defaults({"raw_request": "Refactor internals."})[
+        "user_experience_requirements"
+    ]
+    assert receive_module.validate_user_experience_requirements(not_user_facing)
+    assert not receive_module.validate_user_experience_requirements(
+        {
+            **not_user_facing,
+            "applicability": {"applicability": "not_user_facing", "not_user_facing_reason": ""},
+        }
+    )
+
+
 def test_receive_preserves_extra_keys():
     assert receive(
         {
@@ -670,6 +698,7 @@ def test_registry_lint_scope_assignments_cover_every_field():
         "desired_outcomes_success",
         "affected_area_platform",
         "tech_stack",
+        "user_experience_requirements",
     }
     expected_context = {
         "raw_request",
@@ -739,6 +768,42 @@ def test_grounding_ai_deliberated_provenance_regrounds_and_fails_closed(tmp_path
     assert any("grounding may not set provenance=ai_deliberated" in item for item in result["violations"])
     assert len(grounding_prompts) == 3
     assert "Your previous grounding violated" in grounding_prompts[1]
+
+
+def test_grounding_empty_user_facing_ux_regrounds_and_fails_closed(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive({"raw_request": "Make Dragon Quest."})
+    bad_grounding = _rfc_view("Dragon Quest", raw_request=request["raw_request"])
+    bad_grounding["user_experience_requirements"] = {
+        **_ux_requirements(),
+        "experience_identity": {field: "" for field in _ux_requirements()["experience_identity"]},
+    }
+
+    def handler(cmd):
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+        return {
+            "confident": True,
+            "proposed_rfc": bad_grounding,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounding left user-facing UX blank.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = intake(request, repo)
+
+    assert result["ok"] is False
+    assert result["failed_step"] == "grounding"
+    assert any("user-experience completeness" in violation for violation in result["violations"])
 
 
 def test_grounding_requester_specified_requires_original_stack_name(tmp_path, monkeypatch):
@@ -938,6 +1003,9 @@ def test_grounding_and_verifier_schemas_are_codex_valid_registry():
     assert tuple(schema_rfc["required"]) == COMMON_8_FIELDS
     assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
     assert schema_rfc["properties"]["tech_stack"]["required"] == list(receive_module.TECH_STACK_FIELDS)
+    assert schema_rfc["properties"]["user_experience_requirements"]["required"] == list(
+        receive_module.USER_EXPERIENCE_REQUIREMENTS_FIELDS
+    )
     # The registry semantics reach the schema as a STRING description (codex/OpenAI Structured
     # Outputs reject a non-string `description` with HTTP 400 "... is not of type 'string'").
     # The structured dict form lives only in the prompt (REQUEST_SCHEMA/_field_registry_prompt).
@@ -989,6 +1057,7 @@ def _rfc_view(
             "rationale": "",
             "provenance": "unspecified",
         },
+        "user_experience_requirements": _ux_requirements(),
         "background_facts": background_facts,
         "constraints_assumptions": [],
         "references": [],
@@ -997,6 +1066,81 @@ def _rfc_view(
         "non_goals_out_of_scope": [],
         "proposal_hint": proposal_hint,
         "alternatives_considered": alternatives_considered or [],
+    }
+
+
+def _ux_requirements() -> dict[str, object]:
+    return {
+        "applicability": {"applicability": "user_facing", "not_user_facing_reason": ""},
+        "experience_identity": {
+            "named_reference": "Dragon Quest readable status windows and command menus.",
+            "genre_conventions": "Classic JRPG exploration, dialog, battle, and inventory readability.",
+            "must_resemble": "Status surfaces, NPC clues, doors, stairs, chests, and talk/search verbs.",
+            "must_not_resemble": "An invisible mechanics-only simulation.",
+        },
+        "presentation_model": {
+            "camera_and_view": "Top-down readable map with clear entrances and interactables.",
+            "world_readability": "NPCs, exits, gates, hazards, bosses, and objectives are visibly represented.",
+            "ui_taxonomy_notes": "Non-diegetic status windows plus spatial world markers.",
+        },
+        "core_status_surfaces": {
+            "player_status": "LV, HP, MP, equipment state, and low-HP warning are visible.",
+            "opposition_status": "Enemy name, threat, damage, and defeat state are visible.",
+            "inventory_resources": "Gold, items, keys, and spell resources are visible in menus.",
+            "objective_progress": "Current goal and completion flags are visible to the player.",
+            "location_identity": "Town, dungeon, and room identity are readable on screen.",
+        },
+        "entity_affordances": {
+            "interactive_entities": "NPCs and objects show talk/search/open affordances.",
+            "exits_and_transitions": "Doors, stairs, and map exits are visibly distinct.",
+            "gates_and_locks": "Locked and unlocked states have persistent visible evidence.",
+            "hazards_and_bosses": "Hazards and bosses have distinct silhouettes and warnings.",
+            "collectibles": "Chests and pickups visibly change after collection.",
+            "decorative_elements": "Decorations never masquerade as interactive state.",
+        },
+        "action_feedback_matrix": [
+            {"action_verb": "talk", "feedback_requirement": "Dialog window opens with player-paced text."},
+            {"action_verb": "open", "feedback_requirement": "Door or chest visibly changes state."},
+        ],
+        "progression_legibility": {
+            "current_goal_visibility": "The current goal is visible in HUD or menu.",
+            "locked_state_feedback": "Locked gates explain the missing key or flag.",
+            "unlocked_state_feedback": "Unlocked gates stay visibly open.",
+            "flag_observability": "Quest flags leave persistent visible evidence.",
+            "ending_state_consistency": "Ending and victory states match the visible world state.",
+        },
+        "hud_and_ui_flow": {
+            "primary_hud": "HP, MP, and gold are readable without opening deep menus.",
+            "secondary_screens": "Inventory, equipment, and status screens are readable.",
+            "menu_flow": "Command menus expose fight, spell, item, talk, and search where applicable.",
+            "dialog_flow": "Dialog is player-paced and identifies speaker or source.",
+            "failure_and_recovery": "Defeat and retry states explain what happened and how to continue.",
+        },
+        "visual_language_constraints": {
+            "contrast": "Text, status windows, and interactive markers meet readable contrast.",
+            "palette_role": "Palette communicates state roles without being the only channel.",
+            "silhouette_readability": "NPC, exit, gate, hazard, boss, and item silhouettes are distinct.",
+            "labels_and_markers": "Labels and markers identify consequential entities and objectives.",
+            "animation_minimums": "Core actions and state changes have visible animation or text feedback.",
+        },
+        "accessibility_baseline": {
+            "controls": "Controls are simple or remappable and avoid mandatory chords.",
+            "text_readability": "Text is large enough to read and never overlaps controls.",
+            "color_independence": "State is not communicated by color alone.",
+            "audio_independence": "Audio cues have visual or textual equivalents.",
+            "pacing": "Dialog and progression prompts are player-paced.",
+        },
+        "acceptance_tests": {
+            "screenshot_checks": [
+                "When the player enters town, visible NPC, exit, objective, HP, MP, and gold surfaces appear."
+            ],
+            "interaction_checks": [
+                "When the player opens a locked gate, visible locked-state feedback appears and persists."
+            ],
+            "playtest_checks": [
+                "When a player follows NPC clues, observable objective feedback appears without hidden state."
+            ],
+        },
     }
 
 

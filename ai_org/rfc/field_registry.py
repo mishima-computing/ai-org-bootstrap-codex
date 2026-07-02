@@ -20,6 +20,73 @@ TECH_STACK_FIELDS = (
     "rationale",
     "provenance",
 )
+USER_EXPERIENCE_APPLICABILITY = ("user_facing", "not_user_facing")
+UX_APPLICABILITY_FIELDS = ("applicability", "not_user_facing_reason")
+UX_EXPERIENCE_IDENTITY_FIELDS = (
+    "named_reference",
+    "genre_conventions",
+    "must_resemble",
+    "must_not_resemble",
+)
+UX_PRESENTATION_MODEL_FIELDS = ("camera_and_view", "world_readability", "ui_taxonomy_notes")
+UX_CORE_STATUS_SURFACES_FIELDS = (
+    "player_status",
+    "opposition_status",
+    "inventory_resources",
+    "objective_progress",
+    "location_identity",
+)
+UX_ENTITY_AFFORDANCES_FIELDS = (
+    "interactive_entities",
+    "exits_and_transitions",
+    "gates_and_locks",
+    "hazards_and_bosses",
+    "collectibles",
+    "decorative_elements",
+)
+UX_ACTION_FEEDBACK_FIELDS = ("action_verb", "feedback_requirement")
+UX_PROGRESSION_LEGIBILITY_FIELDS = (
+    "current_goal_visibility",
+    "locked_state_feedback",
+    "unlocked_state_feedback",
+    "flag_observability",
+    "ending_state_consistency",
+)
+UX_HUD_AND_UI_FLOW_FIELDS = (
+    "primary_hud",
+    "secondary_screens",
+    "menu_flow",
+    "dialog_flow",
+    "failure_and_recovery",
+)
+UX_VISUAL_LANGUAGE_CONSTRAINTS_FIELDS = (
+    "contrast",
+    "palette_role",
+    "silhouette_readability",
+    "labels_and_markers",
+    "animation_minimums",
+)
+UX_ACCESSIBILITY_BASELINE_FIELDS = (
+    "controls",
+    "text_readability",
+    "color_independence",
+    "audio_independence",
+    "pacing",
+)
+UX_ACCEPTANCE_TESTS_FIELDS = ("screenshot_checks", "interaction_checks", "playtest_checks")
+USER_EXPERIENCE_REQUIREMENTS_FIELDS = (
+    "applicability",
+    "experience_identity",
+    "presentation_model",
+    "core_status_surfaces",
+    "entity_affordances",
+    "action_feedback_matrix",
+    "progression_legibility",
+    "hud_and_ui_flow",
+    "visual_language_constraints",
+    "accessibility_baseline",
+    "acceptance_tests",
+)
 
 
 @dataclass(frozen=True)
@@ -132,6 +199,16 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
         "tech_stack",
     ),
     FieldRegistryEntry(
+        "user_experience_requirements",
+        "RFC-altitude observable graphics/UI/UX contract derived by grounding",
+        "observable behavior, states, feedback channels, named-reference and genre conventions, accessibility baselines, and screenshot/interaction/playtest checks that prove perceivability",
+        "exact palettes, sprite dimensions, typography, component names, file names, implementation details, decorative claims with no observable effect, or research prose",
+        "grounding",
+        "rfc_handoff",
+        "target",
+        "user_experience_requirements",
+    ),
+    FieldRegistryEntry(
         "background_facts",
         "bounded objective context",
         "only facts needed to interpret the request (the named thing, its domain, existing constraints)",
@@ -221,6 +298,15 @@ STRING_ARRAY_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.valu
 STRING_FIELDS = tuple(entry.name for entry in FIELD_REGISTRY if entry.value_type == "string")
 
 
+def _string_object_schema(fields: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(fields),
+        "properties": {field: {"type": "string"} for field in fields},
+    }
+
+
 def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
     if entry.value_type == "string_array":
         return {"type": "array", "items": {"type": "string"}, "description": entry.schema_description()}
@@ -241,6 +327,45 @@ def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
                 },
                 "rationale": {"type": "string"},
                 "provenance": {"type": "string", "enum": list(TECH_STACK_PROVENANCE)},
+            },
+        }
+    if entry.value_type == "user_experience_requirements":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(USER_EXPERIENCE_REQUIREMENTS_FIELDS),
+            "description": entry.schema_description(),
+            "properties": {
+                "applicability": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(UX_APPLICABILITY_FIELDS),
+                    "properties": {
+                        "applicability": {"type": "string", "enum": list(USER_EXPERIENCE_APPLICABILITY)},
+                        "not_user_facing_reason": {"type": "string"},
+                    },
+                },
+                "experience_identity": _string_object_schema(UX_EXPERIENCE_IDENTITY_FIELDS),
+                "presentation_model": _string_object_schema(UX_PRESENTATION_MODEL_FIELDS),
+                "core_status_surfaces": _string_object_schema(UX_CORE_STATUS_SURFACES_FIELDS),
+                "entity_affordances": _string_object_schema(UX_ENTITY_AFFORDANCES_FIELDS),
+                "action_feedback_matrix": {
+                    "type": "array",
+                    "items": _string_object_schema(UX_ACTION_FEEDBACK_FIELDS),
+                },
+                "progression_legibility": _string_object_schema(UX_PROGRESSION_LEGIBILITY_FIELDS),
+                "hud_and_ui_flow": _string_object_schema(UX_HUD_AND_UI_FLOW_FIELDS),
+                "visual_language_constraints": _string_object_schema(UX_VISUAL_LANGUAGE_CONSTRAINTS_FIELDS),
+                "accessibility_baseline": _string_object_schema(UX_ACCESSIBILITY_BASELINE_FIELDS),
+                "acceptance_tests": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(UX_ACCEPTANCE_TESTS_FIELDS),
+                    "properties": {
+                        field: {"type": "array", "items": {"type": "string"}}
+                        for field in UX_ACCEPTANCE_TESTS_FIELDS
+                    },
+                },
             },
         }
     return {"type": "string", "description": entry.schema_description()}
@@ -267,11 +392,32 @@ def empty_tech_stack() -> dict[str, str]:
     }
 
 
+def empty_user_experience_requirements() -> dict[str, Any]:
+    return {
+        "applicability": {
+            "applicability": "not_user_facing",
+            "not_user_facing_reason": "Grounding has not derived a user-facing surface yet.",
+        },
+        "experience_identity": {field: "" for field in UX_EXPERIENCE_IDENTITY_FIELDS},
+        "presentation_model": {field: "" for field in UX_PRESENTATION_MODEL_FIELDS},
+        "core_status_surfaces": {field: "" for field in UX_CORE_STATUS_SURFACES_FIELDS},
+        "entity_affordances": {field: "" for field in UX_ENTITY_AFFORDANCES_FIELDS},
+        "action_feedback_matrix": [],
+        "progression_legibility": {field: "" for field in UX_PROGRESSION_LEGIBILITY_FIELDS},
+        "hud_and_ui_flow": {field: "" for field in UX_HUD_AND_UI_FLOW_FIELDS},
+        "visual_language_constraints": {field: "" for field in UX_VISUAL_LANGUAGE_CONSTRAINTS_FIELDS},
+        "accessibility_baseline": {field: "" for field in UX_ACCESSIBILITY_BASELINE_FIELDS},
+        "acceptance_tests": {field: [] for field in UX_ACCEPTANCE_TESTS_FIELDS},
+    }
+
+
 def empty_value(entry: FieldRegistryEntry) -> Any:
     if entry.value_type == "string_array":
         return []
     if entry.value_type == "tech_stack":
         return empty_tech_stack()
+    if entry.value_type == "user_experience_requirements":
+        return empty_user_experience_requirements()
     return ""
 
 
@@ -316,6 +462,101 @@ def validate_tech_stack(value: object, *, require_choice: bool = True) -> bool:
     if value["build_strategy"] == "engine_based":
         engine = value["engine"].strip()
         if not engine or _names_browser_standards(engine):
+            return False
+    return True
+
+
+def validate_user_experience_requirements(value: object, *, require_completeness: bool = True) -> bool:
+    if not isinstance(value, dict) or set(value) != set(USER_EXPERIENCE_REQUIREMENTS_FIELDS):
+        return False
+    applicability = value.get("applicability")
+    if not isinstance(applicability, dict) or set(applicability) != set(UX_APPLICABILITY_FIELDS):
+        return False
+    kind = applicability.get("applicability")
+    reason = applicability.get("not_user_facing_reason")
+    if kind not in USER_EXPERIENCE_APPLICABILITY or not isinstance(reason, str):
+        return False
+    if kind == "not_user_facing":
+        if not reason.strip():
+            return False
+        return _validate_ux_shape(value)
+    if reason.strip():
+        return False
+    if not _validate_ux_shape(value):
+        return False
+    if not require_completeness:
+        return True
+    return _validate_user_facing_ux_completeness(value)
+
+
+def _validate_ux_shape(value: Mapping[str, Any]) -> bool:
+    object_fields = {
+        "experience_identity": UX_EXPERIENCE_IDENTITY_FIELDS,
+        "presentation_model": UX_PRESENTATION_MODEL_FIELDS,
+        "core_status_surfaces": UX_CORE_STATUS_SURFACES_FIELDS,
+        "entity_affordances": UX_ENTITY_AFFORDANCES_FIELDS,
+        "progression_legibility": UX_PROGRESSION_LEGIBILITY_FIELDS,
+        "hud_and_ui_flow": UX_HUD_AND_UI_FLOW_FIELDS,
+        "visual_language_constraints": UX_VISUAL_LANGUAGE_CONSTRAINTS_FIELDS,
+        "accessibility_baseline": UX_ACCESSIBILITY_BASELINE_FIELDS,
+    }
+    for field, expected_fields in object_fields.items():
+        item = value.get(field)
+        if not _is_string_object(item, expected_fields):
+            return False
+    matrix = value.get("action_feedback_matrix")
+    if not isinstance(matrix, list):
+        return False
+    if not all(_is_string_object(item, UX_ACTION_FEEDBACK_FIELDS) for item in matrix):
+        return False
+    acceptance = value.get("acceptance_tests")
+    if not isinstance(acceptance, dict) or set(acceptance) != set(UX_ACCEPTANCE_TESTS_FIELDS):
+        return False
+    for field in UX_ACCEPTANCE_TESTS_FIELDS:
+        checks = acceptance.get(field)
+        if not isinstance(checks, list) or not all(isinstance(check, str) for check in checks):
+            return False
+    return True
+
+
+def _is_string_object(value: object, fields: tuple[str, ...]) -> bool:
+    return isinstance(value, dict) and set(value) == set(fields) and all(
+        isinstance(value[field], str) for field in fields
+    )
+
+
+def _validate_user_facing_ux_completeness(value: Mapping[str, Any]) -> bool:
+    for field in (
+        "experience_identity",
+        "presentation_model",
+        "core_status_surfaces",
+        "entity_affordances",
+        "progression_legibility",
+        "hud_and_ui_flow",
+        "visual_language_constraints",
+        "accessibility_baseline",
+    ):
+        item = value.get(field)
+        if not isinstance(item, Mapping):
+            return False
+        if any(not str(item.get(key, "")).strip() for key in item):
+            return False
+    matrix = value.get("action_feedback_matrix")
+    if not isinstance(matrix, list) or not matrix:
+        return False
+    for row in matrix:
+        if not isinstance(row, Mapping):
+            return False
+        if not all(str(row.get(field, "")).strip() for field in UX_ACTION_FEEDBACK_FIELDS):
+            return False
+    acceptance = value.get("acceptance_tests")
+    if not isinstance(acceptance, Mapping):
+        return False
+    for field in UX_ACCEPTANCE_TESTS_FIELDS:
+        checks = acceptance.get(field)
+        if not isinstance(checks, list) or not checks:
+            return False
+        if not all(str(check).strip() for check in checks):
             return False
     return True
 

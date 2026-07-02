@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from ai_org import patch
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 RFC_ID = "add-feature-file"
 
@@ -46,6 +47,7 @@ def _repo(tmp_path: Path) -> Path:
                     "rationale": "Use the existing repository file layout.",
                     "provenance": "requester_specified",
                 },
+                "user_experience_requirements": empty_user_experience_requirements(),
                 "background_facts": "Keep the change focused.",
                 "constraints_assumptions": [],
                 "references": [],

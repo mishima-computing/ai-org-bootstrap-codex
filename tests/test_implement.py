@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from ai_org.patch import implement
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 RFC_ID = "add-feature-file"
 RFC_BRANCH = f"ai-org/rfc/{RFC_ID}"
@@ -28,6 +29,7 @@ def _rfc_view(title: str = "Add Feature File") -> dict[str, object]:
             "rationale": "Use the existing repository file layout.",
             "provenance": "requester_specified",
         },
+        "user_experience_requirements": empty_user_experience_requirements(),
         "background_facts": "Keep the change focused.",
         "constraints_assumptions": [],
         "references": [],
