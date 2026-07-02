@@ -29,6 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STORE_PATH = Path("~/.ai-org/reference/reference.sqlite3")
 
 ENTRY_FIELDS = ("term", "search_keywords", "examined", "candidates", "notes")
+PREHELD_FOUND_VIA = "org-preheld"
+PREHELD_AUTHOR_LEVEL = "org-experience (primary; learned from live runs)"
 IMPLEMENTATION_CANDIDATE_FIELDS = (
     "kind",
     "snippet",
@@ -59,6 +61,93 @@ DESIGN_CANDIDATE_FIELDS = (
 CANDIDATE_KINDS = {"implementation", "design"}
 REFERENCE_KIND_ORDER = ("implementation", "design")
 REFERENCE_RESEARCH_KINDS_PREFIX = "[reference-kinds:"
+ORG_PREHELD_LESSONS = (
+    {
+        "term": "codex output schema safe subset",
+        "kind": "design",
+        "facet": {
+            "structure": "Use only type, properties, required with all properties, additionalProperties:false, items, and enum. Description values must be strings. Do not use allOf, anyOf, oneOf, not, if, then, else, const, minLength, maxLength, pattern, or format because Codex rejects the schema, exits non-zero, and leaves output empty.",
+            "rationale": "OpenAI structured output restrictions were observed live as HTTP 400 invalid_json_schema when a schema used a non-string description.",
+            "when_to_use": "Use this subset for every Codex output schema that must survive live dispatch.",
+            "when_not_to_use": "Do not encode value constraints in the schema even when JSON Schema supports them generally.",
+            "tradeoffs": "The schema is weaker, so value constraints move into the prompt and deterministic post-validation.",
+            "alternatives": "Full JSON Schema was rejected because live Codex structured outputs do not accept the unsupported keywords.",
+            "implementation_hooks": "Keep guard coverage in tests/test_codex_output_schema_guard.py and validate semantic constraints after parsing.",
+            "quality_attributes": "Dispatch reliability, debuggability, deterministic validation.",
+            "evidence": "ai-org-bootstrap-codex@345bc17 root-cause fix; guard test tests/test_codex_output_schema_guard.py.",
+            "delta_claim": "Codex output schemas need a smaller safe subset than ordinary JSON Schema to avoid empty failed runs.",
+            "source_url": "ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py",
+        },
+    },
+    {
+        "term": "required all props payload artifact tolerance",
+        "kind": "design",
+        "facet": {
+            "structure": "Because required lists every property, models must emit mode-irrelevant payloads such as a children array when the declared mode says no children. Parsers must ignore mode-irrelevant payload as an artifact, record surplus counts, and never hard-fail on that surplus alone.",
+            "rationale": "A live five-children-discarded incident showed that required-all-properties schemas create artifacts that are not semantic commitments.",
+            "when_to_use": "Use this parsing rule when a schema requires all properties but a mode field determines which payloads are meaningful.",
+            "when_not_to_use": "Do not treat surplus mode-irrelevant payload as a contradiction by itself.",
+            "tradeoffs": "Tolerating surplus payload avoids false hard failures, but deterministic pre-checks must trigger a contradiction retry when they disagree with the declared mode.",
+            "alternatives": "Hard-failing surplus payload was rejected because it confuses schema artifacts with model intent.",
+            "implementation_hooks": "Record surplus payload counts, ignore irrelevant payloads during parse, and add a contradiction retry when deterministic checks disagree with the declared mode.",
+            "quality_attributes": "Parser robustness, recoverability, incident observability.",
+            "evidence": "ai-org-bootstrap-codex@871c99a and ai-org-bootstrap-codex@2f5f13b from the live five-children-discarded incident.",
+            "delta_claim": "Required-all-properties output schemas need parser tolerance for mode-irrelevant payload artifacts.",
+            "source_url": "ai-org-bootstrap-codex@871c99a; ai-org-bootstrap-codex@2f5f13b",
+        },
+    },
+    {
+        "term": "schema field mode naming discipline",
+        "kind": "design",
+        "facet": {
+            "structure": "Never carry mode semantics in an interpretable boolean. The field right_sized true was read as a claim that the model's split was right-sized. Use enums whose values are unambiguous sentences such as split or already_right_sized. Never name dependency edge endpoints from and to because two live inversions occurred. Use dependent and prerequisite, or per-child placement enums such as parallel_from_parent and serial_after_child.",
+            "rationale": "Live runs showed that ambiguous booleans and from/to edge names cause the model and parser to invert intended semantics.",
+            "when_to_use": "Use explicit enum values and role-named endpoints for every structured output field that controls a mode, relationship, or dependency direction.",
+            "when_not_to_use": "Do not use true or false when either value can be read as approval, quality, or success rather than a discrete mode.",
+            "tradeoffs": "Longer enum values add verbosity but remove a class of semantic inversion failures.",
+            "alternatives": "Short booleans and from/to endpoints were rejected after live misreads and edge inversions.",
+            "implementation_hooks": "Name dependency endpoints dependent and prerequisite, or place each child with parallel_from_parent or serial_after_child.",
+            "quality_attributes": "Semantic clarity, parser correctness, lower retry rate.",
+            "evidence": "ai-org-bootstrap-codex@2f5f13b and ai-org-bootstrap-codex@67563c5.",
+            "delta_claim": "Structured output field names must remove human-interpretable ambiguity, especially for modes and dependency direction.",
+            "source_url": "ai-org-bootstrap-codex@2f5f13b; ai-org-bootstrap-codex@67563c5",
+        },
+    },
+    {
+        "term": "child branch metadata inheritance hazard",
+        "kind": "design",
+        "facet": {
+            "structure": "Committing a parent-scope metadata file such as a ledger and then branching children from that tip makes every child inherit the file. Recursive readers can then loop, as seen in a live RecursionError. Create child branches with explicit deletions of parent-scope files and make readers verify file ownership, for example ledger.parent_branch equals the queried branch.",
+            "rationale": "Branch inheritance leaked parent metadata into child branches and recursive readers treated inherited files as child-owned state.",
+            "when_to_use": "Use this separation when branch-local metadata controls recursive traversal, lineage, or ownership decisions.",
+            "when_not_to_use": "Do not rely on branch ancestry alone to imply metadata ownership.",
+            "tradeoffs": "Explicit deletion and ownership checks add bookkeeping but prevent inherited metadata from creating traversal loops.",
+            "alternatives": "Implicit inheritance was rejected; Gerrit NoteDb-style separation is the safer model.",
+            "implementation_hooks": "Delete parent-scope metadata on child branch creation and check ledger.parent_branch before recursive reads.",
+            "quality_attributes": "Lineage correctness, isolation, loop prevention.",
+            "evidence": "ai-org-bootstrap-codex@67563c5; Gerrit NoteDb-style separation.",
+            "delta_claim": "Branch-local metadata must be deleted or ownership-checked when creating child branches from a parent tip.",
+            "source_url": "ai-org-bootstrap-codex@67563c5; Gerrit NoteDb-style separation",
+        },
+    },
+    {
+        "term": "codex sandbox git limitations",
+        "kind": "design",
+        "facet": {
+            "structure": "Codex workspace-write cannot create .git/index.lock, so commits can fail with Operation not permitted. The controller or Python layer must own git commits. Codex should leave changes in the working tree and report what changed.",
+            "rationale": "The limitation recurred across dispatches and is a sandbox boundary, not a transient repository problem.",
+            "when_to_use": "Use this ownership split whenever Codex operates in a managed workspace-write sandbox.",
+            "when_not_to_use": "Do not require Codex itself to create commits from inside the restricted workspace.",
+            "tradeoffs": "Controller-owned commits add orchestration responsibility but make git mutation reliable.",
+            "alternatives": "Codex-owned commits were rejected because index.lock creation can be blocked by sandbox permissions.",
+            "implementation_hooks": "Have Codex report working-tree changes and let the controller or Python wrapper perform git commit operations.",
+            "quality_attributes": "Operational reliability, clear responsibility boundaries.",
+            "evidence": "ai-org-bootstrap-codex@recurring-dispatches.",
+            "delta_claim": "Git commit ownership must sit outside Codex when the sandbox blocks .git/index.lock creation.",
+            "source_url": "ai-org-bootstrap-codex@recurring-dispatches",
+        },
+    },
+)
 TERM_KEY_FILLER_SUFFIXES = {"system", "systems", "mechanic", "mechanics"}
 TERM_KEY_FILLER_SUFFIX_PATTERN = re.compile(r"(?:^|\s)(" + "|".join(sorted(TERM_KEY_FILLER_SUFFIXES)) + r")$")
 EXAMINED_FIELDS = ("repo", "language", "outcome", "found_via")
@@ -521,6 +610,59 @@ def query(filters: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
             if _lang_env_matches_filter(candidate.get("lang_env_version", ""), requested_tokens)
         ]
     return candidates
+
+
+def add_preheld(
+    term: str,
+    kind: str,
+    facet: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist deterministic org-held knowledge without network or Codex calls."""
+    clean_kind = _preheld_kind(kind)
+    term_text = _clean_preheld_text(term, "term")
+    if not term_text:
+        raise ValueError("pre-held term must not be empty")
+    candidate = _preheld_candidate(clean_kind, facet, context or {})
+    entry = {
+        "term": term_text,
+        "search_keywords": [PREHELD_FOUND_VIA],
+        "examined": [
+            {
+                "repo": candidate["source_url"],
+                "language": candidate.get("lang_env_version", "general"),
+                "outcome": "kept",
+                "found_via": PREHELD_FOUND_VIA,
+            }
+        ],
+        "candidates": [candidate],
+        "notes": _notes_with_research_kinds(
+            "org-preheld: deterministic pre-held org lesson; no network or codex calls.",
+            (clean_kind,),
+        ),
+    }
+    _write_entry(entry)
+    return _public_research_entry(copy.deepcopy(entry))
+
+
+def seed_preheld_org_lessons() -> dict[str, Any]:
+    """Idempotently seed hard-won org lessons into the configured reference store."""
+    results: list[dict[str, Any]] = []
+    for lesson in ORG_PREHELD_LESSONS:
+        term = str(lesson["term"])
+        kind = str(lesson["kind"])
+        facet = lesson["facet"]
+        candidate = _preheld_candidate(_preheld_kind(kind), facet, {})
+        if _candidate_dedup_exists(term, candidate):
+            results.append({"term": term, "kind": kind, "stored": False})
+            continue
+        add_preheld(term, kind, facet)
+        results.append({"term": term, "kind": kind, "stored": True})
+    return {
+        "stored": sum(1 for result in results if result["stored"]),
+        "skipped": sum(1 for result in results if not result["stored"]),
+        "lessons": results,
+    }
 
 
 def expand(
@@ -2478,6 +2620,136 @@ def _lang_env_matches_filter(lang_env_version: str, requested_tokens: set[str]) 
         return True
     candidate_tokens = _version_tokens(lang_env_version)
     return requested_tokens.issubset(candidate_tokens) or bool(requested_tokens & candidate_tokens)
+
+
+def _preheld_kind(kind: str) -> str:
+    clean_kind = str(kind or "").strip().lower()
+    if clean_kind not in CANDIDATE_KINDS:
+        raise ValueError(f"invalid pre-held kind: {kind!r}")
+    return clean_kind
+
+
+def _preheld_candidate(
+    kind: str,
+    facet: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, str]:
+    if not isinstance(facet, Mapping):
+        raise ValueError("pre-held facet must be a mapping")
+    source_url = _preheld_source_url(facet)
+    lang_env_version = _preheld_lang_env_version(facet, context)
+    if kind == "design":
+        candidate = {
+            "kind": "design",
+            "structure": _preheld_field(facet, "structure", required=True),
+            "rationale": _preheld_field(facet, "rationale", required=True),
+            "when_to_use": _preheld_field(facet, "when_to_use", required=True),
+            "when_not_to_use": _preheld_field(
+                facet,
+                "when_not_to_use",
+                fallback_keys=("pitfalls",),
+                required=True,
+            ),
+            "tradeoffs": _preheld_field(facet, "tradeoffs", fallback_keys=("pitfalls",), required=True),
+            "alternatives": _preheld_field(facet, "alternatives", required=True),
+            "implementation_hooks": _preheld_field(facet, "implementation_hooks", required=True),
+            "quality_attributes": _preheld_field(facet, "quality_attributes", required=True),
+            "evidence": _preheld_field(facet, "evidence", default=source_url, required=True),
+            "delta_claim": _preheld_field(facet, "delta_claim", fallback_keys=("rationale",), required=True),
+            "author_level": PREHELD_AUTHOR_LEVEL,
+            "source_url": source_url,
+            "found_via": PREHELD_FOUND_VIA,
+            "lang_env_version": lang_env_version or "general",
+        }
+    else:
+        candidate = {
+            "kind": "implementation",
+            "snippet": _preheld_field(facet, "snippet", required=True, preserve_whitespace=True),
+            "summary": _preheld_field(facet, "summary", fallback_keys=("rationale",), required=True),
+            "source_url": source_url,
+            "lang_env_version": lang_env_version or "general",
+            "author_level": PREHELD_AUTHOR_LEVEL,
+            "pitfalls": _preheld_field(facet, "pitfalls", fallback_keys=("when_not_to_use",), required=True),
+            "found_via": PREHELD_FOUND_VIA,
+        }
+    stored = _stored_candidate(candidate)
+    if _candidate_kind(stored) != kind or not _valid_candidate(stored):
+        raise ValueError("invalid pre-held facet")
+    return stored
+
+
+def _preheld_field(
+    facet: Mapping[str, Any],
+    key: str,
+    *,
+    fallback_keys: tuple[str, ...] = (),
+    default: str = "",
+    required: bool = False,
+    preserve_whitespace: bool = False,
+) -> str:
+    value = facet.get(key)
+    if value is None or str(value).strip() == "":
+        for fallback_key in fallback_keys:
+            fallback = facet.get(fallback_key)
+            if fallback is not None and str(fallback).strip():
+                value = fallback
+                break
+    if value is None or str(value).strip() == "":
+        value = default
+    text = _clean_preheld_text(value, key, preserve_whitespace=preserve_whitespace)
+    if required and not text:
+        raise ValueError(f"pre-held facet field {key!r} must not be empty")
+    return text
+
+
+def _preheld_source_url(facet: Mapping[str, Any]) -> str:
+    source_url = _preheld_field(facet, "source_url")
+    if not source_url:
+        evidence = _preheld_field(facet, "evidence")
+        match = re.search(r"ai-org-bootstrap-codex@[A-Za-z0-9._/-]+", evidence)
+        source_url = evidence if match else ""
+    if "ai-org-bootstrap-codex@" not in source_url:
+        raise ValueError("pre-held source_url must reference ai-org-bootstrap-codex@ evidence")
+    return source_url
+
+
+def _preheld_lang_env_version(facet: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+    explicit = _preheld_field(facet, "lang_env_version")
+    if explicit:
+        return explicit
+    context_value = _clean_preheld_text(_context_lang_env_version(context), "context")
+    return context_value or "general"
+
+
+def _clean_preheld_text(value: Any, field: str, *, preserve_whitespace: bool = False) -> str:
+    text = str(value or "").strip()
+    if not preserve_whitespace:
+        text = " ".join(text.split())
+    if text and not text.isascii():
+        raise ValueError(f"pre-held {field} must be ASCII English text")
+    return text
+
+
+def _candidate_dedup_exists(term: str, candidate: Mapping[str, str]) -> bool:
+    path = _database_path()
+    if not path.exists():
+        return False
+    stored = _stored_candidate(candidate)
+    term_key = _normalize_term(term)
+    try:
+        with _connect_existing_database(path) as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM candidates
+                WHERE term_key = ? AND source_url = ? AND snippet = ?
+                LIMIT 1
+                """,
+                (term_key, stored["source_url"], stored.get("snippet", "")),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 def _valid_entry(value: Any) -> bool:

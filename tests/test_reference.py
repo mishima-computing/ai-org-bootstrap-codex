@@ -1610,6 +1610,90 @@ def test_lookup_and_query_filter_by_kind_and_design_append_only(monkeypatch, tmp
     assert [attempt["attempt"] for attempt in audit["research"]] == [1, 2, 3]
 
 
+def test_add_preheld_writes_dedups_and_lookup_returns_consumption_fields(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+    facet = {
+        "structure": "Keep structured output schemas inside the Codex safe subset.",
+        "rationale": "Live runs showed invalid_json_schema failures for unsupported keywords.",
+        "when_to_use": "Use for every Codex output schema.",
+        "when_not_to_use": "Do not use broad JSON Schema constraints with Codex output schemas.",
+        "tradeoffs": "Move value constraints into prompts and deterministic post-validation.",
+        "alternatives": "Full JSON Schema was rejected by live Codex runs.",
+        "implementation_hooks": "Guard schemas in tests and post-validate parsed values.",
+        "quality_attributes": "Reliability and deterministic validation.",
+        "evidence": "ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py.",
+        "delta_claim": "The Codex schema subset is smaller than ordinary JSON Schema.",
+        "source_url": "ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py",
+    }
+
+    first = reference.add_preheld("codex output schema safe subset", "design", facet)
+    changed = {**facet, "structure": "Changed text that must not overwrite the original candidate."}
+    second = reference.add_preheld("codex output schema safe subset", "design", changed)
+
+    lookup = reference.lookup("codex output schema safe subset", kind="design")
+    audit = reference.audit("codex output schema safe subset")
+    with sqlite3.connect(db_path) as connection:
+        research_count = connection.execute("SELECT count(*) FROM research").fetchone()[0]
+        candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
+
+    assert first["search_keywords"] == ["org-preheld"]
+    assert second["search_keywords"] == ["org-preheld"]
+    assert audit is not None
+    assert lookup is not None
+    assert research_count == 2
+    assert candidate_count == 1
+    assert [attempt["search_keywords"] for attempt in audit["research"]] == [["org-preheld"], ["org-preheld"]]
+    assert audit["research"][0]["examined"] == [
+        {
+            "repo": "ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py",
+            "language": "general",
+            "outcome": "kept",
+            "found_via": "org-preheld",
+        }
+    ]
+    assert audit["candidates"][0]["structure"] == facet["structure"]
+    assert "Changed text" not in audit["candidates"][0]["structure"]
+    assert lookup["candidates"][0]["author_level"] == "org-experience (primary; learned from live runs)"
+    assert lookup["candidates"][0]["source_url"] == "ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py"
+    assert lookup["candidates"][0]["kind"] == "design"
+    assert "found_via" not in lookup["candidates"][0]
+
+
+def test_seed_preheld_org_lessons_is_idempotent_and_append_only(monkeypatch, tmp_path):
+    db_path = tmp_path / "reference.sqlite3"
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
+
+    first = reference.seed_preheld_org_lessons()
+    with sqlite3.connect(db_path) as connection:
+        first_research_count = connection.execute("SELECT count(*) FROM research").fetchone()[0]
+        first_candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
+        first_candidate_ids = [row[0] for row in connection.execute("SELECT id FROM candidates ORDER BY id").fetchall()]
+    second = reference.seed_preheld_org_lessons()
+    with sqlite3.connect(db_path) as connection:
+        second_research_count = connection.execute("SELECT count(*) FROM research").fetchone()[0]
+        second_candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
+        second_candidate_ids = [row[0] for row in connection.execute("SELECT id FROM candidates ORDER BY id").fetchall()]
+
+    assert first["stored"] == 5
+    assert first["skipped"] == 0
+    assert second["stored"] == 0
+    assert second["skipped"] == 5
+    assert first_research_count == 5
+    assert first_candidate_count == 5
+    assert second_research_count == first_research_count
+    assert second_candidate_count == first_candidate_count
+    assert second_candidate_ids == first_candidate_ids
+
+    lookup = reference.lookup("required all props payload artifact tolerance", kind="design")
+    assert lookup is not None
+    assert len(lookup["candidates"]) == 1
+    candidate = lookup["candidates"][0]
+    assert candidate["author_level"] == "org-experience (primary; learned from live runs)"
+    assert "mode-irrelevant payload" in candidate["structure"]
+    assert candidate["source_url"] == "ai-org-bootstrap-codex@871c99a; ai-org-bootstrap-codex@2f5f13b"
+
+
 def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch, tmp_path):
     db_path = tmp_path / "reference.sqlite3"
     monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(db_path))
