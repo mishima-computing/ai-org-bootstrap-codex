@@ -25,7 +25,11 @@ def default_no_design_lane(monkeypatch):
     monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: [])
 
 
-def _design_candidate(source_url="https://example.com/design", delta_claim="Use leases only if crash recovery matters."):
+def _design_candidate(
+    source_url="https://example.com/design",
+    delta_claim="Use leases only if crash recovery matters.",
+    found_via="job queue architecture",
+):
     return {
         "kind": "design",
         "structure": "Components, responsibilities, boundaries, and flow are explicit.",
@@ -40,9 +44,129 @@ def _design_candidate(source_url="https://example.com/design", delta_claim="Use 
         "delta_claim": delta_claim,
         "author_level": "unknown",
         "source_url": source_url,
-        "found_via": "job queue architecture",
+        "found_via": found_via,
         "lang_env_version": "general",
     }
+
+
+def test_completeness_profile_derives_game_deliverable_kind_from_ux_and_platform(monkeypatch):
+    calls = []
+    rfc_view = {
+        "request_type": "game_app",
+        "tech_stack": {"platform": "browser"},
+        "user_experience_requirements": {
+            "experience_identity": {
+                "named_reference": "Dragon Quest command menus.",
+                "genre_conventions": "Classic JRPG exploration and battle readability.",
+                "must_resemble": "Command windows and party status.",
+            }
+        },
+    }
+
+    def fake_expand(term, context=None, **kwargs):
+        calls.append((term, context, kwargs))
+        return {"term": term, "candidates": [_design_candidate()]}
+
+    monkeypatch.setattr(reference, "expand", fake_expand)
+
+    result = reference.build_completeness_profile(rfc_view, {"repo": Path("/tmp/repo")})
+
+    assert result["deliverable_kind"] == "browser command based JRPG game"
+    assert result["term"] == "browser command based JRPG game specification completeness profile"
+    assert result["term_key"] == "browser command based jrpg game specification completeness profile"
+    assert result["kept"] == 1
+    assert result["design_kept"] == 1
+    assert calls[0][1]["_reference_design_profile_query"] is True
+    assert calls[0][2] == {"force": False, "kinds": ("design",)}
+
+
+def test_completeness_profile_deliverable_kind_degrades_for_cli_and_missing_fields(monkeypatch):
+    terms = []
+
+    def fake_expand(term, context=None, **kwargs):
+        terms.append(term)
+        return {"term": term, "candidates": []}
+
+    monkeypatch.setattr(reference, "expand", fake_expand)
+
+    cli = reference.build_completeness_profile(
+        {
+            "request_type": "feature",
+            "working_title": "Add CLI tool",
+            "tech_stack": {"platform": "CLI"},
+        }
+    )
+    missing = reference.build_completeness_profile({})
+
+    assert cli["deliverable_kind"] == "CLI tool"
+    assert cli["term"] == "CLI tool specification completeness profile"
+    assert missing["deliverable_kind"] == "deliverable"
+    assert missing["term"] == "deliverable specification completeness profile"
+    assert terms == [
+        "CLI tool specification completeness profile",
+        "deliverable specification completeness profile",
+    ]
+
+
+def test_completeness_profile_term_variants_share_stable_term_key():
+    first = reference._completeness_profile_term("Browser command-based JRPG game")
+    second = reference._completeness_profile_term(" browser command based jrpg game ")
+
+    assert first == second
+    assert reference._normalize_term(first) == reference._normalize_term(second)
+
+
+def test_design_profile_prompt_asks_completeness_question():
+    prompt = reference._design_search_keywords_prompt(
+        "browser command based JRPG game specification completeness profile",
+        {"_reference_design_profile_query": True},
+    )
+
+    assert "complete specification" in prompt
+    assert "numeric rules" in prompt
+    assert "tables" in prompt
+    assert "how-to-build tutorials" in prompt
+
+
+def test_build_completeness_profile_honors_recent_research_skip(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_ORG_REFERENCE_STORE", str(tmp_path / "reference.sqlite3"))
+    monkeypatch.setattr(reference, "_codex_design_search_keywords", lambda term, context: ["jrpg specification checklist"])
+    monkeypatch.setattr(reference, "fetch_design_candidates", lambda term, context: [_design_candidate(found_via="jrpg specification checklist")])
+    monkeypatch.setattr(
+        reference,
+        "_codex_design_delta_inclusion",
+        lambda term, context, candidate: {"keep": True, "reason": "Spec tables and quantities are a real delta."},
+    )
+    monkeypatch.setattr(
+        reference,
+        "_codex_design_competence",
+        lambda term, context, candidate: {"keep": True, "author_level": "high", "reason": "Published checklist."},
+    )
+    rfc_view = {
+        "request_type": "game_app",
+        "tech_stack": {"platform": "browser"},
+        "user_experience_requirements": {
+            "experience_identity": {
+                "named_reference": "Dragon Quest command menus.",
+                "genre_conventions": "Classic JRPG.",
+                "must_resemble": "Command menus.",
+            }
+        },
+    }
+
+    first = reference.build_completeness_profile(rfc_view)
+    monkeypatch.setattr(
+        reference,
+        "fetch_design_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("recent profile should not refetch")),
+    )
+
+    second = reference.build_completeness_profile(rfc_view)
+
+    assert first["status"] == "expanded"
+    assert first["kept"] == 1
+    assert second["status"] == "skipped_recent"
+    assert second["kept"] == 1
 
 
 def test_fetch_candidates_uses_derived_repo_search_not_literal_term(monkeypatch):

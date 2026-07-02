@@ -43,6 +43,7 @@
 #                                  unspecified otherwise. Franchise/domain stack precedent is background_facts
 #                                  evidence, never a stack decision rule.
 #   2. reference.build_from_rfc -> POPULATE the single org-level Reference with THIS RFC's concepts.
+#      reference.build_completeness_profile -> ask the gap-directed design question for this deliverable kind.
 #                                  DESIGN facets are synchronous: the RFC WAITS because 3 consumes them.
 #                                  IMPLEMENTATION facets are background: the RFC does NOT wait; this warms patch.
 #   3. form_technical_approach  -> CONSUME the Reference by lookup to propose HOW to build it
@@ -71,6 +72,10 @@
 # inline reference.expand() band-aid. FIX (current): ② runs first and RETURNS its exact ordered term list;
 # form_technical_approach threads THOSE terms into ③, which CONSUMES them by lookup (no re-extract). Reference
 # BUILD keys == Reference READ keys, by construction. Inline expand survives ONLY as a fallback when ② is skipped.
+#
+# Memento: the well answers only the questions asked. Component extraction researches what the RFC mentions;
+# the completeness profile asks what a spec of this kind must declare. This gap-directed query was added after
+# a live expedition proved the missing-question hole (evidence: dq_expedition report).
 #
 # SEARCH TIMEOUT (correctness, not speed): a single codex Reference search once hung 36 minutes and stalled the
 # whole pipeline. reference search subprocess calls are bounded by AI_ORG_REFERENCE_SEARCH_TIMEOUT (default 180s);
@@ -1159,6 +1164,7 @@ def produce_rfc(
     approach_context = _technical_approach_context(None, repo_path)
     design_build = reference.build_from_rfc(rfc, approach_context, kinds=("design",))
     design_terms = _reference_terms_from_build_result(design_build)
+    completeness_profile = reference.build_completeness_profile(rfc, approach_context)
     reference.start_background_build(rfc, approach_context, kinds=("implementation",))
     # Keep the entrypoint from pinning a stack; hardcoded language/environment/version forecloses engine/platform alternatives.
     approach = form_technical_approach(
@@ -1197,6 +1203,7 @@ def produce_rfc(
         "branch": branch,
         "commit": written["commit"],
         "technical_approach_path": "technical-approach.json",
+        "reference_completeness_profile": _json_safe(completeness_profile),
         "grounding_notes": grounding.grounding_notes,
     }
 

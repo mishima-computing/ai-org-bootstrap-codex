@@ -21,6 +21,21 @@ from ai_org.rfc.receive import (
 )
 
 
+@pytest.fixture(autouse=True)
+def default_no_completeness_profile(monkeypatch):
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_completeness_profile",
+        lambda *args, **kwargs: {
+            "status": "skipped_test",
+            "term": "test specification completeness profile",
+            "term_key": "test specification completeness profile",
+            "kept": 0,
+            "design_kept": 0,
+        },
+    )
+
+
 def test_receive_validates_raw_request_only_from_dict():
     request = {
         "raw_request": "Make Dragon Quest.",
@@ -198,16 +213,36 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
         assert "version" not in context
         return {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}}
 
+    def fake_build_completeness_profile(rfc_view, context=None, **kwargs):
+        calls.append("build_completeness_profile")
+        assert calls == ["build_from_rfc", "build_completeness_profile"]
+        assert rfc_view == grounded
+        assert context["repo"] == repo.resolve()
+        assert kwargs == {}
+        return {
+            "status": "expanded",
+            "deliverable_kind": "software deliverable",
+            "term": "software deliverable specification completeness profile",
+            "term_key": "software deliverable specification completeness profile",
+            "kept": 2,
+            "design_kept": 2,
+        }
+
     def fake_start_background_build(rfc_view, context=None, **kwargs):
         calls.append("start_background_build")
-        assert calls == ["build_from_rfc", "start_background_build"]
+        assert calls == ["build_from_rfc", "build_completeness_profile", "start_background_build"]
         assert kwargs == {"kinds": ("implementation",)}
         assert context["repo"] == repo.resolve()
         return object()
 
     def fake_form_technical_approach(rfc_view, repo_path, **kwargs):
         calls.append("form_technical_approach")
-        assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
+        assert calls == [
+            "build_from_rfc",
+            "build_completeness_profile",
+            "start_background_build",
+            "form_technical_approach",
+        ]
         assert repo_path == repo.resolve()
         assert kwargs["context"]["repo"] == repo.resolve()
         assert kwargs["reference_terms"] == ["battle loop"]
@@ -217,6 +252,7 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
         return {"ok": True, "technical_approach": approach_tree}
 
     monkeypatch.setattr(receive_module.reference, "build_from_rfc", fake_build_from_rfc)
+    monkeypatch.setattr(receive_module.reference, "build_completeness_profile", fake_build_completeness_profile)
     monkeypatch.setattr(receive_module.reference, "start_background_build", fake_start_background_build)
     monkeypatch.setattr(receive_module, "form_technical_approach", fake_form_technical_approach)
 
@@ -228,6 +264,14 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     assert result["branch"] == "ai-org/rfc/manual-intake"
     assert result["commit"] == _git(repo, "rev-parse", "refs/heads/ai-org/rfc/manual-intake")
     assert result["technical_approach_path"] == "technical-approach.json"
+    assert result["reference_completeness_profile"] == {
+        "status": "expanded",
+        "deliverable_kind": "software deliverable",
+        "term": "software deliverable specification completeness profile",
+        "term_key": "software deliverable specification completeness profile",
+        "kept": 2,
+        "design_kept": 2,
+    }
     assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "refs/heads/main")
     assert _git(repo, "show", "main:README.md") == "base"
     produced = json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:rfc.json"))
@@ -235,7 +279,12 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     assert _implement_is_registry_rfc(produced)
     assert "custom_priority" not in produced
     assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:technical-approach.json")) == approach_tree
-    assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
+    assert calls == [
+        "build_from_rfc",
+        "build_completeness_profile",
+        "start_background_build",
+        "form_technical_approach",
+    ]
 
 
 def test_produce_rfc_forwards_progress_path(tmp_path, monkeypatch):

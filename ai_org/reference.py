@@ -879,6 +879,138 @@ def build_from_rfc(
     }
 
 
+def build_completeness_profile(
+    rfc_view: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Build the design-lane specification-completeness profile for an RFC deliverable kind."""
+    build_context = dict(context or {})
+    deliverable_kind = _deliverable_kind_from_rfc_view(rfc_view)
+    term = _completeness_profile_term(deliverable_kind)
+    build_context["_reference_design_profile_query"] = True
+
+    recent_entry: dict[str, Any] | None = None
+    if not force and not _reference_force_enabled():
+        recent_entry = _recent_research_entry(term, ("design",))
+    if recent_entry is not None:
+        return _completeness_profile_result(deliverable_kind, term, recent_entry, "skipped_recent")
+
+    entry = expand(term, build_context, force=force, kinds=("design",))
+    return _completeness_profile_result(deliverable_kind, term, entry, "expanded")
+
+
+def _completeness_profile_result(
+    deliverable_kind: str,
+    term: str,
+    entry: Mapping[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    candidates = entry.get("candidates")
+    kept = [candidate for candidate in candidates if isinstance(candidate, Mapping)] if isinstance(candidates, list) else []
+    design_kept = [candidate for candidate in kept if _candidate_kind(candidate) == "design"]
+    return {
+        "status": status,
+        "deliverable_kind": deliverable_kind,
+        "term": term,
+        "term_key": _normalize_term(term),
+        "kept": len(kept),
+        "design_kept": len(design_kept),
+    }
+
+
+def _completeness_profile_term(deliverable_kind: str) -> str:
+    kind = _canonical_deliverable_phrase(deliverable_kind) or "deliverable"
+    return f"{kind} specification completeness profile"
+
+
+def _deliverable_kind_from_rfc_view(rfc_view: Mapping[str, Any]) -> str:
+    request_type = _canonical_deliverable_phrase(str(rfc_view.get("request_type") or ""))
+    affected = _canonical_deliverable_phrase(str(rfc_view.get("affected_area_platform") or ""))
+    title = _canonical_deliverable_phrase(str(rfc_view.get("working_title") or ""))
+    tech_stack = rfc_view.get("tech_stack")
+    platform = ""
+    if isinstance(tech_stack, Mapping):
+        platform = _platform_deliverable_phrase(str(tech_stack.get("platform") or ""))
+    ux_phrase = _ux_deliverable_phrase(rfc_view.get("user_experience_requirements"))
+
+    base = _request_type_deliverable_phrase(request_type, affected, title, platform)
+    parts: list[str] = []
+    if platform:
+        parts.append(platform)
+    if ux_phrase:
+        parts.append(ux_phrase)
+    parts.append(base)
+    return _canonical_deliverable_phrase(" ".join(parts)) or "deliverable"
+
+
+def _request_type_deliverable_phrase(request_type: str, affected: str, title: str, platform: str) -> str:
+    if "game" in request_type:
+        return "game"
+    if "tool" in request_type:
+        return "tool"
+    if platform.lower() == "cli" or any("cli" in value or "command line" in value for value in (affected, title)):
+        return "tool"
+    if "app" in request_type or "application" in request_type:
+        return "app"
+    if request_type in {"policy", "research", "refactor"}:
+        return f"{request_type} deliverable"
+    if request_type in {"feature", "bug"}:
+        return "software deliverable"
+    return request_type or affected or "deliverable"
+
+
+def _platform_deliverable_phrase(value: str) -> str:
+    phrase = _canonical_deliverable_phrase(value)
+    if phrase in {"command line", "command line interface", "terminal", "cli"}:
+        return "CLI"
+    return phrase
+
+
+def _ux_deliverable_phrase(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    identity = value.get("experience_identity")
+    if not isinstance(identity, Mapping):
+        return ""
+    text = " ".join(str(identity.get(field) or "") for field in ("named_reference", "genre_conventions", "must_resemble"))
+    lowered = text.lower()
+    parts: list[str] = []
+    if "command" in lowered:
+        parts.append("command based")
+    if "jrpg" in lowered:
+        parts.append("JRPG")
+    elif "rpg" in lowered:
+        parts.append("RPG")
+    elif "dungeon" in lowered:
+        parts.append("dungeon")
+    elif "arcade" in lowered:
+        parts.append("arcade")
+    return _canonical_deliverable_phrase(" ".join(parts))
+
+
+def _canonical_deliverable_phrase(value: str) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("&", " and ")
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    cleaned: list[str] = []
+    for token in tokens:
+        lower = token.lower()
+        if lower in {"a", "an", "the", "for", "of", "to"}:
+            continue
+        if lower == "app":
+            cleaned.append("app")
+        elif lower == "jrpg":
+            cleaned.append("JRPG")
+        elif lower == "rpg":
+            cleaned.append("RPG")
+        elif lower == "cli":
+            cleaned.append("CLI")
+        else:
+            cleaned.append(lower)
+    return " ".join(cleaned)
+
+
 def _build_rfc_term(
     term: str,
     context: Mapping[str, Any],
@@ -1946,6 +2078,19 @@ def _search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
 
 
 def _design_search_keywords_prompt(term: str, context: Mapping[str, Any]) -> str:
+    if _is_completeness_profile_context(context):
+        return (
+            "Derive design-oriented search queries for finding real practice sources that answer this "
+            "profile question: what must a complete specification for this kind of deliverable declare? "
+            "Prefer queries that find genre design-document templates, specification checklists, published "
+            "requirements docs, design docs, and postmortems. Target sections, numeric rules, tables, "
+            "content declarations, and scale quantities, not how-to-build tutorials.\n"
+            f"Reference target term: {term}\n"
+            f"Consuming stack context: {_json_for_prompt(context)}\n"
+            "Rules: English only; include specification, checklist, template, requirements, design document, "
+            "or postmortem words when useful; keep each query specific enough to find practice material. "
+            "Return only schema JSON."
+        )
     return (
         "Derive design-oriented search queries for finding architecture and pattern knowledge for this "
         "concept. This is a separate design lane, not a code search. Prefer queries that find ADRs, RFCs, "
@@ -1975,6 +2120,18 @@ def _extract_prompt(term: str, context: Mapping[str, Any], repo: str, path: str,
 
 
 def _design_web_sources_prompt(keywords: list[str], context: Mapping[str, Any]) -> str:
+    if _is_completeness_profile_context(context):
+        return (
+            "Use web search to find primary or high-quality sources for these specification-completeness "
+            "profile queries. Prefer genre design-document templates, spec checklists, published product "
+            "requirements docs, real game or software design docs, and postmortems that name missing-spec "
+            "failures. Avoid shallow commentary unless it declares concrete sections, numeric rules, "
+            "tables, content inventories, acceptance criteria, or scale quantities. Return concise source "
+            "excerpts or summaries in content; do not invent URLs.\n"
+            f"Design queries: {_json_for_prompt(keywords)}\n"
+            f"Consuming stack context: {_json_for_prompt(context)}\n"
+            "Return only schema JSON."
+        )
     return (
         "Use web search to find primary or high-quality design sources for these architecture/pattern "
         "queries. Prefer accepted or merged RFCs, PEPs, KEPs, ADRs, project architecture docs, pattern "
@@ -1988,6 +2145,21 @@ def _design_web_sources_prompt(keywords: list[str], context: Mapping[str, Any]) 
 
 
 def _extract_design_prompt(term: str, context: Mapping[str, Any], source_url: str, content: str) -> str:
+    if _is_completeness_profile_context(context):
+        return (
+            "Extract specification-completeness knowledge for the target deliverable profile from this "
+            "source. Capture what a complete specification for this kind of deliverable must declare: "
+            "required sections, numeric rules, tables, content declarations, scale quantities, acceptance "
+            "criteria, and boundary decisions. Do not extract how-to-build advice unless it identifies a "
+            "spec field that must be declared.\n"
+            f"Reference target term: {term}\n"
+            f"Consuming stack context: {_json_for_prompt(context)}\n"
+            f"Source URL: {source_url}\n"
+            f"Source content:\n{content}\n"
+            "Evidence must mention source status or real-practice basis when present, such as template, "
+            "requirements doc, published design doc, production use, postmortem, or checklist. Return only "
+            "schema JSON."
+        )
     return (
         "Extract design knowledge for the target concept from this source. Do not pretend there is a code "
         "snippet. Capture structure as components, responsibilities, boundaries, and flow. Keep only "
@@ -2077,6 +2249,10 @@ def _author_prompt(term: str, context: Mapping[str, Any], candidate: Mapping[str
         f"Candidate:\n{_json_for_prompt(candidate)}\n"
         "Use a short author_level such as low, medium, high, expert, or unknown. Return only schema JSON."
     )
+
+
+def _is_completeness_profile_context(context: Mapping[str, Any]) -> bool:
+    return bool(context.get("_reference_design_profile_query"))
 
 
 def _reference_terms_prompt(text: str, context: Mapping[str, Any]) -> str:
