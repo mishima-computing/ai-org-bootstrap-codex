@@ -95,6 +95,15 @@ def head_sha(repo, ref: str) -> str | None:
     return sha or None
 
 
+def path_last_commit(repo, ref: str, path: str) -> str | None:
+    """Return the newest commit at ref that changed path, or None."""
+    result = _git(Path(repo), "log", "-n", "1", "--format=%H", ref, "--", path)
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
 def parent_commits(repo, ref: str) -> list[str]:
     """Return the first-parent list for a commit/ref."""
     result = _git(Path(repo), "rev-list", "--parents", "-n", "1", ref)

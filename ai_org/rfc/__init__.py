@@ -66,13 +66,33 @@ def pull(repo, *, progress_path: str | Path | None = None):
             return lineage.refine(repo, branch)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if lineage.rebaseline_pending(repo, branch):
+            return lineage.rebaseline(repo, branch)
+
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if lineage.stale_revalidation_pending(repo, branch):
+            return lineage.revalidate_stale(repo, branch)
+
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if lineage.coarse_ready(repo, branch):
             return lineage.elaborate(repo, branch)
     return None
 
 
 def _is_terminal_rfc(repo, branch: str) -> bool:
-    return git_wrapper.has_subject(repo, branch, "rfc: direction-ok") or git_wrapper.has_subject(repo, branch, "rfc: nak")
+    if git_wrapper.has_subject(repo, branch, "rfc: nak"):
+        return True
+    default = git_wrapper.default_branch(repo)
+    if branch != default and git_wrapper.is_ancestor(repo, branch, default):
+        return True
+    for subject in git_wrapper.log_subjects(repo, branch):
+        if "rfc: needs-revision round " in subject:
+            return False
+        if subject.startswith("rfc v"):
+            return False
+        if "rfc: direction-ok" in subject:
+            return True
+    return False
 
 
 def _latest_needs_revision_is_head(repo, branch: str) -> bool:

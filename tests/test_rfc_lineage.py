@@ -294,7 +294,112 @@ def test_escalate_blocks_child_rebaselines_parent_and_marks_dependents_stale(tmp
     assert prep_meta["lifecycle_status"] == "blocked:parent-invalidated"
     assert prep_meta["escalation_evidence"]["evidence"] == "parent acceptance no longer matches"
     assert battle_meta["lifecycle_status"] == "stale"
-    assert git_wrapper.has_subject(repo, "ai-org/rfc/root", "rfc: needs-revision lineage parent invalidated")
+    assert battle_meta["stale_ledger_commit"] == result["ledger_commit"]
+    assert git_wrapper.has_subject(repo, "ai-org/rfc/root", "rfc: needs-revision round 1")
+    record = json.loads((repo / ".ai-org/review/root/round-1.json").read_text(encoding="utf-8"))
+    assert record["lineage_escalation"] is True
+    assert record["verdict"] == "needs_revision"
+    assert record["objections"][0]["axis"] == "scope"
+    assert record["objections"][0]["type"] == "blocking"
+    assert record["objections"][0]["evidence"][0]["citation"]
+
+
+def test_rfc_pull_reforms_escalated_parent_despite_older_direction_ok(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root")
+    lineage.escalate(repo, result["children"][0]["branch"], {"evidence": "parent scope drift"})
+    calls: list[str] = []
+
+    monkeypatch.setattr(rfc.receive, "reform_rfc", lambda _repo, rfc_id: calls.append(rfc_id) or {"status": "reformed"})
+    monkeypatch.setattr(rfc.review, "run_rfc_review", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not review")))
+
+    assert rfc.pull(repo)["status"] == "reformed"
+    assert calls == ["root"]
+
+
+def test_rfc_pull_reviews_parent_after_escalation_v2_commit(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root")
+    lineage.escalate(repo, result["children"][0]["branch"], {"evidence": "parent scope drift"})
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc v2: Battle Slice")
+    calls: list[str] = []
+
+    monkeypatch.setattr(rfc.receive, "reform_rfc", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reform")))
+    monkeypatch.setattr(rfc.review, "run_rfc_review", lambda _repo, rfc_id: calls.append(rfc_id) or {"status": "reviewed"})
+
+    assert rfc.pull(repo)["status"] == "reviewed"
+    assert calls == ["root"]
+
+
+def test_rfc_pull_rebaselines_parent_after_escalation_v2_direction_ok(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root")
+    lineage.escalate(repo, result["children"][0]["branch"], {"evidence": "parent scope drift"})
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc v2: Battle Slice")
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc: direction-ok")
+    calls: list[str] = []
+
+    monkeypatch.setattr(rfc.lineage, "rebaseline", lambda _repo, branch: calls.append(branch) or {"status": "rebaselined"})
+
+    assert rfc.pull(repo)["status"] == "rebaselined"
+    assert calls == ["ai-org/rfc/root"]
+
+
+def test_rebaseline_versions_ledger_and_revalidate_stale_unchanged_child(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope(), _split_all_scope()])
+    result = lineage.refine(repo, "root")
+    prep = result["children"][0]["branch"]
+    battle = result["children"][1]["branch"]
+    lineage.escalate(repo, prep, {"evidence": "parent scope drift"})
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc v2: Battle Slice")
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc: direction-ok")
+
+    rebaseline = lineage.rebaseline(repo, "ai-org/rfc/root")
+
+    assert rebaseline["ok"] is True
+    assert rebaseline["status"] == "rebaselined"
+    ledger = json.loads(_git(repo, "show", "ai-org/rfc/root:lineage-ledger.json"))
+    assert ledger["ledger_revision"] == 2
+    assert ledger["supersedes_ledger_commit"] == result["ledger_commit"]
+    assert ledger["rebaselined_from_escalation"]["review_round"] == 1
+    assert lineage.stale_revalidation_pending(repo, battle) is True
+
+    revalidated = lineage.revalidate_stale(repo, battle)
+
+    assert revalidated["ok"] is True
+    assert revalidated["status"] == "reactivated"
+    battle_meta = json.loads(_git(repo, "show", f"{battle}:rfc-metadata.json"))
+    assert battle_meta["lifecycle_status"] == "active"
+    assert battle_meta["ledger_commit"] == rebaseline["ledger_commit"]
+
+
+def test_revalidate_stale_blocks_changed_parent_contract(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    changed = _split_with_battle_scope_changed()
+    _install_codex_fake(monkeypatch, [_split_all_scope(), changed])
+    result = lineage.refine(repo, "root")
+    prep = result["children"][0]["branch"]
+    battle = result["children"][1]["branch"]
+    lineage.escalate(repo, prep, {"evidence": "parent scope drift"})
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc v2: Battle Slice")
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc: direction-ok")
+    lineage.rebaseline(repo, "ai-org/rfc/root")
+
+    revalidated = lineage.revalidate_stale(repo, battle)
+
+    assert revalidated["ok"] is False
+    assert revalidated["status"] == "blocked:parent-rebaseline-changed"
+    battle_meta = json.loads(_git(repo, "show", f"{battle}:rfc-metadata.json"))
+    assert battle_meta["lifecycle_status"] == "blocked:parent-rebaseline-changed"
 
 
 def test_leaf_child_is_not_split_pending_and_is_right_sized(tmp_path):
@@ -341,6 +446,55 @@ def test_elaborate_waits_for_resolved_dependencies(tmp_path, monkeypatch):
     elaborated = lineage.elaborate(repo, battle)
     assert elaborated["ok"] is True
     assert elaborated["status"] == "right-sized"
+
+
+def test_stale_coarse_child_is_not_elaborated_until_revalidated(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root", horizon=1)
+    prep = result["children"][0]["branch"]
+    battle = result["children"][1]["branch"]
+    lineage.mark_stale(repo, [battle], "fixture stale", superseded_ledger_commit=result["ledger_commit"])
+
+    contrib = _write_contrib_branch(repo, prep, "ai-org/rfc/root")
+    git_wrapper.commit_empty(repo, prep, "acceptance: passed")
+    _merge(repo, "ai-org/rfc/root", contrib)
+
+    assert lineage.coarse_ready(repo, battle) is False
+    assert lineage.elaborate(repo, battle)["status"] == "blocked-by-dependencies"
+
+
+def test_escalate_refuses_nak_parent_without_blocking_child(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root")
+    prep = result["children"][0]["branch"]
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "rfc: nak")
+
+    escalation = lineage.escalate(repo, prep, {"evidence": "too late"})
+
+    assert escalation["ok"] is False
+    assert escalation["status"] == "parent-terminal-nak"
+    prep_meta = json.loads(_git(repo, "show", f"{prep}:rfc-metadata.json"))
+    assert prep_meta["lifecycle_status"] == "active"
+
+
+def test_escalate_refuses_merged_parent_without_blocking_child(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    _install_codex_fake(monkeypatch, [_split_all_scope()])
+    result = lineage.refine(repo, "root")
+    prep = result["children"][0]["branch"]
+    _merge(repo, "main", "ai-org/rfc/root")
+
+    escalation = lineage.escalate(repo, prep, {"evidence": "too late"})
+
+    assert escalation["ok"] is False
+    assert escalation["status"] == "parent-merged-to-default"
+    prep_meta = json.loads(_git(repo, "show", f"{prep}:rfc-metadata.json"))
+    assert prep_meta["lifecycle_status"] == "active"
 
 
 def test_lineage_schema_is_codex_safe_subset_and_uses_unambiguous_modes():
@@ -562,6 +716,19 @@ def _split_all_scope() -> dict[str, object]:
             ),
         ],
     }
+
+
+def _split_with_battle_scope_changed() -> dict[str, object]:
+    split = _split_all_scope()
+    children = split["children"]
+    assert isinstance(children, list)
+    battle = children[1]
+    campaign = children[2]
+    assert isinstance(battle, dict)
+    assert isinstance(campaign, dict)
+    battle["scope_item_ids"] = [*battle["scope_item_ids"], "patch_plan:deferred:1"]
+    campaign["scope_item_ids"] = ["ux:technical_approach:1:playtest_checks:1"]
+    return split
 
 
 def _single_child_split() -> dict[str, object]:

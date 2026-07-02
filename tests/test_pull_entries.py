@@ -157,6 +157,49 @@ def test_needs_revision_branch_is_reviewable_after_v2_commit(tmp_path, monkeypat
     assert review_calls == [(repo, "waiting-v2")]
 
 
+def test_newer_needs_revision_reopens_direction_ok_branch_for_reform(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _commit_on_branch(repo, "ai-org/rfc/reopened", "rfc: direction-ok")
+    _empty_commit_on_existing_branch(repo, "ai-org/rfc/reopened", "rfc: needs-revision round 1")
+    _write_review_round(repo, "reopened")
+    calls = []
+    monkeypatch.setattr(
+        rfc.receive,
+        "reform_rfc",
+        lambda repo_arg, rfc_id: calls.append((repo_arg, rfc_id)) or {"status": "reformed"},
+    )
+    monkeypatch.setattr(
+        rfc.review,
+        "run_rfc_review",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not review")),
+    )
+
+    assert rfc.pull(repo)["status"] == "reformed"
+    assert calls == [(repo, "reopened")]
+
+
+def test_reformed_direction_ok_branch_is_reviewable_after_v2_commit(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _commit_on_branch(repo, "ai-org/rfc/reopened", "rfc: direction-ok")
+    _empty_commit_on_existing_branch(repo, "ai-org/rfc/reopened", "rfc: needs-revision round 1")
+    _write_review_round(repo, "reopened")
+    _empty_commit_on_existing_branch(repo, "ai-org/rfc/reopened", "rfc v2: Reopened")
+    calls = []
+    monkeypatch.setattr(
+        rfc.receive,
+        "reform_rfc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reform")),
+    )
+    monkeypatch.setattr(
+        rfc.review,
+        "run_rfc_review",
+        lambda repo_arg, rfc_id: calls.append((repo_arg, rfc_id)) or {"status": "reviewed"},
+    )
+
+    assert rfc.pull(repo)["status"] == "reviewed"
+    assert calls == [(repo, "reopened")]
+
+
 def test_rfc_pull_needs_work_moves_inbox_record_without_git_branch_or_retry(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     inbox_id = _write_inbox_request(repo, "Build inbox needs work request.")
@@ -278,6 +321,31 @@ def test_patch_pull_returns_none_when_no_rfc_needs_contribution(tmp_path, monkey
     )
 
     assert patch.pull(repo) is None
+
+
+def test_patch_pull_skips_stale_and_blocked_lineage_branches(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _commit_on_branch(repo, "ai-org/rfc/blocked", "rfc: direction-ok")
+    _commit_on_branch(repo, "ai-org/rfc/ready", "rfc: direction-ok")
+    _commit_on_branch(repo, "ai-org/rfc/stale", "rfc: direction-ok")
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/blocked",
+        {"rfc-metadata.json": {"lifecycle_status": "blocked:parent-invalidated"}},
+        subject="lineage: blocked fixture",
+    )
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/stale",
+        {"rfc-metadata.json": {"lifecycle_status": "stale"}},
+        subject="lineage: stale fixture",
+    )
+    calls = []
+
+    monkeypatch.setattr(patch, "make", lambda repo_arg, rfc_id: calls.append((repo_arg, rfc_id)) or {"status": "made"})
+
+    assert patch.pull(repo)["status"] == "made"
+    assert calls == [(repo, "ready")]
 
 
 def test_merge_pull_integrates_one_accepted_contribution_first(tmp_path, monkeypatch):

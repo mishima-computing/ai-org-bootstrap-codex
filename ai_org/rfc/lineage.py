@@ -300,6 +300,10 @@ def escalate(repo: str | Path, child_branch: str, evidence: Mapping[str, Any] | 
     branch = _rfc_branch(child_branch)
     metadata = _read_metadata(repo_path, branch)
     parent = str(metadata.get("parent_branch", ""))
+    if parent and git_wrapper.branch_exists(repo_path, parent):
+        refusal = _parent_escalation_refusal(repo_path, parent)
+        if refusal:
+            return {"ok": False, "status": refusal, "branch": branch, "parent_branch": parent}
     record = dict(metadata)
     record["lifecycle_status"] = "blocked:parent-invalidated"
     record["escalation_evidence"] = evidence if isinstance(evidence, Mapping) else {"summary": str(evidence)}
@@ -312,19 +316,18 @@ def escalate(repo: str | Path, child_branch: str, evidence: Mapping[str, Any] | 
     parent_commit = None
     stale: list[dict[str, Any]] = []
     if parent and git_wrapper.branch_exists(repo_path, parent):
-        parent_commit = git_wrapper.commit_empty(
+        parent_commit = _write_synthetic_escalation_round(repo_path, parent, branch, record["escalation_evidence"])
+        superseded_ledger_commit = str(metadata.get("ledger_commit") or git_wrapper.path_last_commit(repo_path, parent, LEDGER_PATH) or "")
+        stale = mark_stale(
             repo_path,
-            parent,
-            "rfc: needs-revision lineage parent invalidated",
-            body=json.dumps(record["escalation_evidence"], sort_keys=True),
-        )
-        stale = mark_stale(repo_path, _dependent_branches(repo_path, parent, branch), "upstream child invalidated parent scope")[
-            "branches"
-        ]
+            _branches_with_ledger_commit(repo_path, superseded_ledger_commit, exclude={branch}),
+            "parent ledger superseded by child escalation",
+            superseded_ledger_commit=superseded_ledger_commit,
+        )["branches"]
     return {"ok": True, "branch": branch, "parent_branch": parent, "child_commit": child_commit["commit"], "parent_commit": parent_commit, "stale": stale}
 
 
-def mark_stale(repo: str | Path, branches: list[str], reason: str) -> dict[str, Any]:
+def mark_stale(repo: str | Path, branches: list[str], reason: str, *, superseded_ledger_commit: str = "") -> dict[str, Any]:
     """Mark dependent lineage branches stale after a parent re-baseline."""
     repo_path = Path(repo).resolve()
     updated: list[dict[str, Any]] = []
@@ -335,6 +338,8 @@ def mark_stale(repo: str | Path, branches: list[str], reason: str) -> dict[str, 
         metadata = _read_metadata(repo_path, branch)
         metadata["lifecycle_status"] = "stale"
         metadata["stale_reason"] = reason
+        if superseded_ledger_commit:
+            metadata["stale_ledger_commit"] = superseded_ledger_commit
         written = git_wrapper.commit_files(
             repo_path,
             branch,
@@ -343,6 +348,141 @@ def mark_stale(repo: str | Path, branches: list[str], reason: str) -> dict[str, 
         )
         updated.append({"branch": branch, "commit": written["commit"]})
     return {"ok": True, "branches": updated}
+
+
+def rebaseline_pending(repo: str | Path, branch: str) -> bool:
+    """Return whether a parent ledger must be replaced after an escalation v2."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    if _parent_escalation_refusal(repo_path, normalized):
+        return False
+    if _current_rfc_state(repo_path, normalized) != "direction-ok":
+        return False
+    if not git_wrapper.file_exists(repo_path, normalized, LEDGER_PATH):
+        return False
+    latest = _latest_lineage_escalation_round(repo_path, _rfc_id(normalized))
+    if latest is None:
+        return False
+    ledger = _read_json(repo_path, normalized, LEDGER_PATH)
+    if not isinstance(ledger, Mapping):
+        return False
+    rebaselined = ledger.get("rebaselined_from_escalation")
+    latest_round = _round_number(latest)
+    if isinstance(rebaselined, Mapping):
+        try:
+            return int(rebaselined.get("review_round", 0)) < latest_round
+        except (TypeError, ValueError):
+            return True
+    return True
+
+
+def rebaseline(repo: str | Path, parent_branch: str, *, horizon: int = 1) -> dict[str, Any]:
+    """Replace a parent lineage ledger after its author-side v2 is direction-ok."""
+    repo_path = Path(repo).resolve()
+    branch = _rfc_branch(parent_branch)
+    if not rebaseline_pending(repo_path, branch):
+        return {"ok": False, "status": "not-pending", "branch": branch}
+    previous_ledger = _read_json(repo_path, branch, LEDGER_PATH)
+    if not isinstance(previous_ledger, Mapping):
+        return {"ok": False, "status": "missing-ledger", "branch": branch}
+    superseded = git_wrapper.path_last_commit(repo_path, branch, LEDGER_PATH) or ""
+    escalation_round = _latest_lineage_escalation_round(repo_path, _rfc_id(branch)) or {}
+    rfc = _read_json(repo_path, branch, "rfc.json")
+    approach = _read_json(repo_path, branch, "technical-approach.json")
+    if not isinstance(rfc, Mapping) or not isinstance(approach, Mapping):
+        return {"ok": False, "status": "missing-input", "branch": branch, "error": "rfc.json and technical-approach.json are required"}
+
+    scope_items = _scope_items(rfc, approach)
+    feedback = ""
+    last_error: dict[str, Any] | None = None
+    for _attempt in range(1, VALIDATION_ATTEMPTS + 1):
+        split_result = _split_with_codex(repo_path, branch, rfc, approach, scope_items, horizon, feedback)
+        if not split_result["ok"]:
+            return split_result
+        split = split_result["split"]
+        if split["split_mode"] == "right_sized":
+            return {"ok": False, "status": "blocked:parent-rebaseline-changed", "branch": branch, "error": "rebaseline removed the child ledger contract"}
+        normalized = _normalize_split(repo_path, branch, split, scope_items, horizon)
+        validation = validate_ledger_contract(normalized, scope_items)
+        if validation["ok"]:
+            ledger_revision = int(previous_ledger.get("ledger_revision", 1) or 1) + 1
+            ledger = _ledger(
+                branch,
+                scope_items,
+                normalized,
+                validation,
+                ledger_revision=ledger_revision,
+                supersedes_ledger_commit=superseded,
+                rebaselined_from_escalation=_escalation_rebaseline_record(escalation_round),
+            )
+            written = git_wrapper.commit_files(repo_path, branch, {LEDGER_PATH: ledger}, subject="lineage: rebaseline")
+            stale = mark_stale(
+                repo_path,
+                _branches_with_ledger_commit(repo_path, superseded),
+                "parent ledger superseded by rebaseline",
+                superseded_ledger_commit=superseded,
+            )["branches"]
+            return {
+                "ok": True,
+                "status": "rebaselined",
+                "branch": branch,
+                "ledger_commit": written["commit"],
+                "supersedes_ledger_commit": superseded,
+                "ledger_revision": ledger_revision,
+                "stale": stale,
+            }
+        last_error = validation
+        feedback = _validation_feedback(validation)
+
+    return {
+        "ok": False,
+        "status": "feedback-retry",
+        "branch": branch,
+        "error": "lineage rebaseline failed deterministic validation",
+        "validation": last_error or {},
+    }
+
+
+def stale_revalidation_pending(repo: str | Path, branch: str) -> bool:
+    """Return whether a stale branch can be checked against the current parent ledger."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    metadata = _read_metadata(repo_path, normalized)
+    if metadata.get("lifecycle_status") != "stale":
+        return False
+    parent = str(metadata.get("parent_branch", ""))
+    return bool(parent and git_wrapper.branch_exists(repo_path, parent) and git_wrapper.file_exists(repo_path, parent, LEDGER_PATH))
+
+
+def revalidate_stale(repo: str | Path, branch: str) -> dict[str, Any]:
+    """Reactivate unchanged stale children or block changed parent contracts."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    metadata = _read_metadata(repo_path, normalized)
+    if metadata.get("lifecycle_status") != "stale":
+        return {"ok": False, "status": "not-stale", "branch": normalized}
+    parent = str(metadata.get("parent_branch", ""))
+    ledger = _read_json(repo_path, parent, LEDGER_PATH)
+    if not isinstance(ledger, Mapping) or not isinstance(ledger.get("children"), list):
+        return {"ok": False, "status": "missing-parent-ledger", "branch": normalized, "parent_branch": parent}
+    child = _ledger_child_for_metadata(ledger, normalized, metadata)
+    ledger_commit = git_wrapper.path_last_commit(repo_path, parent, LEDGER_PATH) or git_wrapper.head_sha(repo_path, parent) or ""
+    parent_commit = git_wrapper.head_sha(repo_path, parent) or ledger_commit
+    if child is not None and _child_contract_unchanged(metadata, child, ledger):
+        updated = dict(metadata)
+        updated["lifecycle_status"] = "active"
+        updated["ledger_commit"] = ledger_commit
+        updated["revalidated_against_parent"] = parent_commit
+        updated.pop("stale_reason", None)
+        updated.pop("stale_ledger_commit", None)
+        written = git_wrapper.commit_files(repo_path, normalized, {METADATA_PATH: updated}, subject="lineage: revalidated")
+        return {"ok": True, "status": "reactivated", "branch": normalized, "commit": written["commit"], "ledger_commit": ledger_commit}
+
+    updated = dict(metadata)
+    updated["lifecycle_status"] = "blocked:parent-rebaseline-changed"
+    updated["parent_rebaseline_ledger_commit"] = ledger_commit
+    written = git_wrapper.commit_files(repo_path, normalized, {METADATA_PATH: updated}, subject="lineage: blocked parent-rebaseline-changed")
+    return {"ok": False, "status": "blocked:parent-rebaseline-changed", "branch": normalized, "commit": written["commit"], "ledger_commit": ledger_commit}
 
 
 def elaborate(repo: str | Path, coarse_child_branch: str, *, horizon: int = 1) -> dict[str, Any]:
@@ -390,6 +530,9 @@ def coarse_ready(repo: str | Path, branch: str) -> bool:
     repo_path = Path(repo).resolve()
     normalized = _rfc_branch(branch)
     metadata = _read_metadata(repo_path, normalized)
+    lifecycle_status = str(metadata.get("lifecycle_status", ""))
+    if lifecycle_status == "stale" or lifecycle_status.startswith("blocked:"):
+        return False
     if metadata.get("node_kind") != "coarse" or git_wrapper.file_exists(repo_path, normalized, LEDGER_PATH):
         return False
     deps = metadata.get("depends_on_branches")
@@ -663,6 +806,10 @@ def _ledger(
     scope_items: list[Mapping[str, str]],
     split: Mapping[str, Any],
     validation: Mapping[str, Any],
+    *,
+    ledger_revision: int = 1,
+    supersedes_ledger_commit: str = "",
+    rebaselined_from_escalation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     edges = _dependency_edges(split["children"])
     by_key = {child["child_key"]: child for child in split["children"]}
@@ -670,6 +817,9 @@ def _ledger(
     # https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/scheduler.html
     return {
         "schema": "lineage-ledger-v1",
+        "ledger_revision": ledger_revision,
+        "supersedes_ledger_commit": supersedes_ledger_commit,
+        "rebaselined_from_escalation": dict(rebaselined_from_escalation or {}),
         "parent_branch": parent_branch,
         "relation": "split-into",
         "split_operator": "AND",
@@ -1147,6 +1297,219 @@ def _read_ledger_from_first_parent_history(repo: Path, ref: str) -> Any:
 
 def _has_integration_gate(repo: Path, branch: str) -> bool:
     return git_wrapper.has_subject(repo, branch, "lineage: integration-gate")
+
+
+def _parent_escalation_refusal(repo: Path, parent_branch: str) -> str:
+    if not git_wrapper.branch_exists(repo, parent_branch):
+        return ""
+    if _current_rfc_state(repo, parent_branch) == "nak":
+        return "parent-terminal-nak"
+    default = git_wrapper.default_branch(repo)
+    if parent_branch != default and git_wrapper.is_ancestor(repo, parent_branch, default):
+        return "parent-merged-to-default"
+    return ""
+
+
+def _current_rfc_state(repo: Path, branch: str) -> str:
+    subjects = git_wrapper.log_subjects(repo, branch)
+    if any("rfc: nak" in subject for subject in subjects):
+        return "nak"
+    for subject in subjects:
+        if "rfc: needs-revision round " in subject:
+            return "needs_revision"
+        if subject.startswith("rfc v"):
+            return "reformed"
+        if "rfc: direction-ok" in subject:
+            return "direction-ok"
+    return "open"
+
+
+def _write_synthetic_escalation_round(
+    repo: Path,
+    parent_branch: str,
+    child_branch: str,
+    evidence: Mapping[str, Any],
+) -> dict[str, str]:
+    rfc_id = _rfc_id(parent_branch)
+    round_number = _next_review_round(repo, rfc_id)
+    approach = _read_json(repo, parent_branch, "technical-approach.json")
+    node_ids = _collect_node_ids(approach)
+    anchor = "problem" if "problem" in node_ids else (sorted(node_ids)[0] if node_ids else "problem")
+    evidence_citation = json.dumps(evidence, sort_keys=True, ensure_ascii=True)
+    objection = {
+        "objection_id": f"lineage:parent-invalidated:{_rfc_id(child_branch)}",
+        "anchor_node_ids": [anchor],
+        "axis": "scope",
+        "type": "blocking",
+        "claim": "A child lineage branch invalidated the parent scope contract.",
+        "evidence": [{"source_type": "repo_fact", "citation": evidence_citation, "consulted_terms": []}],
+        "impact": "The parent direction and lineage ledger must be re-authored before dependent children can proceed.",
+        "requested_author_action": "revise_subtree",
+        "status": "open",
+    }
+    marker_subject = f"rfc: needs-revision round {round_number}"
+    marker = git_wrapper.commit_empty(repo, parent_branch, marker_subject, body=evidence_citation)
+    record = {
+        "rfc_id": rfc_id,
+        "branch": parent_branch,
+        "round": round_number,
+        "inputs": {
+            "rfc_path": "rfc.json",
+            "technical_approach_path": "technical-approach.json",
+            "node_ids": sorted(node_ids),
+        },
+        "axis_reviews": [
+            {
+                "axis": "scope",
+                "verdict": "objections_pending",
+                "objections": [objection],
+                "reference_consultations": [],
+                "attempts": 1,
+                "validation_errors": [],
+            }
+        ],
+        "objections": [objection],
+        "per_axis_verdicts": {"scope": "objections_pending"},
+        "consolidation": {
+            "verdict": "needs_revision",
+            "summary": "Lineage child escalation requires parent author re-formation.",
+            "deduplicated_objections": [objection],
+            "contradiction_resolutions": [],
+            "nak_reason": "",
+            "evidence": [{"source_type": "repo_fact", "citation": evidence_citation, "consulted_terms": []}],
+            "validation_errors": [],
+        },
+        "verdict": "needs_revision",
+        "git_result_marker": marker_subject,
+        "git_result_commit": marker["commit"],
+        "serial": git_wrapper.serial_for_ref(repo, parent_branch) or "",
+        "lineage_escalation": True,
+        "escalated_child_branch": child_branch,
+        "deferred": [
+            "author-side v2 re-formation and resend loop",
+            "lineage ledger rebaseline after renewed direction-ok",
+        ],
+    }
+    directory = repo / ".ai-org" / "review" / rfc_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"round-{round_number}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return marker
+
+
+def _next_review_round(repo: Path, rfc_id: str) -> int:
+    rounds = [_round_number(record) for record in _review_records(repo, rfc_id)]
+    return max(rounds, default=0) + 1
+
+
+def _latest_lineage_escalation_round(repo: Path, rfc_id: str) -> dict[str, Any] | None:
+    records = [record for record in _review_records(repo, rfc_id) if record.get("lineage_escalation") is True]
+    if not records:
+        return None
+    return sorted(records, key=_round_number)[-1]
+
+
+def _review_records(repo: Path, rfc_id: str) -> list[dict[str, Any]]:
+    directory = repo / ".ai-org" / "review" / rfc_id
+    records: list[dict[str, Any]] = []
+    for path in directory.glob("round-*.json"):
+        try:
+            int(path.stem.removeprefix("round-"))
+        except ValueError:
+            continue
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
+
+
+def _round_number(record: Mapping[str, Any]) -> int:
+    try:
+        return int(record.get("round", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _escalation_rebaseline_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "review_round": _round_number(record),
+        "child_branch": str(record.get("escalated_child_branch", "")),
+        "git_result_commit": str(record.get("git_result_commit", "")),
+    }
+
+
+def _collect_node_ids(value: object) -> set[str]:
+    node_ids: set[str] = set()
+    if isinstance(value, Mapping):
+        node_id = value.get("id")
+        if isinstance(node_id, str) and node_id:
+            node_ids.add(node_id)
+        for child in value.values():
+            node_ids.update(_collect_node_ids(child))
+    elif isinstance(value, list):
+        for child in value:
+            node_ids.update(_collect_node_ids(child))
+    return node_ids
+
+
+def _branches_with_ledger_commit(repo: Path, ledger_commit: str, *, exclude: set[str] | None = None) -> list[str]:
+    if not ledger_commit:
+        return []
+    excluded = exclude or set()
+    branches: list[str] = []
+    for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
+        if branch in excluded:
+            continue
+        metadata = _read_metadata(repo, branch)
+        status = str(metadata.get("lifecycle_status", ""))
+        if status.startswith("blocked:"):
+            continue
+        if metadata.get("ledger_commit") == ledger_commit:
+            branches.append(branch)
+    return branches
+
+
+def _ledger_child_for_metadata(
+    ledger: Mapping[str, Any],
+    branch: str,
+    metadata: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    child_key = str(metadata.get("child_key", ""))
+    for child in ledger.get("children", []):
+        if not isinstance(child, Mapping):
+            continue
+        if child_key and child.get("child_key") == child_key:
+            return child
+        if child.get("branch") == branch:
+            return child
+    return None
+
+
+def _child_contract_unchanged(
+    metadata: Mapping[str, Any],
+    child: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+) -> bool:
+    checks = [
+        str(metadata.get("node_kind", "")) == str(child.get("node_kind", "")),
+        str(metadata.get("branching_mode", "")) == str(child.get("branching_mode", "")),
+        str(metadata.get("serial_after_child_key", "")) == str(child.get("serial_after_child_key", "")),
+        list(metadata.get("scope_item_ids", [])) == list(child.get("scope_item_ids", [])),
+        list(metadata.get("depends_on_branches", [])) == _ledger_dependency_branches(ledger, child),
+    ]
+    return all(checks)
+
+
+def _ledger_dependency_branches(ledger: Mapping[str, Any], child: Mapping[str, Any]) -> list[str]:
+    children = [item for item in ledger.get("children", []) if isinstance(item, Mapping)]
+    by_key = {str(item.get("child_key", "")): item for item in children}
+    return [
+        str(by_key[key]["branch"])
+        for key in _edge_dependencies(child)
+        if key in by_key and isinstance(by_key[key].get("branch"), str)
+    ]
 
 
 def _accepted_source_refs(branch: str, contrib_branch: str) -> list[str]:

@@ -24,6 +24,10 @@ UNRESOLVED — rebase & resend (deliberately deferred; recorded here so it isn't
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
 from ai_org import git_wrapper
 
 from . import functional_check, implement
@@ -53,8 +57,27 @@ def pull(repo):
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if not git_wrapper.has_subject(repo, branch, "rfc: direction-ok"):
             continue
+        if _lineage_blocked(repo, branch):
+            continue
         rfc_id = branch.removeprefix(RFC_PREFIX)
         if git_wrapper.branch_exists(repo, f"{CONTRIB_PREFIX}{rfc_id}"):
             continue
         return make(repo, rfc_id)
     return None
+
+
+def _lineage_blocked(repo, branch: str) -> bool:
+    metadata = _read_metadata(Path(repo), branch)
+    status = str(metadata.get("lifecycle_status", ""))
+    return status == "stale" or status.startswith("blocked:")
+
+
+def _read_metadata(repo: Path, branch: str) -> dict[str, Any]:
+    raw = git_wrapper.show_file(repo, branch, "rfc-metadata.json")
+    if raw is None:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
