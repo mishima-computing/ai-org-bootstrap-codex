@@ -166,15 +166,57 @@ def test_resolved_rolls_up_children_and_parent_integration_gate(tmp_path, monkey
     _install_codex_fake(monkeypatch, [_single_child_split()])
     result = lineage.refine(repo, "root")
     child = result["children"][0]["branch"]
+    contrib = _write_contrib_branch(repo, child, "ai-org/rfc/root")
 
     assert lineage.resolved(repo, child) is False
     assert lineage.resolved(repo, "ai-org/rfc/root") is False
 
-    git_wrapper.commit_empty(repo, child, "acceptance: passed")
-    _merge(repo, "ai-org/rfc/root", child)
+    git_wrapper.commit_empty(repo, contrib, "acceptance: passed")
+    assert lineage.resolved(repo, child) is False
+
+    _merge(repo, "ai-org/rfc/root", contrib)
     assert lineage.resolved(repo, child) is True
     assert lineage.resolved(repo, "ai-org/rfc/root") is False
 
+    git_wrapper.commit_empty(repo, "ai-org/rfc/root", "lineage: integration-gate")
+    assert lineage.resolved(repo, "ai-org/rfc/root") is True
+
+
+def test_resolved_never_requires_child_doc_branch_ancestry_for_sibling_leaves(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _write_parent(repo, "root")
+    split = {
+        "split_mode": "split_into_children",
+        "rationale": "Two independent implementation leaves.",
+        "parent_retained_scope_ids": [],
+        "children": [
+            _proposal_child(
+                "prep",
+                ["goal:rfc.desired_outcomes_success", "patch_plan:first_playable", "ux:technical_approach:1:screenshot_checks:1"],
+            ),
+            _proposal_child(
+                "battle",
+                [
+                    "patch_plan:follow_up:1",
+                    "patch_plan:deferred:1",
+                    "ux:technical_approach:1:interaction_checks:1",
+                    "ux:technical_approach:1:playtest_checks:1",
+                    "risk:state-drift",
+                ],
+            ),
+        ],
+    }
+    _install_codex_fake(monkeypatch, [split])
+    result = lineage.refine(repo, "root")
+    children = [child["branch"] for child in result["children"]]
+    contribs = [_write_contrib_branch(repo, child, "ai-org/rfc/root") for child in children]
+
+    for child, contrib in zip(children, contribs):
+        git_wrapper.commit_empty(repo, child, "acceptance: reachable")
+        _merge(repo, "ai-org/rfc/root", contrib)
+
+    assert all(git_wrapper.is_ancestor(repo, child, "ai-org/rfc/root") is False for child in children)
+    assert all(lineage.resolved(repo, child) is True for child in children)
     git_wrapper.commit_empty(repo, "ai-org/rfc/root", "lineage: integration-gate")
     assert lineage.resolved(repo, "ai-org/rfc/root") is True
 
@@ -271,8 +313,9 @@ def test_elaborate_waits_for_resolved_dependencies(tmp_path, monkeypatch):
     assert lineage.coarse_ready(repo, battle) is False
     assert lineage.elaborate(repo, battle)["status"] == "blocked-by-dependencies"
 
+    contrib = _write_contrib_branch(repo, prep, "ai-org/rfc/root")
     git_wrapper.commit_empty(repo, prep, "acceptance: passed")
-    _merge(repo, "ai-org/rfc/root", prep)
+    _merge(repo, "ai-org/rfc/root", contrib)
     assert lineage.coarse_ready(repo, battle) is True
 
     elaborated = lineage.elaborate(repo, battle)
@@ -366,6 +409,19 @@ def _write_child_branch(repo: Path, rfc_id: str, base: str) -> None:
         },
         commit_message="rfc: direction-ok",
     )
+
+
+def _write_contrib_branch(repo: Path, child_branch: str, base: str) -> str:
+    child_id = child_branch.removeprefix("ai-org/rfc/")
+    branch = f"ai-org/contrib/{child_id}"
+    git_wrapper.create_branch_with_files(
+        repo,
+        branch,
+        base,
+        {f"implementation/{child_id}.txt": f"implementation for {child_id}\n"},
+        commit_message=f"implement: {child_id}",
+    )
+    return branch
 
 
 def _rfc() -> dict[str, object]:

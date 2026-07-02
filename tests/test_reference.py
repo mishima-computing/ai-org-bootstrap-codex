@@ -1675,12 +1675,12 @@ def test_seed_preheld_org_lessons_is_idempotent_and_append_only(monkeypatch, tmp
         second_candidate_count = connection.execute("SELECT count(*) FROM candidates").fetchone()[0]
         second_candidate_ids = [row[0] for row in connection.execute("SELECT id FROM candidates ORDER BY id").fetchall()]
 
-    assert first["stored"] == 5
+    assert first["stored"] == 6
     assert first["skipped"] == 0
     assert second["stored"] == 0
-    assert second["skipped"] == 5
-    assert first_research_count == 5
-    assert first_candidate_count == 5
+    assert second["skipped"] == 6
+    assert first_research_count == 6
+    assert first_candidate_count == 6
     assert second_research_count == first_research_count
     assert second_candidate_count == first_candidate_count
     assert second_candidate_ids == first_candidate_ids
@@ -1692,6 +1692,13 @@ def test_seed_preheld_org_lessons_is_idempotent_and_append_only(monkeypatch, tmp
     assert candidate["author_level"] == "org-experience (primary; learned from live runs)"
     assert "mode-irrelevant payload" in candidate["structure"]
     assert candidate["source_url"] == "ai-org-bootstrap-codex@871c99a; ai-org-bootstrap-codex@2f5f13b"
+
+    lookup = reference.lookup("group tree merges implementations not doc nodes", kind="design")
+    assert lookup is not None
+    assert len(lookup["candidates"]) == 1
+    candidate = lookup["candidates"][0]
+    assert "Child RFC branches are doc nodes" in candidate["structure"]
+    assert candidate["source_url"] == "ai-org-bootstrap-codex@this-commit"
 
 
 def test_empty_research_rows_are_stored_and_reexpand_appends_history(monkeypatch, tmp_path):

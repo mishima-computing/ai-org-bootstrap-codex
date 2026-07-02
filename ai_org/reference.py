@@ -131,6 +131,23 @@ ORG_PREHELD_LESSONS = (
         },
     },
     {
+        "term": "group tree merges implementations not doc nodes",
+        "kind": "design",
+        "facet": {
+            "structure": "Lineage parent trees must merge child implementation branches, not child RFC branches. Child RFC branches are doc nodes that carry sibling-local rfc.json, technical-approach.json, and rfc-metadata.json at identical paths, so merging more than one child doc node into the same parent creates structural path conflicts.",
+            "rationale": "A live smoke run hit a merge conflict in technical-approach.json when sibling RFC doc branches were treated as the integration artifact.",
+            "when_to_use": "Use this rule when determining lineage resolution, parent rollout readiness, or any group-tree merge policy for split RFC children.",
+            "when_not_to_use": "Do not require a child RFC branch itself to be an ancestor of its lineage parent, because that makes metadata occupy one shared implementation path.",
+            "tradeoffs": "Separating doc acceptance from contrib ancestry adds one explicit branch lookup but keeps sibling metadata nodes isolated.",
+            "alternatives": "Merging child RFC branches into the parent was rejected because sibling metadata files collide at fixed paths.",
+            "implementation_hooks": "Treat acceptance: passed or acceptance: reachable on either the child RFC branch or ai-org/contrib/<child-id> as the acceptance marker, then require the contrib branch to be an ancestor of the lineage parent.",
+            "quality_attributes": "Lineage correctness, merge reliability, metadata isolation.",
+            "evidence": "ai-org-bootstrap-codex@this-commit; live smoke sibling RFC merge conflict in technical-approach.json.",
+            "delta_claim": "Group trees integrate implementation contrib branches while child RFC branches remain isolated metadata nodes.",
+            "source_url": "ai-org-bootstrap-codex@this-commit",
+        },
+    },
+    {
         "term": "codex sandbox git limitations",
         "kind": "design",
         "facet": {

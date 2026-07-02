@@ -11,6 +11,8 @@ Memento: A/B experiment outcome.
   (ai-org-bootstrap-codex@2f5f13b; ai-org-bootstrap-codex@67563c5);
   child branch metadata inheritance hazard
   (ai-org-bootstrap-codex@67563c5; Gerrit NoteDb-style separation);
+  group tree merges implementations not doc nodes
+  (ai-org-bootstrap-codex@this-commit);
   codex output schema safe subset
   (ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py).
 """
@@ -271,14 +273,24 @@ def _resolved(repo_path: Path, normalized: str, depth: int) -> bool:
 
 
 def _leaf_resolved(repo: Path, branch: str, parent_branch: str = "") -> bool:
-    accepted = git_wrapper.has_subject(repo, branch, "acceptance: passed") or git_wrapper.has_subject(
-        repo, branch, "acceptance: reachable"
+    contrib_branch = _contrib_branch_for_rfc_branch(repo, branch)
+    accepted = any(
+        git_wrapper.has_subject(repo, ref, subject)
+        for ref in _accepted_source_refs(branch, contrib_branch)
+        for subject in ("acceptance: passed", "acceptance: reachable")
     )
     if not accepted:
         return False
-    if parent_branch and git_wrapper.is_ancestor(repo, branch, parent_branch):
-        return True
+    # Memento: the group tree integrates implementation branches, never child
+    # RFC doc nodes. Sibling RFC branches all own rfc.json,
+    # technical-approach.json, and rfc-metadata.json at identical paths, so
+    # merging doc nodes into the parent structurally conflicts from the second
+    # accepted sibling onward.
+    if parent_branch:
+        return bool(contrib_branch and git_wrapper.is_ancestor(repo, contrib_branch, parent_branch))
     default = git_wrapper.default_branch(repo)
+    if contrib_branch and git_wrapper.is_ancestor(repo, contrib_branch, default):
+        return True
     return git_wrapper.is_ancestor(repo, branch, default)
 
 
@@ -1087,6 +1099,22 @@ def _read_ledger_from_first_parent_history(repo: Path, ref: str) -> Any:
 
 def _has_integration_gate(repo: Path, branch: str) -> bool:
     return git_wrapper.has_subject(repo, branch, "lineage: integration-gate")
+
+
+def _accepted_source_refs(branch: str, contrib_branch: str) -> list[str]:
+    refs = [branch]
+    if contrib_branch:
+        refs.append(contrib_branch)
+    return refs
+
+
+def _contrib_branch_for_rfc_branch(repo: Path, branch: str) -> str:
+    metadata = _read_metadata(repo, branch)
+    child_id = str(metadata.get("id", "")).strip()
+    if not child_id:
+        child_id = _rfc_id(branch)
+    contrib_branch = f"ai-org/contrib/{child_id}"
+    return contrib_branch if git_wrapper.branch_exists(repo, contrib_branch) else ""
 
 
 def _dependent_branches(repo: Path, parent_branch: str, changed_branch: str) -> list[str]:
