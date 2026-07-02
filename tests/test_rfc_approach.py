@@ -316,6 +316,154 @@ def test_stack_decision_empty_axis_retries(monkeypatch, tmp_path):
     assert "stack_axes.builder_buildability.evidence is empty" in prompts[1]
 
 
+def test_candidate_reference_fields_are_schema_enums(monkeypatch, tmp_path):
+    evaluation_schemas = []
+
+    def fake_evaluate_run_json(repo: Path, **kwargs):
+        schema = kwargs["schema"]
+        evaluation_schemas.append(schema)
+        candidate_id = schema["properties"]["candidate_id"]["enum"][0]
+        return {"ok": True, "raw": json.dumps({"candidate_id": candidate_id, "scores": _scores()})}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_evaluate_run_json)
+
+    evaluations = receive_module._evaluate_candidates(
+        _candidates(),
+        _normalized_problem(),
+        _constraints(),
+        {"repo": tmp_path},
+        _accumulated_approach_through_patch_plan(),
+    )
+
+    assert [item["candidate_id"] for item in evaluations["evaluations"]] == ["minimal", "repo_native"]
+    assert [schema["properties"]["candidate_id"]["enum"] for schema in evaluation_schemas] == [["minimal"], ["repo_native"]]
+
+    select_schemas = []
+
+    def fake_select_run_json(repo: Path, **kwargs):
+        schema = kwargs["schema"]
+        select_schemas.append(schema)
+        return {"ok": True, "raw": json.dumps(_decision())}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_select_run_json)
+
+    selected = receive_module._select_approach(
+        _candidates(),
+        _evaluations(),
+        _constraints(),
+        {"repo": tmp_path},
+        _accumulated_approach_through_patch_plan(),
+    )
+
+    candidate_ids = ["minimal", "repo_native"]
+    schema = select_schemas[0]
+    assert selected["selected_candidate_id"] == "repo_native"
+    assert schema["properties"]["selected_candidate_id"]["enum"] == candidate_ids
+    assert schema["properties"]["arguments"]["items"]["properties"]["about_candidate_id"]["enum"] == candidate_ids
+    assert schema["properties"]["rejected"]["items"]["properties"]["candidate_id"]["enum"] == candidate_ids
+
+
+def test_surface_risks_schema_enums_real_tree_node_ids(monkeypatch, tmp_path):
+    schemas = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        schemas.append(kwargs["schema"])
+        return {
+            "ok": True,
+            "raw": json.dumps(
+                {
+                    "risks": [
+                        {
+                            "id": "risk:patch-plan",
+                            "risk": "The first playable may overrun the safe slice.",
+                            "mitigation": "Keep follow-up content out of the first patch.",
+                            "attaches_to": "patch_plan",
+                            "target_id": "patch_plan:repo_native",
+                        }
+                    ]
+                }
+            ),
+        }
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._surface_risks(
+        _decision(),
+        _implementation(),
+        _patch_plan(),
+        _constraints(),
+        {"repo": tmp_path},
+        _accumulated_approach_through_patch_plan(),
+    )
+
+    target_schema = schemas[0]["properties"]["risks"]["items"]["properties"]["target_id"]
+    assert result["risks"][0]["target_id"] == "patch_plan:repo_native"
+    assert target_schema["enum"] == [
+        "decision:repo_native",
+        "implementation:repo_native",
+        "minimal",
+        "patch_plan:repo_native",
+        "repo_native",
+    ]
+    assert "patch_plan:vanilla_web_repo_adventure" not in target_schema["enum"]
+
+
+def test_surface_risks_over_bound_fallback_prompts_ids_and_lint_catches_dangling(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(receive_module, "MAX_SCHEMA_ENUM_REFERENCES", 1)
+    monkeypatch.setattr(receive_module, "_normalize_problem", lambda rfc_view, context=None: _normalized_problem())
+    monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
+    monkeypatch.setattr(receive_module, "_generate_candidates", lambda *args, **kwargs: _candidates())
+    monkeypatch.setattr(receive_module, "_evaluate_candidates", lambda *args, **kwargs: _evaluations())
+    monkeypatch.setattr(receive_module, "_select_approach", lambda *args, **kwargs: _decision())
+    monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_domain_specification", lambda *args, **kwargs: _domain_specification())
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
+
+    prompts = []
+    schemas = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        schemas.append(kwargs["schema"])
+        return {
+            "ok": True,
+            "raw": json.dumps(
+                {
+                    "risks": [
+                        {
+                            "id": "risk:lost",
+                            "risk": "Detached risk.",
+                            "mitigation": "Attach to a known parent.",
+                            "attaches_to": "implementation",
+                            "target_id": "implementation:invented",
+                        }
+                    ]
+                }
+            ),
+        }
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module.form_technical_approach(_rfc_view(), tmp_path)
+
+    target_schema = schemas[0]["properties"]["risks"]["items"]["properties"]["target_id"]
+    assert "enum" not in target_schema
+    assert "Valid risk target_id values are a closed list" in prompts[0]
+    assert '"implementation:repo_native"' in prompts[0]
+    assert result["ok"] is False
+    assert result["failed_step"] == "surface_risks"
+    assert "targets unknown implementation node implementation:invented" in result["error"]
+
+
 def test_requester_specified_stack_skips_alternatives_and_records_org_conflict_risk(monkeypatch, tmp_path):
     rfc = _rfc_view()
     rfc["raw_request"] = "Make the battle slice in Unreal Engine 5."

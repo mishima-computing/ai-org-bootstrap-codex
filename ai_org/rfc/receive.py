@@ -143,6 +143,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from copy import deepcopy
 from dataclasses import dataclass, field
 import inspect
 import json
@@ -275,6 +276,7 @@ SUCCESS_CRITERION_VERIFICATION_FIELDS = ("method", "check")
 SUCCESS_CRITERION_VERIFICATION_METHODS = ("automated_test", "manual_check", "metric")
 MAX_NORMALIZE_PROBLEM_REGENERATIONS = 2
 MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS = 2
+MAX_SCHEMA_ENUM_REFERENCES = 120
 
 SUCCESS_CRITERION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -963,7 +965,7 @@ SURFACED_RISK_FIELDS = (
     "attaches_to",
     "target_id",
 )
-RISK_ATTACHES_TO = ("candidate", "decision", "implementation")
+RISK_ATTACHES_TO = ("candidate", "decision", "implementation", "patch_plan")
 SURFACE_RISKS_FIELDS = ("risks",)
 
 SURFACE_RISKS_SCHEMA: dict[str, Any] = {
@@ -989,6 +991,53 @@ SURFACE_RISKS_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def _known_reference_ids(values: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    return sorted({value for value in values if isinstance(value, str) and value})
+
+
+def _known_reference_string_schema(values: list[str] | tuple[str, ...] | set[str]) -> dict[str, Any]:
+    # Memento: references to a known finite id set are enums, never free strings.
+    # Two live failures came from free-reference transcription: prose-overlap
+    # tracing and invented risk anchors.
+    ids = _known_reference_ids(values)
+    schema: dict[str, Any] = {"type": "string"}
+    if ids and len(ids) <= MAX_SCHEMA_ENUM_REFERENCES:
+        schema["enum"] = ids
+    return schema
+
+
+def _closed_reference_fallback_prompt(label: str, values: list[str] | tuple[str, ...] | set[str]) -> str:
+    ids = _known_reference_ids(values)
+    if len(ids) <= MAX_SCHEMA_ENUM_REFERENCES:
+        return ""
+    ids_text = json.dumps(ids, indent=2, ensure_ascii=True)
+    return (
+        f"\nValid {label} values are a closed list. Choose exact strings only from this list; "
+        f"do not invent, transform, summarize, or infer ids:\n{ids_text}\n"
+    )
+
+
+def _evaluate_candidate_schema(candidate_id: str) -> dict[str, Any]:
+    schema = deepcopy(EVALUATE_CANDIDATE_SCHEMA)
+    schema["properties"]["candidate_id"] = _known_reference_string_schema([candidate_id])
+    return schema
+
+
+def _select_approach_schema(candidate_ids: list[str]) -> dict[str, Any]:
+    schema = deepcopy(SELECT_APPROACH_SCHEMA)
+    candidate_id_schema = _known_reference_string_schema(candidate_ids)
+    schema["properties"]["selected_candidate_id"] = deepcopy(candidate_id_schema)
+    schema["properties"]["arguments"]["items"]["properties"]["about_candidate_id"] = deepcopy(candidate_id_schema)
+    schema["properties"]["rejected"]["items"]["properties"]["candidate_id"] = deepcopy(candidate_id_schema)
+    return schema
+
+
+def _surface_risks_schema(target_ids: list[str]) -> dict[str, Any]:
+    schema = deepcopy(SURFACE_RISKS_SCHEMA)
+    schema["properties"]["risks"]["items"]["properties"]["target_id"] = _known_reference_string_schema(target_ids)
+    return schema
 _PRIOR_ART_STOPWORDS = {
     "the",
     "and",
@@ -2297,7 +2346,7 @@ def _evaluate_candidates(
         for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
             run = codex_exec.run_json(
                 repo,
-                schema=EVALUATE_CANDIDATE_SCHEMA,
+                schema=_evaluate_candidate_schema(str(candidate_id)),
                 prompt=_evaluate_candidate_prompt(
                     candidate,
                     candidates,
@@ -2362,7 +2411,7 @@ def _select_approach(
     for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
         run = codex_exec.run_json(
             repo,
-            schema=SELECT_APPROACH_SCHEMA,
+            schema=_select_approach_schema(candidate_ids),
             prompt=_select_approach_prompt(
                 candidates,
                 evaluations,
@@ -2516,12 +2565,13 @@ def _surface_risks(
         return _surface_risks_error("surface_risks requires outputs from steps 2, 6, 7, and 8")
 
     repo = _repo_from_context(context)
+    valid_target_ids = _surface_risk_target_ids(chosen, accumulated_approach)
     feedback: list[str] = []
     last_error = ""
     for attempt in range(MAX_TECHNICAL_APPROACH_NODE_REGENERATIONS + 1):
         run = codex_exec.run_json(
             repo,
-            schema=SURFACE_RISKS_SCHEMA,
+            schema=_surface_risks_schema(valid_target_ids),
             prompt=_surface_risks_prompt(
                 chosen,
                 implementation_strategy,
@@ -2529,6 +2579,7 @@ def _surface_risks(
                 constraints,
                 context,
                 accumulated_approach,
+                valid_target_ids,
                 feedback if attempt else None,
             ),
             schema_filename="rfc-surface-risks.schema.json",
@@ -3384,6 +3435,7 @@ def _evaluate_candidate_prompt(
             + "\n".join(f"- {item}" for item in feedback)
             + "\n"
         )
+    candidate_id_choices = _closed_reference_fallback_prompt("candidate_id", [str(candidate.get("id") or "")])
     return (
         "You are forming step 5 of AI Org's Technical Approach derivation tree: evaluate one candidate node.\n"
         "Use the accumulated approach tree containing the root goals, constraints, prior-art ancestors, and candidate set, "
@@ -3408,6 +3460,7 @@ def _evaluate_candidate_prompt(
         f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
+        + candidate_id_choices
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
@@ -3427,6 +3480,7 @@ def _select_approach_prompt(
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     goals_text = _root_success_criteria_text(accumulated_approach)
+    candidate_id_choices = _closed_reference_fallback_prompt("candidate ids", _candidate_ids(candidates))
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -3468,6 +3522,7 @@ def _select_approach_prompt(
         f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
+        + candidate_id_choices
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
@@ -3639,6 +3694,7 @@ def _surface_risks_prompt(
     constraints: Mapping[str, Any],
     context: Mapping[str, Any] | None = None,
     accumulated_approach: Mapping[str, Any] | None = None,
+    valid_target_ids: list[str] | None = None,
     feedback: list[str] | None = None,
 ) -> str:
     chosen_text = json.dumps(chosen, indent=2, sort_keys=True, ensure_ascii=True, default=str)
@@ -3648,6 +3704,7 @@ def _surface_risks_prompt(
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     approach_text = json.dumps(accumulated_approach or {}, indent=2, sort_keys=True, ensure_ascii=True, default=str)
     goals_text = _root_success_criteria_text(accumulated_approach)
+    target_id_choices = _closed_reference_fallback_prompt("risk target_id", valid_target_ids or [])
     feedback_text = ""
     if feedback:
         feedback_text = (
@@ -3662,7 +3719,7 @@ def _surface_risks_prompt(
         "Use the accumulated approach tree containing the root goals, constraints, selected decision, implementation strategy, domain specification, and right-sized patch "
         "plan, plus read-only repository inspection from the configured "
         "repo root. Do not modify files.\n\n"
-        "Surface only delivery or design risks that can be attached to a candidate, decision, or implementation "
+        "Surface only delivery or design risks that can be attached to a candidate, decision, implementation, or patch_plan "
         "node. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
         "slices, emit the final Technical Approach section, or perform later Technical Approach steps.\n\n"
         "Requester sovereignty exception: when the accumulated decision came from a requester-specified "
@@ -3670,7 +3727,7 @@ def _surface_risks_prompt(
         "requested stack; attach any buildability, asset, reachability, or licensing conflict to the decision "
         "or implementation node.\n\n"
         "Return these fields:\n"
-        "- risks: each risk node has id, risk, mitigation, attaches_to candidate|decision|implementation, and "
+        "- risks: each risk node has id, risk, mitigation, attaches_to candidate|decision|implementation|patch_plan, and "
         "target_id naming the node it attaches under. State which success criterion or decision the risk threatens where natural.\n\n"
         f"Chosen approach:\n{chosen_text}\n"
         f"\nImplementation strategy:\n{strategy_text}\n"
@@ -3679,6 +3736,7 @@ def _surface_risks_prompt(
         f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         f"\nAccumulated approach so far:\n{approach_text}\n"
         f"\nContext:\n{context_text}\n"
+        + target_id_choices
         + feedback_text
         + "\nReturn only JSON matching the provided schema."
     )
@@ -6135,7 +6193,9 @@ def _decision_tree_node(
     implementation_node = dict(implementation)
     implementation_node["id"] = implementation_id
     implementation_node["domain_specification"] = _domain_specification_tree_node(domain_specification)
-    implementation_node["patch_plan"] = _node_with_id(patch_plan, patch_plan_id)
+    patch_plan_node = _node_with_id(patch_plan, patch_plan_id)
+    patch_plan_node["risks"] = _risks_for("patch_plan", patch_plan_id, risks)
+    implementation_node["patch_plan"] = patch_plan_node
     implementation_node["risks"] = _risks_for("implementation", implementation_id, risks)
     decision_node = {
         "id": decision_id,
@@ -6164,6 +6224,8 @@ def _decision_tree_node(
         _add_cross_link(cross_links, risk["id"], decision_id, "mitigates")
     for risk in implementation_node["risks"]:
         _add_cross_link(cross_links, risk["id"], implementation_id, "mitigates")
+    for risk in patch_plan_node["risks"]:
+        _add_cross_link(cross_links, risk["id"], patch_plan_id, "mitigates")
     return decision_node
 
 
@@ -6202,6 +6264,43 @@ def _add_cross_link(cross_links: list[dict[str, str]], from_id: str, to_id: str,
         cross_links.append(link)
 
 
+def _surface_risk_target_ids(
+    selected: Mapping[str, Any],
+    accumulated_approach: Mapping[str, Any] | None,
+) -> list[str]:
+    target_ids: set[str] = set()
+    if isinstance(accumulated_approach, Mapping):
+        problem = accumulated_approach.get("problem")
+        question = problem.get("question") if isinstance(problem, Mapping) else None
+        if isinstance(question, Mapping):
+            for candidate in question.get("candidates", []) if isinstance(question.get("candidates"), list) else []:
+                if isinstance(candidate, Mapping) and isinstance(candidate.get("id"), str):
+                    target_ids.add(candidate["id"])
+            decision = question.get("decision")
+            if isinstance(decision, Mapping):
+                if isinstance(decision.get("id"), str):
+                    target_ids.add(decision["id"])
+                implementation = decision.get("implementation")
+                if isinstance(implementation, Mapping):
+                    if isinstance(implementation.get("id"), str):
+                        target_ids.add(implementation["id"])
+                    patch_plan = implementation.get("patch_plan")
+                    if isinstance(patch_plan, Mapping) and isinstance(patch_plan.get("id"), str):
+                        target_ids.add(patch_plan["id"])
+
+    selected_id = str(selected.get("selected_candidate_id") or "").strip()
+    if selected_id:
+        target_ids.update(
+            {
+                selected_id,
+                f"decision:{selected_id}",
+                f"implementation:{selected_id}",
+                f"patch_plan:{selected_id}",
+            }
+        )
+    return _known_reference_ids(target_ids)
+
+
 def _validate_risk_targets(
     risks: Mapping[str, Any],
     candidates: Mapping[str, Any] | None,
@@ -6213,6 +6312,7 @@ def _validate_risk_targets(
         "candidate": candidate_ids,
         "decision": {f"decision:{selected_id}"},
         "implementation": {f"implementation:{selected_id}"},
+        "patch_plan": {f"patch_plan:{selected_id}"},
     }
     for risk in risks.get("risks", []) if isinstance(risks, Mapping) else []:
         if not isinstance(risk, Mapping):
