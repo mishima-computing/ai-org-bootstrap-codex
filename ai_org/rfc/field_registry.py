@@ -480,13 +480,17 @@ def validate_user_experience_requirements(value: object, *, require_completeness
         if not reason.strip():
             return False
         return _validate_ux_shape(value)
-    if reason.strip():
-        return False
     if not _validate_ux_shape(value):
         return False
     if not require_completeness:
+        # Memento: required-all-props artifact tolerance. Structured outputs may
+        # fill mode-irrelevant required fields; accept then clear them.
+        applicability["not_user_facing_reason"] = ""
         return True
-    return _validate_user_facing_ux_completeness(value)
+    if not _validate_user_facing_ux_completeness(value):
+        return False
+    applicability["not_user_facing_reason"] = ""
+    return True
 
 
 def _validate_ux_shape(value: Mapping[str, Any]) -> bool:

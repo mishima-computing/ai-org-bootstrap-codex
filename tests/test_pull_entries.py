@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 
+import ai_org.log as org_log
 from ai_org import merge, patch, rfc
 from ai_org import git_wrapper
 from ai_org.rfc import submit as submit_module
@@ -230,6 +231,15 @@ def test_rfc_pull_needs_work_moves_inbox_record_without_git_branch_or_retry(tmp_
     assert result_record["status"] == "needs_work"
     assert result_record["error"] == "Could not form approach."
     assert result_record["failed_step"] == "select_approach"
+    supervisor = next((Path(repo) / ".ai-org" / "log" / "runs").glob("*/run-*/supervisor.jsonl"))
+    events = [json.loads(line) for line in supervisor.read_text(encoding="utf-8").splitlines()]
+    outcome = [event for event in events if event["event_type"] == "rfc.pull.outcome"][-1]
+    assert outcome["payload"] == {"failed_step": "select_approach", "status": "needs_work"}
+    projections = org_log.rebuild_projections(repo, supervisor.parent.name)
+    assert projections["run_status"]["status"] == "completed"
+    assert projections["run_status"]["outcome"] == "needs_work"
+    assert projections["run_status"]["failed_step"] == "select_approach"
+    assert "completed outcome=needs_work failed_step=select_approach" in projections["canonical_run_line"]["line"]
     assert rfc.pull(repo) is None
     assert calls == [{"raw_request": "Build inbox needs work request."}]
 

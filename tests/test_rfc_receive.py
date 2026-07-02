@@ -148,6 +148,9 @@ def test_engine_based_tech_stack_requires_real_engine_product_name():
 def test_user_experience_requirements_validator_enforces_applicability_completeness():
     user_facing = _ux_requirements()
     assert receive_module.validate_user_experience_requirements(user_facing)
+    user_facing["applicability"]["not_user_facing_reason"] = "Not applicable: the request is to make a playable game."
+    assert receive_module.validate_user_experience_requirements(user_facing)
+    assert user_facing["applicability"]["not_user_facing_reason"] == ""
 
     empty_identity = {
         **user_facing,

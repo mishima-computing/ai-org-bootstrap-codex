@@ -49,14 +49,15 @@ def pull(repo, *, progress_path: str | Path | None = None):
     ctx = org_log.RunContext(repo=repo, stage="rfc.pull")
     intake_result = _pull_inbox(repo, progress_path=progress_path, ctx=ctx)
     if intake_result is not None:
-        return intake_result
+        return _emit_pull_outcome(intake_result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if _is_terminal_rfc(repo, branch):
             continue
         if _latest_needs_revision_is_head(repo, branch) and _has_review_round_record(repo, branch):
             org_log.emit("rfc.pull.item_selected", {"kind": "author_revision", "branch": branch}, ctx=ctx)
-            return receive.reform_rfc(repo, branch.removeprefix(RFC_PREFIX))
+            result = receive.reform_rfc(repo, branch.removeprefix(RFC_PREFIX))
+            return _emit_pull_outcome(result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if _is_terminal_rfc(repo, branch):
@@ -64,28 +65,42 @@ def pull(repo, *, progress_path: str | Path | None = None):
         if _latest_needs_revision_is_head(repo, branch):
             continue
         org_log.emit("rfc.pull.item_selected", {"kind": "review", "branch": branch}, ctx=ctx)
-        return review.run_rfc_review(repo, branch.removeprefix(RFC_PREFIX))
+        result = review.run_rfc_review(repo, branch.removeprefix(RFC_PREFIX))
+        return _emit_pull_outcome(result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if lineage.split_pending(repo, branch):
             org_log.emit("rfc.pull.item_selected", {"kind": "lineage_refine", "branch": branch}, ctx=ctx)
-            return lineage.refine(repo, branch)
+            result = lineage.refine(repo, branch)
+            return _emit_pull_outcome(result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if lineage.rebaseline_pending(repo, branch):
             org_log.emit("rfc.pull.item_selected", {"kind": "lineage_rebaseline", "branch": branch}, ctx=ctx)
-            return lineage.rebaseline(repo, branch)
+            result = lineage.rebaseline(repo, branch)
+            return _emit_pull_outcome(result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if lineage.stale_revalidation_pending(repo, branch):
             org_log.emit("rfc.pull.item_selected", {"kind": "lineage_revalidate", "branch": branch}, ctx=ctx)
-            return lineage.revalidate_stale(repo, branch)
+            result = lineage.revalidate_stale(repo, branch)
+            return _emit_pull_outcome(result, ctx)
 
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if lineage.coarse_ready(repo, branch):
             org_log.emit("rfc.pull.item_selected", {"kind": "lineage_elaborate", "branch": branch}, ctx=ctx)
-            return lineage.elaborate(repo, branch)
+            result = lineage.elaborate(repo, branch)
+            return _emit_pull_outcome(result, ctx)
     return None
+
+
+def _emit_pull_outcome(result: dict[str, Any] | None, ctx: org_log.RunContext):
+    payload = {
+        "status": str(result.get("status") or "unknown") if isinstance(result, Mapping) else "unknown",
+        "failed_step": result.get("failed_step") if isinstance(result, Mapping) else None,
+    }
+    org_log.emit("rfc.pull.outcome", payload, ctx=ctx)
+    return result
 
 
 def _is_terminal_rfc(repo, branch: str) -> bool:

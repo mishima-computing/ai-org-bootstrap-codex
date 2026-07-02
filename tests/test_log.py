@@ -108,13 +108,22 @@ def test_projections_rebuild_from_log_alone_and_tail_cli(tmp_path):
         ctx=ctx.child(stage="approach", step="normalize_problem"),
     )
     org_log.emit("rfc.produce.completed", {"duration_seconds": 1.5}, ctx=ctx)
+    org_log.emit("inner.completed", {"duration_seconds": 400.0}, ctx=ctx.child(span_id="inner"))
+    org_log.emit("run.completed", {"duration_seconds": 849.0}, ctx=ctx.child(span_id="run"))
+    org_log.emit("rfc.pull.outcome", {"status": "needs_work", "failed_step": "grounding"}, ctx=ctx)
 
     projections = org_log.rebuild_projections(tmp_path, ctx.run_id)
 
-    assert projections["run_status"]["status"] == "succeeded"
+    assert projections["run_status"]["status"] == "completed"
+    assert projections["run_status"]["outcome"] == "needs_work"
+    assert projections["run_status"]["failed_step"] == "grounding"
     assert projections["progress_snapshot"]["progress"]["steps_done"] == ["normalize_problem"]
     assert any(row["duration_seconds"] == 1.5 for row in projections["timing_table"]["rows"])
-    assert "run-20260703T010208Z-projection succeeded" in projections["canonical_run_line"]["line"]
+    assert (
+        "run-20260703T010208Z-projection completed outcome=needs_work failed_step=grounding"
+        in projections["canonical_run_line"]["line"]
+    )
+    assert "seconds=849.000" in projections["canonical_run_line"]["line"]
 
     result = subprocess.run(
         [sys.executable, "-m", "ai_org.log", "tail", str(tmp_path), ctx.run_id],
@@ -122,7 +131,7 @@ def test_projections_rebuild_from_log_alone_and_tail_cli(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert "run-20260703T010208Z-projection succeeded" in result.stdout
+    assert "run-20260703T010208Z-projection completed outcome=needs_work failed_step=grounding" in result.stdout
 
 
 def _run_dir(repo: Path, run_id: str) -> Path:

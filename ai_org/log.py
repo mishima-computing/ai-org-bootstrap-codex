@@ -398,9 +398,12 @@ def _project_events(
     events = sorted(events, key=lambda event: str(event.get("event_id", "")))
     now = _utc_now()
     last_event = events[-1] if events else None
+    outcome = _latest_outcome(events)
     status = "running"
     if any(str(event.get("event_type", "")).endswith(".failed") for event in events):
         status = "failed"
+    elif outcome is not None:
+        status = "succeeded" if _outcome_is_success(outcome) else "completed"
     elif events and _has_success_terminal(events):
         status = "succeeded"
     elif last_event is not None:
@@ -482,10 +485,14 @@ def _project_events(
         "event_count": len(events),
         "skipped": dict(skipped),
     }
+    if outcome is not None:
+        run_status["outcome"] = outcome["status"]
+        if outcome.get("failed_step"):
+            run_status["failed_step"] = outcome["failed_step"]
     timing_table = {"rows": timing_rows, "skipped": dict(skipped)}
     attempt_projection = {"attempts": attempt_history, "skipped": dict(skipped)}
     artifact_projection = {"artifacts": artifact_index, "skipped": dict(skipped)}
-    canonical = {"line": _canonical_line(run_status, progress_snapshot, timing_rows)}
+    canonical = {"line": _canonical_line(run_status, progress_snapshot, events, timing_rows)}
     return {
         "run_status": run_status,
         "progress_snapshot": progress_snapshot,
@@ -503,13 +510,20 @@ def _write_projections(run_dir: Path, projections: Mapping[str, Any]) -> None:
         (projection_dir / f"{name}.json").write_text(_json_dumps(projection) + "\n", encoding="utf-8")
 
 
-def _canonical_line(run_status: Mapping[str, Any], progress: Mapping[str, Any], timing_rows: Sequence[Mapping[str, Any]]) -> str:
+def _canonical_line(
+    run_status: Mapping[str, Any],
+    progress: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    timing_rows: Sequence[Mapping[str, Any]],
+) -> str:
     steps = progress.get("progress", {}).get("steps_done", []) if isinstance(progress.get("progress"), Mapping) else []
     done = len(steps) if isinstance(steps, Sequence) else 0
     current = progress.get("current_step") or "-"
-    duration = sum(float(row.get("duration_seconds", 0.0) or 0.0) for row in timing_rows)
+    duration = _headline_duration_seconds(events, timing_rows)
+    outcome = f" outcome={run_status['outcome']}" if run_status.get("outcome") else ""
+    failed_step = f" failed_step={run_status['failed_step']}" if run_status.get("failed_step") else ""
     return (
-        f"{run_status.get('run_id')} {run_status.get('status')} "
+        f"{run_status.get('run_id')} {run_status.get('status')}{outcome}{failed_step} "
         f"events={run_status.get('event_count')} steps={done} current={current} seconds={duration:.3f}"
     )
 
@@ -549,6 +563,60 @@ def _has_success_terminal(events: Sequence[Mapping[str, Any]]) -> bool:
     return any(event_type in {"run.completed", "rfc.produce.completed"} for event_type in terminal) or any(
         event_type.endswith(".completed") and event_type.count(".") == 1 for event_type in terminal
     )
+
+
+def _latest_outcome(events: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if str(event.get("event_type", "")) != "rfc.pull.outcome":
+            continue
+        payload = _payload(event)
+        status = payload.get("status")
+        if not isinstance(status, str) or not status:
+            continue
+        outcome: dict[str, Any] = {"status": status}
+        failed_step = payload.get("failed_step")
+        if isinstance(failed_step, str) and failed_step:
+            outcome["failed_step"] = failed_step
+        if payload.get("ok") is True:
+            outcome["ok"] = True
+        return outcome
+    return None
+
+
+def _outcome_is_success(outcome: Mapping[str, Any]) -> bool:
+    status = str(outcome.get("status") or "")
+    return bool(outcome.get("ok")) or status in {
+        "accepted",
+        "elaborated",
+        "integrated",
+        "made",
+        "merged",
+        "ok",
+        "promoted",
+        "rebaselined",
+        "refined",
+        "reformed",
+        "reviewed",
+        "succeeded",
+        "success",
+    }
+
+
+def _headline_duration_seconds(
+    events: Sequence[Mapping[str, Any]], timing_rows: Sequence[Mapping[str, Any]]
+) -> float:
+    for row in reversed(timing_rows):
+        if row.get("event_type") == "run.completed":
+            return float(row.get("duration_seconds", 0.0) or 0.0)
+    timestamps = [
+        parsed
+        for event in events
+        for parsed in [_parse_time(str(event.get("occurred_at") or event.get("observed_at") or ""))]
+        if parsed is not None
+    ]
+    if len(timestamps) < 2:
+        return 0.0
+    return max((max(timestamps) - min(timestamps)).total_seconds(), 0.0)
 
 
 def _payload(event: Mapping[str, Any]) -> dict[str, Any]:
