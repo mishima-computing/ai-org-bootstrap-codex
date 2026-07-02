@@ -144,6 +144,7 @@ from __future__ import annotations
 
 import concurrent.futures
 from dataclasses import dataclass, field
+import inspect
 import json
 import logging
 import os
@@ -155,6 +156,7 @@ import tempfile
 import time
 from typing import Any, Mapping
 
+import ai_org.log as org_log
 from ai_org import git_wrapper
 import ai_org.reference as reference
 import ai_org.rfc.codex_exec as codex_exec
@@ -1190,11 +1192,12 @@ def intake(
     repo: str | Path,
     rfc_path: str = "rfc.json",
     progress_path: str | Path | None = None,
+    ctx: org_log.RunContext | None = None,
 ) -> dict[str, Any]:
     """Validate and ground a raw request, then promote it only when grounding is confident."""
     try:
         request = receive(source)
-        return produce_rfc(request, repo, rfc_path, progress_path=progress_path)
+        return produce_rfc(request, repo, rfc_path, progress_path=progress_path, ctx=ctx)
     except ValueError as exc:
         return {"status": "rejected", "error": str(exc)}
 
@@ -1204,89 +1207,123 @@ def produce_rfc(
     repo: str | Path,
     rfc_path: str = "rfc.json",
     progress_path: str | Path | None = None,
+    ctx: org_log.RunContext | None = None,
 ) -> dict[str, Any]:
     """Ground and write a validated registry request to git as ai-org/rfc/<id>:rfc.json."""
-    raw_rfc = _entrance_request(validated_request)
     repo_path = Path(repo).resolve()
-    grounding = _ground_with_contract(repo_path, raw_rfc)
-    if grounding.violations:
-        return {
-            "ok": False,
-            "status": "needs_work",
-            "error": "Grounding contract violations remain unresolved after verification.",
-            "failed_step": "grounding",
-            "proposed_rfc": grounding.rfc_view,
-            "grounding_notes": grounding.grounding_notes,
-            "violations": grounding.violations,
-        }
-    # Memento: needs_confirmation is default-off because autonomy is the AI Org's differentiator; the
-    # confirm-back loop is deferred to the roadmap end. Preserve assumptions/open questions non-blocking.
-    if not grounding.confident and _require_confirmation():
-        result = {
-            "status": "needs_confirmation",
-            "proposed_rfc": grounding.rfc_view,
-            "assumptions": grounding.assumptions,
-            "questions": grounding.questions,
-            "grounding_notes": grounding.grounding_notes,
-        }
+    log_ctx = ctx or org_log.RunContext(
+        repo=repo_path,
+        request_id=str(validated_request.get("id") or validated_request.get("request_id") or ""),
+        stage="receive",
+    )
+    with org_log.span("rfc.produce", log_ctx) as run_ctx:
+        raw_rfc = _entrance_request(validated_request)
+        with org_log.span("grounding", run_ctx.child(stage="grounding")) as grounding_ctx:
+            grounding = _call_ground_with_contract(repo_path, raw_rfc, grounding_ctx)
         if grounding.violations:
-            result["violations"] = grounding.violations
-        return result
+            org_log.emit(
+                "grounding.violations",
+                {"violations": grounding.violations, "grounding_notes": grounding.grounding_notes},
+                ctx=grounding_ctx,
+                severity="warning",
+            )
+            return {
+                "ok": False,
+                "status": "needs_work",
+                "error": "Grounding contract violations remain unresolved after verification.",
+                "failed_step": "grounding",
+                "proposed_rfc": grounding.rfc_view,
+                "grounding_notes": grounding.grounding_notes,
+                "violations": grounding.violations,
+            }
+        # Memento: needs_confirmation is default-off because autonomy is the AI Org's differentiator; the
+        # confirm-back loop is deferred to the roadmap end. Preserve assumptions/open questions non-blocking.
+        if not grounding.confident and _require_confirmation():
+            result = {
+                "status": "needs_confirmation",
+                "proposed_rfc": grounding.rfc_view,
+                "assumptions": grounding.assumptions,
+                "questions": grounding.questions,
+                "grounding_notes": grounding.grounding_notes,
+            }
+            if grounding.violations:
+                result["violations"] = grounding.violations
+            return result
 
-    rfc = (
-        grounding.rfc_view
-        if grounding.confident
-        else _rfc_with_non_blocking_grounding_uncertainty(grounding)
-    )
-    approach_context = _technical_approach_context(None, repo_path)
-    design_build = reference.build_from_rfc(rfc, approach_context, kinds=("design",))
-    design_terms = _reference_terms_from_build_result(design_build)
-    completeness_profile = reference.build_completeness_profile(rfc, approach_context)
-    reference.start_background_build(rfc, approach_context, kinds=("implementation",))
-    # Keep the entrypoint from pinning a stack; hardcoded language/environment/version forecloses engine/platform alternatives.
-    approach = form_technical_approach(
-        rfc,
-        repo_path,
-        context=approach_context,
-        reference_terms=design_terms,
-        completeness_profile=completeness_profile,
-        progress_path=progress_path,
-    )
-    if approach.get("ok") is False:
+        rfc = (
+            grounding.rfc_view
+            if grounding.confident
+            else _rfc_with_non_blocking_grounding_uncertainty(grounding)
+        )
+        approach_context = _technical_approach_context(None, repo_path)
+        with org_log.span("reference.design_build", run_ctx.child(stage="reference.design")) as ref_ctx:
+            design_build = reference.build_from_rfc(rfc, approach_context, kinds=("design",))
+            design_terms = _reference_terms_from_build_result(design_build)
+            org_log.emit(
+                "reference.design_build.completed",
+                {"terms": design_terms, "ok": not (isinstance(design_build, Mapping) and design_build.get("ok") is False)},
+                ctx=ref_ctx,
+            )
+        with org_log.span("reference.completeness_profile", run_ctx.child(stage="reference.completeness")) as profile_ctx:
+            completeness_profile = reference.build_completeness_profile(rfc, approach_context)
+            org_log.emit(
+                "reference.completeness_profile.completed",
+                {"profile": _json_safe(completeness_profile)},
+                ctx=profile_ctx,
+            )
+        with org_log.span("reference.implementation_background_scheduled", run_ctx.child(stage="reference.implementation")):
+            reference.start_background_build(rfc, approach_context, kinds=("implementation",))
+        # Keep the entrypoint from pinning a stack; hardcoded language/environment/version forecloses engine/platform alternatives.
+        approach = form_technical_approach(
+            rfc,
+            repo_path,
+            context=approach_context,
+            reference_terms=design_terms,
+            completeness_profile=completeness_profile,
+            progress_path=progress_path,
+            ctx=run_ctx.child(stage="approach"),
+        )
+        if approach.get("ok") is False:
+            return {
+                "ok": False,
+                "status": "needs_work",
+                "error": approach.get("error", "Technical Approach formation failed"),
+                "failed_step": approach.get("failed_step"),
+                "proposed_rfc": rfc,
+                "grounding_notes": grounding.grounding_notes,
+            }
+
+        rfc_id = _slug(rfc["working_title"])
+        branch = f"ai-org/rfc/{rfc_id}"
+        base = _default_branch(repo_path)
+        with org_log.span("rfc.promote", run_ctx.child(stage="promote", rfc_id=rfc_id)):
+            written = _write_rfc_branch(
+                repo_path,
+                branch,
+                base,
+                rfc,
+                rfc_path=rfc_path,
+                extra_files={
+                    "technical-approach.json": approach["technical_approach"],
+                    **approach.get("external_files", {}),
+                },
+                commit_message=f"rfc: receive {rfc['working_title']}",
+            )
+            org_log.emit(
+                "rfc.promoted",
+                {"rfc_id": rfc_id, "branch": branch, "commit": written["commit"]},
+                ctx=run_ctx.child(stage="promote", rfc_id=rfc_id),
+            )
         return {
-            "ok": False,
-            "status": "needs_work",
-            "error": approach.get("error", "Technical Approach formation failed"),
-            "failed_step": approach.get("failed_step"),
-            "proposed_rfc": rfc,
+            "ok": True,
+            "status": "promoted",
+            "id": rfc_id,
+            "branch": branch,
+            "commit": written["commit"],
+            "technical_approach_path": "technical-approach.json",
+            "reference_completeness_profile": _json_safe(completeness_profile),
             "grounding_notes": grounding.grounding_notes,
         }
-
-    rfc_id = _slug(rfc["working_title"])
-    branch = f"ai-org/rfc/{rfc_id}"
-    base = _default_branch(repo_path)
-    written = _write_rfc_branch(
-        repo_path,
-        branch,
-        base,
-        rfc,
-        rfc_path=rfc_path,
-        extra_files={
-            "technical-approach.json": approach["technical_approach"],
-            **approach.get("external_files", {}),
-        },
-        commit_message=f"rfc: receive {rfc['working_title']}",
-    )
-    return {
-        "ok": True,
-        "status": "promoted",
-        "id": rfc_id,
-        "branch": branch,
-        "commit": written["commit"],
-        "technical_approach_path": "technical-approach.json",
-        "reference_completeness_profile": _json_safe(completeness_profile),
-        "grounding_notes": grounding.grounding_notes,
-    }
 
 
 REFORM_STEP_ORDER = [
@@ -2526,6 +2563,7 @@ def form_technical_approach(
     reference_terms: Any | None = None,
     completeness_profile: Any | None = None,
     skip_reference_build: bool = False,
+    ctx: org_log.RunContext | None = None,
 ) -> dict[str, Any]:
     """Form step 10 of the documented 10-step Technical Approach procedure."""
     # Step 10 of 10: the orchestrator + requester/AI-Org boundary.
@@ -2546,37 +2584,81 @@ def form_technical_approach(
     steps_completed: list[dict[str, Any]] = []
     external_files: dict[str, Any] = {}
 
-    def start_step() -> float:
-        return time.monotonic() if progress_path is not None else 0.0
+    def start_step(step: str) -> dict[str, Any]:
+        step_ctx = ctx.child(step=step) if ctx is not None else None
+        event = None
+        if step_ctx is not None:
+            event = org_log.emit("approach.step.started", {"step": step}, ctx=step_ctx)
+        return {
+            "step": step,
+            "started_at": time.monotonic() if (progress_path is not None or step_ctx is not None) else None,
+            "ctx": step_ctx,
+            "event_id": event["event_id"] if event else None,
+        }
 
-    def mark_step_completed(step: str, started_at: float, tree: Mapping[str, Any]) -> None:
-        if progress_path is None:
+    def mark_step_completed(step_state: Mapping[str, Any], tree: Mapping[str, Any]) -> None:
+        step = str(step_state["step"])
+        started_at = step_state.get("started_at")
+        if started_at is None:
             return
-        steps_completed.append({"step": step, "seconds": time.monotonic() - started_at})
-        _write_technical_approach_progress(
-            progress_path,
-            tree,
-            steps_completed,
-            _next_technical_approach_step(step_order, step),
-        )
+        seconds = time.monotonic() - float(started_at)
+        current_step = _next_technical_approach_step(step_order, step)
+        steps_completed.append({"step": step, "seconds": seconds})
+        step_ctx = step_state.get("ctx")
+        if isinstance(step_ctx, org_log.RunContext):
+            org_log.emit(
+                "approach.step.completed",
+                {
+                    "step": step,
+                    "duration_seconds": seconds,
+                    "technical_approach": _approach_snapshot(tree),
+                    "current_step": current_step,
+                },
+                ctx=step_ctx,
+                causation_event_id=step_state.get("event_id"),
+            )
+        if progress_path is not None:
+            _write_technical_approach_progress(
+                progress_path,
+                tree,
+                steps_completed,
+                current_step,
+            )
 
-    started_at = start_step()
+    def mark_step_failed(step_state: Mapping[str, Any], failure: Mapping[str, Any]) -> dict[str, Any]:
+        step_ctx = step_state.get("ctx")
+        started_at = step_state.get("started_at")
+        if isinstance(step_ctx, org_log.RunContext) and started_at is not None:
+            org_log.emit(
+                "approach.step.failed",
+                {
+                    "step": step_state["step"],
+                    "duration_seconds": time.monotonic() - float(started_at),
+                    "error": failure.get("error", f"{step_state['step']} failed"),
+                },
+                ctx=step_ctx,
+                severity="error",
+                causation_event_id=step_state.get("event_id"),
+            )
+        return dict(failure)
+
+    step_state = start_step("normalize_problem")
     normalized = _normalize_problem(rfc_view, approach_context)
     failure = _technical_approach_step_failure("normalize_problem", normalized)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     steps["normalize_problem"] = normalized
     partial_tree: dict[str, Any] = {"problem": _problem_root_from_normalized(normalized)}
-    mark_step_completed("normalize_problem", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
-    started_at = start_step()
+    step_state = start_step("extract_constraints")
     constraints = _extract_constraints(rfc_view, repo_path, approach_context, dict(partial_tree))
     failure = _technical_approach_step_failure("extract_constraints", constraints)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     steps["extract_constraints"] = constraints
     partial_tree["problem"]["constraints"] = _constraint_tree_nodes(constraints)
-    mark_step_completed("extract_constraints", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
     prior_art_reference_terms = reference_terms
     if prior_art_reference_terms is None and not skip_reference_build:
@@ -2585,7 +2667,7 @@ def form_technical_approach(
         steps["build_reference_from_rfc"] = _json_safe(design_build)
         reference.start_background_build(rfc_view, approach_context, kinds=("implementation",))
 
-    started_at = start_step()
+    step_state = start_step("build_prior_art_map")
     prior_art = _build_prior_art_map(
         rfc_view,
         repo_path,
@@ -2595,13 +2677,13 @@ def form_technical_approach(
     )
     failure = _technical_approach_step_failure("build_prior_art_map", prior_art)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     steps["build_prior_art_map"] = prior_art
     partial_tree["problem"]["prior_art"] = _prior_art_tree_nodes(prior_art)
-    mark_step_completed("build_prior_art_map", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
     if effective_provided_approach is None:
-        started_at = start_step()
+        step_state = start_step("generate_candidates")
         candidates = _generate_candidates(
             normalized,
             constraints,
@@ -2611,12 +2693,12 @@ def form_technical_approach(
         )
         failure = _technical_approach_step_failure("generate_candidates", candidates)
         if failure:
-            return failure
+            return mark_step_failed(step_state, failure)
         steps["generate_candidates"] = candidates
         partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates)
-        mark_step_completed("generate_candidates", started_at, partial_tree)
+        mark_step_completed(step_state, partial_tree)
 
-        started_at = start_step()
+        step_state = start_step("evaluate_candidates")
         evaluations = _evaluate_candidates(
             candidates,
             normalized,
@@ -2626,12 +2708,12 @@ def form_technical_approach(
         )
         failure = _technical_approach_step_failure("evaluate_candidates", evaluations)
         if failure:
-            return failure
+            return mark_step_failed(step_state, failure)
         steps["evaluate_candidates"] = evaluations
         partial_tree["problem"]["question"] = _partial_question_tree(candidates=candidates, evaluations=evaluations)
-        mark_step_completed("evaluate_candidates", started_at, partial_tree)
+        mark_step_completed(step_state, partial_tree)
 
-        started_at = start_step()
+        step_state = start_step("select_approach")
         selected = _select_approach(
             candidates,
             evaluations,
@@ -2641,18 +2723,18 @@ def form_technical_approach(
         )
         failure = _technical_approach_step_failure("select_approach", selected)
         if failure:
-            return failure
+            return mark_step_failed(step_state, failure)
         steps["select_approach"] = selected
         partial_tree["problem"]["question"] = _partial_question_tree(
             candidates=candidates,
             evaluations=evaluations,
             selected=selected,
         )
-        mark_step_completed("select_approach", started_at, partial_tree)
+        mark_step_completed(step_state, partial_tree)
         source = "generated"
         _fill_ai_deliberated_tech_stack(rfc_view, selected, candidates)
     else:
-        started_at = start_step()
+        step_state = start_step("select_approach")
         steps["provided_approach"] = _json_safe(effective_provided_approach)
         candidates = None
         evaluations = None
@@ -2662,10 +2744,10 @@ def form_technical_approach(
             selected=selected,
             provided_approach=effective_provided_approach,
         )
-        mark_step_completed("select_approach", started_at, partial_tree)
+        mark_step_completed(step_state, partial_tree)
         source = "requester_provided_refined"
 
-    started_at = start_step()
+    step_state = start_step("implementation_strategy")
     implementation = _implementation_strategy(
         selected,
         prior_art,
@@ -2677,7 +2759,7 @@ def form_technical_approach(
     )
     failure = _technical_approach_step_failure("implementation_strategy", implementation)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     steps["implementation_strategy"] = implementation
     partial_tree["problem"]["question"] = _partial_question_tree(
         candidates=candidates,
@@ -2686,11 +2768,11 @@ def form_technical_approach(
         implementation=implementation,
         provided_approach=effective_provided_approach,
     )
-    mark_step_completed("implementation_strategy", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
     domain_facets = _domain_profile_facets(completeness_profile)
     domain_reference_lookups = _domain_reference_lookups(domain_facets, approach_context) if domain_facets else {}
-    started_at = start_step()
+    step_state = start_step("domain_specification")
     domain_specification = _domain_specification(
         domain_facets,
         domain_reference_lookups,
@@ -2702,7 +2784,7 @@ def form_technical_approach(
     )
     failure = _technical_approach_step_failure("domain_specification", domain_specification)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     domain_specification = _externalize_domain_specification(domain_specification, external_files)
     steps["domain_specification"] = domain_specification
     partial_tree["problem"]["question"] = _partial_question_tree(
@@ -2713,9 +2795,9 @@ def form_technical_approach(
         domain_specification=domain_specification,
         provided_approach=effective_provided_approach,
     )
-    mark_step_completed("domain_specification", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
-    started_at = start_step()
+    step_state = start_step("right_size_patch_plan")
     patch_plan = _right_size_patch_plan(
         selected,
         implementation,
@@ -2725,7 +2807,7 @@ def form_technical_approach(
     )
     failure = _technical_approach_step_failure("right_size_patch_plan", patch_plan)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     steps["right_size_patch_plan"] = patch_plan
     partial_tree["problem"]["question"] = _partial_question_tree(
         candidates=candidates,
@@ -2736,9 +2818,9 @@ def form_technical_approach(
         patch_plan=patch_plan,
         provided_approach=effective_provided_approach,
     )
-    mark_step_completed("right_size_patch_plan", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
-    started_at = start_step()
+    step_state = start_step("surface_risks")
     risks = _surface_risks(
         selected,
         implementation,
@@ -2749,17 +2831,17 @@ def form_technical_approach(
     )
     failure = _technical_approach_step_failure("surface_risks", risks)
     if failure:
-        return failure
+        return mark_step_failed(step_state, failure)
     risks = _with_requester_stack_org_profile_risk(risks, rfc_view, selected)
     steps["surface_risks"] = risks
 
     risk_target_failure = _validate_risk_targets(risks, candidates, selected)
     if risk_target_failure:
-        return {
+        return mark_step_failed(step_state, {
             "ok": False,
             "error": risk_target_failure,
             "failed_step": "surface_risks",
-        }
+        })
 
     partial_tree["problem"]["question"] = _question_tree(
         selected,
@@ -2772,7 +2854,7 @@ def form_technical_approach(
         [],
         provided_approach=effective_provided_approach,
     )
-    mark_step_completed("surface_risks", started_at, partial_tree)
+    mark_step_completed(step_state, partial_tree)
 
     return {
         "ok": True,
@@ -2796,14 +2878,37 @@ def form_technical_approach(
     }
 
 
-def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> GroundingResult:
+def _ground_with_contract(
+    repo: str | Path,
+    rfc_view: dict[str, Any],
+    *,
+    ctx: org_log.RunContext | None = None,
+) -> GroundingResult:
     best_grounding: GroundingResult | None = None
     previous_violations: list[str] = []
     for attempt in range(MAX_REGROUNDS + 1):
-        grounding = _ground_request(repo, rfc_view, previous_violations if attempt else None)
+        attempt_ctx = ctx.child(attempt=attempt + 1) if ctx is not None else None
+        org_log.emit(
+            "grounding.attempt.started",
+            {"attempt": attempt + 1, "previous_violations": previous_violations},
+            ctx=attempt_ctx,
+        ) if attempt_ctx is not None else None
+        grounding = _ground_request(repo, rfc_view, previous_violations if attempt else None, ctx=attempt_ctx)
         best_grounding = grounding
         verification = _verify_grounding(rfc_view, grounding.rfc_view, grounding)
         violations = list(verification["violations"])
+        if attempt_ctx is not None:
+            org_log.emit(
+                "grounding.attempt.completed",
+                {
+                    "attempt": attempt + 1,
+                    "confident": grounding.confident,
+                    "violations": violations,
+                    "grounding_notes": grounding.grounding_notes,
+                },
+                ctx=attempt_ctx,
+                severity="warning" if violations else "info",
+            )
         if not violations:
             return grounding
         previous_violations = violations
@@ -2820,10 +2925,26 @@ def _ground_with_contract(repo: str | Path, rfc_view: dict[str, Any]) -> Groundi
     )
 
 
+def _call_ground_with_contract(
+    repo: str | Path,
+    rfc_view: dict[str, Any],
+    ctx: org_log.RunContext,
+) -> GroundingResult:
+    try:
+        parameters = inspect.signature(_ground_with_contract).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "ctx" in parameters:
+        return _ground_with_contract(repo, rfc_view, ctx=ctx)
+    return _ground_with_contract(repo, rfc_view)
+
+
 def _ground_request(
     repo: str | Path,
     rfc_view: dict[str, Any],
     previous_violations: list[str] | None = None,
+    *,
+    ctx: org_log.RunContext | None = None,
 ) -> GroundingResult:
     """Research and correct a rough request before it becomes an RFC branch."""
     prompt = _grounding_prompt(rfc_view, previous_violations)
@@ -2847,9 +2968,12 @@ def _ground_request(
             str(schema_file),
             prompt,
         ]
+        log_ctx = ctx or org_log.RunContext(repo=repo, stage="grounding")
         try:
-            completed = subprocess.run(
+            completed = org_log.logged_subprocess(
                 cmd,
+                ctx=log_ctx,
+                capture_policy="head_tail",
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -5640,23 +5764,12 @@ def _write_technical_approach_progress(
     steps_completed: list[Mapping[str, Any]],
     current_step: str | None,
 ) -> None:
-    safe_steps = [
-        {"step": str(step.get("step", "")), "seconds": float(step.get("seconds", 0.0))}
-        for step in steps_completed
-    ]
-    snapshot = {
-        "technical_approach": _approach_snapshot(partial_tree),
-        "steps_completed": safe_steps,
-        "current_step": current_step,
-        "progress": {
-            "steps_done": [step["step"] for step in safe_steps],
-            "steps_completed": safe_steps,
-            "current_step": current_step,
-        },
-    }
-    path = Path(progress_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot, indent=2, default=str, sort_keys=True), encoding="utf-8")
+    org_log.write_progress_projection(
+        progress_path,
+        technical_approach=_approach_snapshot(partial_tree),
+        steps_completed=steps_completed,
+        current_step=current_step,
+    )
 
 
 def _technical_approach_step_failure(step: str, result: Any) -> dict[str, Any] | None:

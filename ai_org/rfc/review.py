@@ -68,6 +68,10 @@ ROUND_VERDICTS = ["direction-ok", "needs_revision", "nak"]
 EVIDENCE_TYPES = ["reference", "prior_decision", "repo_fact", "tree_node", "rfc_field"]
 DEFAULT_MAX_REVIEW_ROUNDS = 5
 
+# Memento: Log V1 wires receive/pull/Codex boundaries first. Deeper
+# review.round.*, review.axis.*, review.aufheben.*, and review.verdict events
+# belong here when review history projections are added.
+
 
 EVIDENCE_SCHEMA: dict[str, Any] = {
     "type": "object",

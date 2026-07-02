@@ -33,6 +33,10 @@ METADATA_PATH = "rfc-metadata.json"
 VALIDATION_ATTEMPTS = 2
 MAX_RESOLUTION_DEPTH = 64
 
+# Memento: Log V1 deliberately stops before lineage.* wiring. Add
+# lineage.refine/rebaseline/revalidate events at the entry points in this file
+# when lineage projections become consumers.
+
 LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,

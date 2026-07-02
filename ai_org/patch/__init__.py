@@ -36,6 +36,10 @@ from . import functional_check, implement
 RFC_PREFIX = "ai-org/rfc/"
 CONTRIB_PREFIX = "ai-org/contrib/"
 
+# Memento: Log V1 does not yet wire patch.attempt.* or acceptance.verdict.*
+# events. Add them around make()/functional_check once attempt-history
+# consumers move beyond receive and subprocess boundaries.
+
 
 def make(repo, rfc_id_or_branch: str, rfc_path: str = "rfc.json", cap: int = 3) -> dict:
     """Produce an accepted contribution branch, retrying rejected attempts."""

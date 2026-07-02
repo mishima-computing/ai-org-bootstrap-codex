@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from typing import Any
 
+import ai_org.log as org_log
+
 
 def run_json(
     repo: Path,
@@ -17,6 +19,7 @@ def run_json(
     schema_filename: str,
     output_filename: str,
     failure_label: str,
+    ctx: org_log.RunContext | None = None,
 ) -> dict[str, Any]:
     """Run codex exec and return the raw JSON output text or a closed failure."""
     temp_dir = Path(tempfile.mkdtemp(prefix="ai-org-rfc-codex-"))
@@ -37,9 +40,12 @@ def run_json(
             str(schema_file),
             prompt,
         ]
+        log_ctx = ctx or org_log.RunContext(repo=repo, stage="codex_exec")
         try:
-            completed = subprocess.run(
+            completed = org_log.logged_subprocess(
                 cmd,
+                ctx=log_ctx,
+                capture_policy="head_tail",
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

@@ -34,6 +34,10 @@ CONTRIB_PREFIX = "ai-org/contrib/"
 SUBSYSTEM_BRANCH = "ai-org/subsystem"
 MAINLINE_BRANCH = "ai-org/mainline"
 
+# Memento: Log V1 leaves merge.subsystem.* and merge.mainline.* as follow-up
+# wiring. The authoritative history boundary is ready in ai_org.log; add events
+# here when merge projections exist.
+
 
 def pull(repo):
     """Integrate one accepted contribution or one subsystem tree, if pending."""

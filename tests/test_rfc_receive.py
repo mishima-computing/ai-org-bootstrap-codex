@@ -295,6 +295,17 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
         "start_background_build",
         "form_technical_approach",
     ]
+    log_events = [
+        json.loads(line)
+        for log_path in (repo / ".ai-org" / "log" / "runs").glob("*/*/supervisor.jsonl")
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    event_types = [event["event_type"] for event in log_events]
+    assert "rfc.produce.started" in event_types
+    assert "reference.design_build.started" in event_types
+    assert "reference.completeness_profile.started" in event_types
+    assert "rfc.promoted" in event_types
+    assert "rfc.produce.completed" in event_types
 
 
 def test_produce_rfc_forwards_progress_path(tmp_path, monkeypatch):
