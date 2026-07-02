@@ -261,6 +261,10 @@ def refine(
 def right_sized(rfc_view_or_approach: Mapping[str, Any]) -> bool:
     """Return whether the plan looks like one bounded, verifiable leaf."""
     approach = _unwrap_approach(rfc_view_or_approach)
+    # Memento: child approaches carry lineage_parent/approach_slice instead of
+    # the root patch_plan shape; leafed children are already right-sized.
+    if isinstance(approach.get("lineage_parent"), Mapping) and isinstance(approach.get("approach_slice"), Mapping):
+        return True
     patch_plan = _patch_plan(approach)
     implementation = _implementation(approach)
 
@@ -353,7 +357,10 @@ def split_pending(repo: str | Path, branch: str) -> bool:
         return False
     metadata = _read_json(repo_path, rfc_branch, METADATA_PATH)
     if metadata["ok"] and isinstance(metadata["json"].get("lineage"), Mapping):
-        if metadata["json"]["lineage"].get("horizon_status") == "coarse":
+        horizon_status = metadata["json"]["lineage"].get("horizon_status")
+        # Memento: leafed means already right-sized; leaves go to patch, never
+        # back through lineage refine.
+        if horizon_status in {"leafed", "coarse"}:
             return False
     approach = _read_json(repo_path, rfc_branch, APPROACH_PATH)
     rfc = _read_rfc(repo_path, rfc_branch, "rfc.json")

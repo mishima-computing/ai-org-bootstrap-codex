@@ -562,6 +562,66 @@ def test_elaborate_refines_coarse_child_once_dependencies_resolve(tmp_path, monk
     assert result["kwargs"] == {"horizon": 2}
 
 
+def test_leafed_child_is_not_split_pending_and_is_right_sized(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write_child_rfc(repo, "0001-1", "main")
+    child = _child("leaf", "Leaf child", "leafed", ["success_criteria:0"], ["Leaf is verifiable."], ["Battle state"])
+    child_approach = lineage._child_approach("0001", "ai-org/rfc/0001", child, _approach())
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/0001-1",
+        {
+            "rfc-metadata.json": {
+                "lineage": {
+                    "node_id": "0001-1",
+                    "root_serial": "0001",
+                    "parent_id": "0001",
+                    "parent_branch": "ai-org/rfc/0001",
+                    "horizon_status": "leafed",
+                }
+            },
+            "technical-approach.json": child_approach,
+        },
+        subject="rfc: leafed metadata",
+    )
+
+    assert lineage.right_sized(child_approach) is True
+    assert lineage.split_pending(repo, "ai-org/rfc/0001-1") is False
+
+
+def test_coarse_child_is_still_not_split_pending(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write_child_rfc(repo, "0001-2", "main")
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/0001-2",
+        {
+            "rfc-metadata.json": {
+                "lineage": {
+                    "node_id": "0001-2",
+                    "root_serial": "0001",
+                    "parent_id": "0001",
+                    "parent_branch": "ai-org/rfc/0001",
+                    "horizon_status": "coarse",
+                }
+            },
+            "technical-approach.json": _approach(),
+        },
+        subject="rfc: coarse metadata",
+    )
+
+    assert lineage.split_pending(repo, "ai-org/rfc/0001-2") is False
+
+
+def test_root_split_pending_behavior_is_unchanged(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
+    git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+
+    assert lineage.right_sized({"rfc": _rfc(), "technical_approach": _approach()}) is False
+    assert lineage.split_pending(repo, "ai-org/rfc/feature") is True
+
+
 def test_rfc_pull_runs_lineage_after_reviewable_and_before_coarse_elaboration(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _commit_on_branch(repo, "ai-org/rfc/reviewable", "propose rfc")
