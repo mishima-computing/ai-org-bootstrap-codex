@@ -39,6 +39,8 @@ def pull(repo, *, progress_path: str | Path | None = None):
     for branch in sorted(git_wrapper.branches(repo, f"{RFC_PREFIX}*")):
         if git_wrapper.has_subject(repo, branch, "rfc: direction-ok"):
             continue
+        if git_wrapper.has_subject(repo, branch, "rfc: needs-revision"):
+            continue
         if git_wrapper.has_subject(repo, branch, "rfc: nak"):
             continue
         return review.run_rfc_review(repo, branch.removeprefix(RFC_PREFIX))

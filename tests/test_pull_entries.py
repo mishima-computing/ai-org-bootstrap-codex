@@ -13,6 +13,7 @@ def test_rfc_pull_reviews_one_unreviewed_rfc(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _commit_on_branch(repo, "ai-org/rfc/already-ok", "rfc: direction-ok")
     _commit_on_branch(repo, "ai-org/rfc/already-nak", "rfc: nak")
+    _commit_on_branch(repo, "ai-org/rfc/waiting-v2", "rfc: needs-revision round 1")
     _commit_on_branch(repo, "ai-org/rfc/pending", "propose rfc")
     calls = []
     result = {"status": "reviewed"}
@@ -31,6 +32,7 @@ def test_rfc_pull_returns_none_when_no_rfc_is_pending(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _commit_on_branch(repo, "ai-org/rfc/already-ok", "rfc: direction-ok")
     _commit_on_branch(repo, "ai-org/rfc/already-nak", "rfc: nak")
+    _commit_on_branch(repo, "ai-org/rfc/waiting-v2", "rfc: needs-revision round 1")
     monkeypatch.setattr(
         rfc.review,
         "run_rfc_review",

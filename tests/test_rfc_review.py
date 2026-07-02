@@ -37,35 +37,99 @@ def _rfc_view() -> dict[str, object]:
         "grounding_provenance": "Test fixture grounding.",
         "open_questions": [],
         "non_goals_out_of_scope": [],
-        "proposal_hint": "Run five dimension reviewers and consolidate objections.",
+        "proposal_hint": "Run dimension reviewers and consolidate objections.",
         "alternatives_considered": ["Keep loading RFCs directly."],
     }
 
 
-def _revised_rfc(suffix: str = "") -> dict[str, object]:
-    revised = _rfc_view()
-    revised.update(
+def _approach_tree() -> dict[str, object]:
+    return {
+        "problem": {
+            "id": "problem",
+            "summary": "RFC review needs anchored direction critique.",
+            "constraints": {
+                "hard": [{"id": "constraint:hard:1", "text": "Review never authors fixes."}],
+                "soft": [{"id": "constraint:soft:1", "text": "Keep output schema safe."}],
+            },
+            "prior_art": [{"id": "prior_art:lkml", "summary": "LKML RFC threads use anchored replies."}],
+            "question": {
+                "id": "question:approach",
+                "candidates": [
+                    {"id": "candidate:status-quo", "summary": "Keep the old shell."},
+                    {"id": "candidate:anchored-review", "summary": "Use anchored objections."},
+                ],
+                "decision": {
+                    "id": "decision:anchored-review",
+                    "selected_candidate_id": "candidate:anchored-review",
+                    "implementation": {
+                        "id": "implementation:anchored-review",
+                        "patch_plan": {"id": "patch_plan:anchored-review", "first": "Review only."},
+                        "risks": [{"id": "risk:review-loop", "summary": "Review could author fixes."}],
+                    },
+                },
+            },
+        },
+        "cross_links": [
+            {"from": "decision:anchored-review", "to": "question:approach", "type": "answers"},
+        ],
+    }
+
+
+def _evidence(term: str = "Manual RFC") -> list[dict[str, object]]:
+    return [{"source_type": "reference", "citation": "Reference lookup consulted.", "consulted_terms": [term]}]
+
+
+def _objection(
+    axis: str = "approach",
+    *,
+    objection_id: str | None = None,
+    anchors: list[str] | None = None,
+    objection_type: str = "blocking",
+    claim: str = "The selected approach does not preserve the review boundary.",
+    evidence: list[dict[str, object]] | None = None,
+    impact: str = "Review can mutate the direction before the author reposts.",
+    action: str = "revise_subtree",
+) -> dict[str, object]:
+    return {
+        "objection_id": objection_id or f"{axis}:1",
+        "anchor_node_ids": ["decision:anchored-review"] if anchors is None else anchors,
+        "axis": axis,
+        "type": objection_type,
+        "claim": claim,
+        "evidence": evidence if evidence is not None else _evidence(),
+        "impact": impact,
+        "requested_author_action": action,
+        "status": "open",
+    }
+
+
+def _axis_payload(axis: str, objections: list[dict[str, object]] | None = None) -> str:
+    objections = objections or []
+    return json.dumps(
         {
-            "working_title": f"Revised Manual RFC{suffix}",
-            "problem_or_motivation": f"The RFC review workflow needs structured convergence{suffix}.",
-            "intended_users_or_jobs": f"Contributors and maintainers{suffix}.",
-            "desired_outcomes_success": f"Review state stays schema-backed{suffix}.",
-            "background_facts": f"Keep all codex calls read-only and schema-backed{suffix}.",
-            "proposal_hint": f"Run five reviewers, then synthesize into a revised RFC{suffix}.",
-            "alternatives_considered": [f"Skip consolidation and accept reviewer drift{suffix}."],
+            "axis": axis,
+            "verdict": "objections_pending" if any(item["type"] == "blocking" for item in objections) else "Direction-reviewed-by",
+            "objections": objections,
         }
     )
-    return revised
 
 
-def _aufheben_response(verdict: str, revised_rfc: dict[str, object], **extra) -> str:
-    payload = {
-        "verdict": verdict,
-        "revised_rfc": revised_rfc,
-        "situation_read": "Synthesized reviewer objections into one RFC direction.",
-        **extra,
-    }
-    return json.dumps(payload)
+def _aufheben_payload(
+    verdict: str = "direction-ok",
+    objections: list[dict[str, object]] | None = None,
+    *,
+    nak_reason: str = "",
+) -> str:
+    return json.dumps(
+        {
+            "verdict": verdict,
+            "summary": "Consolidated the RFC direction-review round.",
+            "deduplicated_objections": objections or [],
+            "contradiction_resolutions": [],
+            "nak_reason": nak_reason,
+            "evidence": _evidence() if verdict == "nak" else [],
+        }
+    )
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -77,7 +141,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _init_repo(repo: Path, rfc: dict[str, object] | None = None) -> None:
+def _init_repo(repo: Path, *, include_approach: bool = True) -> None:
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
     _git(repo, "config", "user.name", "RFC Test")
     _git(repo, "config", "user.email", "rfc-test@example.invalid")
@@ -86,18 +150,17 @@ def _init_repo(repo: Path, rfc: dict[str, object] | None = None) -> None:
     _git(repo, "commit", "-m", "base")
     _git(repo, "branch", "-M", "main")
     _git(repo, "checkout", "-B", RFC_BRANCH, "main")
-    (repo / "rfc.json").write_text(json.dumps(rfc or _rfc_view()) + "\n", encoding="utf-8")
+    (repo / "rfc.json").write_text(json.dumps(_rfc_view()) + "\n", encoding="utf-8")
     _git(repo, "add", "rfc.json")
+    if include_approach:
+        (repo / "technical-approach.json").write_text(json.dumps(_approach_tree()) + "\n", encoding="utf-8")
+        _git(repo, "add", "technical-approach.json")
     _git(repo, "commit", "-m", "initial rfc")
     _git(repo, "checkout", "main")
 
 
 def _latest_commit_message(repo: Path) -> str:
-    return _git(repo, "log", "-1", "--pretty=%B").stdout
-
-
-def _commit_count(repo: Path, ref: str = "HEAD") -> int:
-    return int(_git(repo, "rev-list", "--count", ref).stdout.strip())
+    return _git(repo, "log", "-1", "--pretty=%B", RFC_BRANCH).stdout
 
 
 def _schema_kind(output_schema: str | Path) -> str:
@@ -120,288 +183,201 @@ def _install_codex_fake(monkeypatch: pytest.MonkeyPatch, handler):
             repo = Path(cmd[cmd.index("-C") + 1])
             prompt = cmd[-1]
             payload, returncode = handler(repo, prompt, output_schema)
-            out_file.write_text(payload, encoding="utf-8")
+            if payload is not None:
+                out_file.write_text(payload, encoding="utf-8")
             return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="")
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(review.subprocess, "run", fake_run)
 
 
-def test_all_reviewers_clear_direction_ok_in_one_round(tmp_path, monkeypatch):
-    _init_repo(tmp_path)
-    calls = []
+def _patch_reference(monkeypatch: pytest.MonkeyPatch, calls: list[str] | None = None) -> None:
+    def fake_lookup(term, context=None, kind=None):
+        if calls is not None:
+            calls.append(term)
+        return {"term": term, "candidates": [{"summary": f"Stored guidance for {term}", "source": "Reference"}]}
 
-    def handler(repo, prompt, output_schema):
-        assert _schema_kind(output_schema) == "reviewer"
-        calls.append({"repo": repo, "prompt": prompt, "output_schema": output_schema})
-        return json.dumps({"has_objection": False, "detail": "No objection."}), 0
-
-    _install_codex_fake(monkeypatch, handler)
-
-    before = _commit_count(tmp_path, RFC_BRANCH)
-    result = review.run_rfc_review(tmp_path, RFC_ID)
-
-    assert result.status == "direction-ok"
-    assert result.rounds == 1
-    assert result.final_view == _rfc_view()
-    assert result.resolved == [dim.key for dim in review.DIMENSIONS]
-    assert result.unresolved == []
-    assert len(calls) == 5
-    assert all(call["repo"] == tmp_path for call in calls)
-    assert _commit_count(tmp_path, RFC_BRANCH) == before + 1
-    assert _latest_commit_message(tmp_path).startswith("rfc: direction-ok (1 rounds)")
+    monkeypatch.setattr(review.reference, "lookup", fake_lookup)
 
 
-def test_aufheben_proceed_revised_rfc_feeds_next_review_round(tmp_path, monkeypatch):
-    _init_repo(tmp_path)
-    revised = _revised_rfc()
-    reviewer_prompts = []
-    reviewer_calls = 0
-    aufheben_calls = 0
-
-    def handler(repo, prompt, output_schema):
-        nonlocal reviewer_calls, aufheben_calls
-        kind = _schema_kind(output_schema)
-        if kind == "aufheben":
-            aufheben_calls += 1
-            return _aufheben_response("proceed", revised), 0
-
-        reviewer_prompts.append(prompt)
-        dim = review.DIMENSIONS[reviewer_calls % len(review.DIMENSIONS)].key
-        round_index = reviewer_calls // len(review.DIMENSIONS)
-        reviewer_calls += 1
-        has_objection = round_index == 0 and dim == "approach"
-        return (
-            json.dumps(
-                {
-                    "has_objection": has_objection,
-                    "detail": f"{dim} {'objects' if has_objection else 'is clear'}",
-                }
-            ),
-            0,
-        )
-
-    _install_codex_fake(monkeypatch, handler)
-
-    result = review.run_rfc_review(tmp_path, RFC_ID)
-
-    assert result.status == "direction-ok"
-    assert result.rounds == 2
-    assert result.final_view == revised
-    assert json.loads(_git(tmp_path, "show", f"{RFC_BRANCH}:rfc.json").stdout) == revised
-    assert _latest_commit_message(tmp_path).startswith("rfc: direction-ok (2 rounds)")
-    assert aufheben_calls == 1
-    assert reviewer_calls == 2 * len(review.DIMENSIONS)
-    second_round_prompts = reviewer_prompts[len(review.DIMENSIONS):]
-    assert len(second_round_prompts) == len(review.DIMENSIONS)
-    for prompt in second_round_prompts:
-        assert "Current structured revised RFC to re-critique" in prompt
-        for field, value in revised.items():
-            if isinstance(value, list):
-                for item in value:
-                    assert item in prompt
-            elif isinstance(value, dict):
-                assert json.dumps(value, sort_keys=True, ensure_ascii=True) in prompt
-            else:
-                assert value in prompt
-    assert result.history[0]["aufheben"]["verdict"] == "proceed"
-    assert result.history[0]["aufheben"]["situation_read"]
-
-
-def test_aufheben_escalate_naks_immediately(tmp_path, monkeypatch):
-    _init_repo(tmp_path)
-    reviewer_calls = 0
-    aufheben_calls = 0
-    reason = "need and compatibility objections cannot both be satisfied"
-
-    def handler(repo, prompt, output_schema):
-        nonlocal reviewer_calls, aufheben_calls
-        kind = _schema_kind(output_schema)
-        if kind == "aufheben":
-            aufheben_calls += 1
-            return (
-                _aufheben_response(
-                    "escalate",
-                    _revised_rfc(" escalation"),
-                    escalation_reason=reason,
-                ),
-                0,
-            )
-
-        dim = review.DIMENSIONS[reviewer_calls % len(review.DIMENSIONS)].key
-        reviewer_calls += 1
-        return json.dumps({"has_objection": dim == "compat", "detail": f"{dim} review detail"}), 0
-
-    _install_codex_fake(monkeypatch, handler)
+def test_missing_technical_approach_fails_closed_without_codex(tmp_path, monkeypatch):
+    _init_repo(tmp_path, include_approach=False)
 
     result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
-    assert result.rounds == 1
-    assert result.rounds < review.CAP
-    assert result.escalation_reason == reason
-    assert [objection.dimension for objection in result.unresolved] == ["compat"]
-    assert aufheben_calls == 1
-    assert reviewer_calls == len(review.DIMENSIONS)
-    assert result.history[0]["aufheben"]["verdict"] == "escalate"
-    message = _latest_commit_message(tmp_path)
-    assert message.startswith("rfc: nak (1 rounds)")
-    assert "unresolved: compat" in message
+    assert result.rounds == 0
+    assert "technical-approach.json" in result.escalation_reason
+    assert "rfc: nak" in _latest_commit_message(tmp_path)
+    assert Path(result.round_record_path).exists()
 
 
-def test_garbled_aufheben_json_fail_closed_nak(tmp_path, monkeypatch):
+def test_dangling_anchor_ids_feedback_retry(tmp_path, monkeypatch):
     _init_repo(tmp_path)
+    _patch_reference(monkeypatch)
+    reviewer_calls = 0
+    prompts: list[str] = []
+
+    def handler(repo, prompt, output_schema):
+        nonlocal reviewer_calls
+        kind = _schema_kind(output_schema)
+        if kind == "aufheben":
+            return _aufheben_payload("direction-ok"), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
+        reviewer_calls += 1
+        prompts.append(prompt)
+        if axis == "approach" and "Feedback from prior invalid output" not in prompt:
+            return _axis_payload(axis, [_objection(axis, anchors=["missing:node"])]), 0
+        return _axis_payload(axis), 0
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert result.status == "direction-ok"
+    assert reviewer_calls == len(review.DIMENSIONS) + 1
+    assert any("unknown node ids" in prompt for prompt in prompts)
+
+
+def test_blocking_objection_requires_impact_and_anchor(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    _patch_reference(monkeypatch)
     reviewer_calls = 0
 
     def handler(repo, prompt, output_schema):
         nonlocal reviewer_calls
         kind = _schema_kind(output_schema)
         if kind == "aufheben":
-            return "not json", 0
-
-        dim = review.DIMENSIONS[reviewer_calls % len(review.DIMENSIONS)].key
+            return _aufheben_payload("direction-ok"), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
         reviewer_calls += 1
-        return json.dumps({"has_objection": dim == "need", "detail": f"{dim} review detail"}), 0
+        if axis == "need" and "Feedback from prior invalid output" not in prompt:
+            return _axis_payload(axis, [_objection(axis, anchors=[], impact="")]), 0
+        return _axis_payload(axis), 0
 
     _install_codex_fake(monkeypatch, handler)
 
     result = review.run_rfc_review(tmp_path, RFC_ID)
 
-    assert result.status == "nak"
-    assert result.rounds == 1
-    assert "Aufheben returned invalid JSON" in result.escalation_reason
-    assert [objection.dimension for objection in result.unresolved] == ["need"]
-    assert result.history[0]["aufheben"]["verdict"] == "escalate"
-    message = _latest_commit_message(tmp_path)
-    assert message.startswith("rfc: nak (1 rounds)")
-    assert "unresolved: need" in message
+    assert result.status == "direction-ok"
+    record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
+    need_review = next(axis for axis in record["axis_reviews"] if axis["axis"] == "need")
+    assert need_review["attempts"] == 2
+    assert any("anchor_node_ids" in error for error in need_review["validation_errors"])
+    assert any("impact" in error for error in need_review["validation_errors"])
 
 
-def test_persistent_objection_naks_after_cap_and_consolidates_each_round(tmp_path, monkeypatch):
+def test_nonblocking_objections_allow_direction_ok_marker_and_round_record(tmp_path, monkeypatch):
     _init_repo(tmp_path)
-    reviewer_calls = 0
-    aufheben_calls = 0
+    reference_calls: list[str] = []
+    _patch_reference(monkeypatch, reference_calls)
+    nonblocking = _objection(
+        "maintenance",
+        objection_type="nonblocking_suggestion",
+        claim="The wording could mention ownership more directly.",
+        impact="",
+        action="re_explain",
+    )
 
     def handler(repo, prompt, output_schema):
-        nonlocal reviewer_calls, aufheben_calls
         kind = _schema_kind(output_schema)
         if kind == "aufheben":
-            aufheben_calls += 1
-            return _aufheben_response("proceed", _revised_rfc(f" {aufheben_calls}")), 0
+            return _aufheben_payload("direction-ok", [nonblocking]), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
+        return _axis_payload(axis, [nonblocking] if axis == "maintenance" else []), 0
 
-        dim = review.DIMENSIONS[reviewer_calls % len(review.DIMENSIONS)].key
-        reviewer_calls += 1
-        has_objection = dim == "approach"
-        return (
-            json.dumps(
-                {
-                    "has_objection": has_objection,
-                    "detail": f"{dim} {'still objects' if has_objection else 'is resolved'}",
-                }
-            ),
-            0,
-        )
+    _install_codex_fake(monkeypatch, handler)
+
+    result = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert result.status == "direction-ok"
+    assert "rfc: direction-ok" in _latest_commit_message(tmp_path)
+    record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
+    assert record["verdict"] == "direction-ok"
+    assert record["objections"][0]["type"] == "nonblocking_suggestion"
+    assert reference_calls
+    assert record["axis_reviews"][0]["reference_consultations"]
+    assert _git(tmp_path, "ls-files", result.round_record_path).stdout == ""
+
+
+def test_blocking_objections_dedupe_to_needs_revision_marker(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    _patch_reference(monkeypatch)
+    blocking = _objection("approach")
+    duplicate = {**blocking, "objection_id": "approach:duplicate"}
+
+    def handler(repo, prompt, output_schema):
+        kind = _schema_kind(output_schema)
+        if kind == "aufheben":
+            return _aufheben_payload("needs_revision", [blocking, duplicate]), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
+        return _axis_payload(axis, [blocking, duplicate] if axis == "approach" else []), 0
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = review.run_rfc_review(tmp_path, RFC_ID)
+
+    assert result.status == "needs_revision"
+    assert [objection.axis for objection in result.unresolved] == ["approach"]
+    assert "rfc: needs-revision round 1" in _latest_commit_message(tmp_path)
+    record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
+    assert record["verdict"] == "needs_revision"
+    assert len(record["objections"]) == 1
+
+
+def test_nak_path_is_evidenced_decision_record(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    _patch_reference(monkeypatch)
+    blocking = _objection("compat", claim="The direction breaks the RFC branch contract.")
+    reason = "The direction is fundamentally incompatible with the RFC branch contract."
+
+    def handler(repo, prompt, output_schema):
+        kind = _schema_kind(output_schema)
+        if kind == "aufheben":
+            return _aufheben_payload("nak", [blocking], nak_reason=reason), 0
+        axis = next(dimension.key for dimension in review.DIMENSIONS if f"axis: {dimension.key}" in prompt)
+        return _axis_payload(axis, [blocking] if axis == "compat" else []), 0
 
     _install_codex_fake(monkeypatch, handler)
 
     result = review.run_rfc_review(tmp_path, RFC_ID)
 
     assert result.status == "nak"
-    assert result.rounds == review.CAP
-    assert result.final_view == _revised_rfc(f" {review.CAP}")
-    assert result.resolved == ["need", "compat", "scope", "maintenance"]
-    assert [objection.dimension for objection in result.unresolved] == ["approach"]
-    assert aufheben_calls == review.CAP
-    assert reviewer_calls == review.CAP * len(review.DIMENSIONS)
-    message = _latest_commit_message(tmp_path)
-    assert message.startswith(f"rfc: nak ({review.CAP} rounds)")
-    assert "unresolved: approach" in message
+    assert result.escalation_reason == reason
+    assert "rfc: nak" in _latest_commit_message(tmp_path)
+    record = json.loads(Path(result.round_record_path).read_text(encoding="utf-8"))
+    assert record["consolidation"]["nak_reason"] == reason
+    assert record["consolidation"]["evidence"]
 
 
-@pytest.mark.parametrize(
-    ("payload", "returncode", "expected_detail"),
-    [
-        ("process failed", 1, "Codex review failed for need"),
-        ("not json", 0, "returned invalid JSON"),
-    ],
-)
-def test_failed_or_garbled_reviewer_output_is_an_objection(
-    tmp_path,
-    monkeypatch,
-    payload,
-    returncode,
-    expected_detail,
-):
-    _init_repo(tmp_path)
-
-    def handler(repo, prompt, output_schema):
-        return payload, returncode
-
-    _install_codex_fake(monkeypatch, handler)
-
-    objection = review._review_one(review.DIMENSIONS[0], _rfc_view(), tmp_path, None)
-
-    assert objection.dimension == "need"
-    assert objection.has_objection is True
-    assert expected_detail in objection.detail
+def test_aufheben_schema_no_longer_returns_revised_rfc():
+    serialized = json.dumps(review.AUFHEBEN_SCHEMA)
+    assert "revised_rfc" not in serialized
+    assert review.AUFHEBEN_SCHEMA["additionalProperties"] is False
+    assert sorted(review.AUFHEBEN_SCHEMA["required"]) == sorted(review.AUFHEBEN_SCHEMA["properties"])
 
 
-def test_reviewers_use_read_only_sandbox_and_output_schema(tmp_path, monkeypatch):
-    _init_repo(tmp_path)
-    calls = []
-
-    def handler(repo, prompt, output_schema):
-        calls.append({"repo": repo, "output_schema": output_schema, "prompt": prompt})
-        return json.dumps({"has_objection": False, "detail": ""}), 0
-
-    _install_codex_fake(monkeypatch, handler)
-
-    review._review_one(review.DIMENSIONS[2], _rfc_view(), tmp_path, _revised_rfc(" current"))
-
-    assert len(calls) == 1
-    assert calls[0]["repo"] == tmp_path
-    assert calls[0]["output_schema"] is not None
-    assert "compat" in calls[0]["prompt"]
-    assert "Revised Manual RFC current" in calls[0]["prompt"]
+def test_review_schemas_codex_safe_required_properties():
+    for schema in (
+        review.EVIDENCE_SCHEMA,
+        review.OBJECTION_ITEM_SCHEMA,
+        review.OBJECTION_SCHEMA,
+        review.CONTRADICTION_SCHEMA,
+        review.AUFHEBEN_SCHEMA,
+    ):
+        serialized = json.dumps(schema)
+        assert "allOf" not in serialized
+        assert "anyOf" not in serialized
+        assert "oneOf" not in serialized
+        _assert_required_is_all_properties(schema)
 
 
-def test_rfc_schemas_use_registry_and_codex_valid_required_properties():
-    schema = review.AUFHEBEN_SCHEMA
-    serialized = json.dumps(schema)
-    assert "allOf" not in serialized
-    assert "anyOf" not in serialized
-    assert "oneOf" not in serialized
-    assert schema["additionalProperties"] is False
-    assert sorted(schema["required"]) == sorted(schema["properties"])
-
-    schema_rfc = schema["properties"]["revised_rfc"]
-    assert schema_rfc["additionalProperties"] is False
-    assert tuple(schema_rfc["required"]) == review.RFC_VIEW_FIELDS
-    assert sorted(schema_rfc["required"]) == sorted(schema_rfc["properties"])
-    assert schema_rfc["properties"]["tech_stack"]["type"] == "object"
-    # Registry semantics reach the codex schema as a STRING description; the structured dict
-    # form is prompt-only (codex/OpenAI reject a non-string `description` with HTTP 400).
-    provenance_desc = schema_rfc["properties"]["grounding_provenance"]["description"]
-    assert isinstance(provenance_desc, str)
-    assert "must_not=content consumed downstream as product requirement nouns" in provenance_desc
-
-
-def test_missing_rfc_on_rfc_branch_fail_closed_nak(tmp_path):
-    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True, text=True)
-    _git(tmp_path, "config", "user.name", "RFC Test")
-    _git(tmp_path, "config", "user.email", "rfc-test@example.invalid")
-    (tmp_path / "README.md").write_text("empty\n", encoding="utf-8")
-    _git(tmp_path, "add", "README.md")
-    _git(tmp_path, "commit", "-m", "initial")
-    _git(tmp_path, "branch", "-M", "main")
-    _git(tmp_path, "checkout", "-B", RFC_BRANCH, "main")
-    _git(tmp_path, "checkout", "main")
-
-    result = review.run_rfc_review(tmp_path, RFC_ID)
-
-    assert result.status == "nak"
-    assert result.rounds == 0
-    assert [objection.dimension for objection in result.unresolved] == ["rfc-read"]
-    message = _latest_commit_message(tmp_path)
-    assert message.startswith("rfc: nak (0 rounds)")
-    assert "unresolved: rfc-read" in message
+def _assert_required_is_all_properties(schema: dict[str, object]) -> None:
+    if schema.get("type") == "object":
+        assert schema["additionalProperties"] is False
+        assert sorted(schema["required"]) == sorted(schema["properties"])
+        for child in schema["properties"].values():
+            if isinstance(child, dict):
+                _assert_required_is_all_properties(child)
+    if schema.get("type") == "array":
+        _assert_required_is_all_properties(schema["items"])

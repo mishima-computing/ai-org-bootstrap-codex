@@ -167,6 +167,23 @@ def create_branch_with_files(
             _git_required(repo_path, "checkout", original)
 
 
+def commit_empty(repo, branch: str, subject: str, *, body: str = "") -> dict[str, str]:
+    """Commit an empty semantic marker on a branch and restore the original checkout."""
+    repo_path = Path(repo)
+    original = current_branch(repo_path)
+    message_args = ["-m", subject]
+    if body:
+        message_args.extend(["-m", body])
+    try:
+        _git_required(repo_path, "checkout", branch)
+        _git_required(repo_path, "commit", "--allow-empty", *message_args)
+        commit = _git_required(repo_path, "rev-parse", "HEAD").stdout.strip()
+        return {"branch": branch, "commit": commit}
+    finally:
+        if original:
+            _git_required(repo_path, "checkout", original)
+
+
 def read_semantic(repo, branch: str) -> dict[str, str]:
     """Read git-note semantic labels for a branch head."""
     target = head_sha(repo, branch)
