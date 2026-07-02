@@ -1,31 +1,18 @@
-"""RFC LINEAGE: split approved RFC plans into reviewable child RFC branches.
+"""RFC LINEAGE: Reference-informed canonical lineage node model.
 
-Memento: ratified node model.
-- Typed relations, never one overloaded "child": version-of (inside a node as
-  commits on the same RFC branch; the v2 loop already owns this), split-into[AND]
-  for new child nodes, depends-on as a separate DAG where hierarchy does not
-  imply order, and supersedes as a rare branch-crossing redirection marker.
-  OR-alternatives are resolved at candidate deliberation today; future racing
-  alternatives can add an explicit relation.
-- Mutability point is Gerrit-style: a node stays revisable until the lineage's
-  root PR merges into mainline, not frozen at serial assignment.
-- The scarce resources are agent context and verification trust, not human
-  attention. A leaf must have one concern, one bounded agent execution, one
-  reviewable diff, functional_check verification, kept working state, and
-  localizable failure.
-- Rolling wave is information-driven: define all stages and exit criteria up
-  front, leaf out only the near horizon, and keep later stages as coarse child
-  nodes with acceptance criteria until their dependencies resolve.
-- 100% rule: a split is valid only when every parent scope item maps to exactly
-  one child or an explicit parent-retained integration gate. No child may claim
-  scope outside the parent.
-- Roll-up: leaf resolved means merged plus acceptance passed; parent resolved
-  means all AND children resolved and the parent integration gate passed. The
-  root's resolution permits the PR to mainline.
-- Escalation: a child that invalidates the parent records
-  blocked:parent-invalidated with evidence. The parent re-baselines via the
-  existing v2 machinery. Descendants depending on the outdated version receive
-  stale markers and must revalidate.
+Memento: A/B experiment outcome.
+- lineage_b is promoted to the canonical implementation and lineage_a is kept
+  temporarily as ai_org.rfc.lineage_a_deprecated.
+- Implementations consult the org Reference before behavior changes.
+- Influencing facets:
+  required all props payload artifact tolerance
+  (ai-org-bootstrap-codex@871c99a; ai-org-bootstrap-codex@2f5f13b);
+  schema field mode naming discipline
+  (ai-org-bootstrap-codex@2f5f13b; ai-org-bootstrap-codex@67563c5);
+  child branch metadata inheritance hazard
+  (ai-org-bootstrap-codex@67563c5; Gerrit NoteDb-style separation);
+  codex output schema safe subset
+  (ai-org-bootstrap-codex@345bc17; tests/test_codex_output_schema_guard.py).
 """
 from __future__ import annotations
 
@@ -35,507 +22,490 @@ from typing import Any, Mapping
 
 from ai_org import git_wrapper
 import ai_org.rfc.codex_exec as codex_exec
-from ai_org.rfc.field_registry import (
-    RFC_VIEW_FIELDS,
-    STRING_ARRAY_FIELDS,
-    STRING_FIELDS,
-    rfc_view_schema,
-    validate_tech_stack,
-    validate_user_experience_requirements,
-)
+from ai_org.rfc.field_registry import empty_user_experience_requirements
 
 
 RFC_PREFIX = "ai-org/rfc/"
-CONTRIB_PREFIX = "ai-org/contrib/"
 LEDGER_PATH = "lineage-ledger.json"
 METADATA_PATH = "rfc-metadata.json"
-APPROACH_PATH = "technical-approach.json"
-RFC_FIELDS = RFC_VIEW_FIELDS
-MAX_VALIDATION_ATTEMPTS = 2
+VALIDATION_ATTEMPTS = 2
 MAX_RESOLUTION_DEPTH = 64
 
-CHILD_FIELDS = (
-    "child_key",
-    "working_title",
-    "summary",
-    "horizon_status",
-    "scope_item_ids",
-    "acceptance_criteria",
-    "relevant_systems",
-    "patch_plan_slice",
-)
-
-DEPENDENCY_FIELDS = ("dependent_child_key", "prerequisite_child_key", "reason")
-
 LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": [
-        "verdict",
-        "summary_sentence",
-        "sizing_reason",
-        "children",
-        "parent_gate_scope_item_ids",
-        "depends_on",
-        "elaboration_notes",
-    ],
+    "required": ["split_mode", "rationale", "children", "parent_retained_scope_ids"],
     "properties": {
-        "verdict": {
-            "enum": ["split", "already_right_sized"],
-            "description": "'already_right_sized' means THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD RFCS ARE NEEDED; 'split' means the children array contains the decomposition.",
+        "split_mode": {
+            "enum": ["right_sized", "split_into_children"],
+            "description": "Whether the approved technical approach is already one bounded leaf or must split.",
         },
-        "summary_sentence": {"type": "string"},
-        "sizing_reason": {"type": "string"},
+        "rationale": {"type": "string", "description": "Short sizing or split rationale."},
         "children": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": list(CHILD_FIELDS),
+                "required": [
+                    "child_key",
+                    "title",
+                    "stage_name",
+                    "node_kind",
+                    "branching_mode",
+                    "serial_after_child_key",
+                    "depends_on_child_keys",
+                    "summary",
+                    "acceptance_criteria",
+                    "functional_check",
+                    "scope_item_ids",
+                    "systems",
+                    "ux_acceptance_tests",
+                    "risks",
+                ],
                 "properties": {
-                    "child_key": {"type": "string"},
-                    "working_title": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "horizon_status": {"enum": ["leafed", "coarse"]},
-                    "scope_item_ids": {"type": "array", "items": {"type": "string"}},
-                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                    "relevant_systems": {"type": "array", "items": {"type": "string"}},
-                    "patch_plan_slice": {"type": "string"},
+                    "child_key": {"type": "string", "description": "Stable local key unique within this split."},
+                    "title": {"type": "string", "description": "Human-readable child RFC title."},
+                    "stage_name": {"type": "string", "description": "Rolling-wave stage this child belongs to."},
+                    "node_kind": {
+                        "enum": ["leaf", "coarse"],
+                        "description": "Leaf is near-horizon executable work; coarse is a later-stage placeholder.",
+                    },
+                    "branching_mode": {
+                        "enum": ["parallel_from_parent", "serial_after_child"],
+                        "description": "Whether git ancestry starts from the parent branch or a predecessor child.",
+                    },
+                    "serial_after_child_key": {
+                        "type": "string",
+                        "description": "Predecessor child key when branching_mode is serial_after_child, otherwise empty.",
+                    },
+                    "depends_on_child_keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "DAG dependency child keys beyond the hierarchy relation.",
+                    },
+                    "summary": {"type": "string", "description": "Single-concern scope summary."},
+                    "acceptance_criteria": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Child acceptance criteria copied from the deliberated approach.",
+                    },
+                    "functional_check": {"type": "string", "description": "How functional_check verifies this child."},
+                    "scope_item_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Parent scope item ids covered exactly by this child.",
+                    },
+                    "systems": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Implementation systems touched by this child.",
+                    },
+                    "ux_acceptance_tests": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "UX acceptance tests covered by this child.",
+                    },
+                    "risks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Must-address risks handled by this child.",
+                    },
                 },
             },
         },
-        "parent_gate_scope_item_ids": {"type": "array", "items": {"type": "string"}},
-        "depends_on": {
+        "parent_retained_scope_ids": {
             "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": list(DEPENDENCY_FIELDS),
-                "properties": {
-                    "dependent_child_key": {
-                        "type": "string",
-                        "description": "The child_key for the child that cannot start until the prerequisite child is resolved.",
-                    },
-                    "prerequisite_child_key": {
-                        "type": "string",
-                        "description": "The child_key for the child that must resolve before the dependent child can start.",
-                    },
-                    "reason": {"type": "string"},
-                },
-            },
+            "items": {"type": "string"},
+            "description": "Scope item ids retained by the parent integration gate.",
         },
-        "elaboration_notes": {"type": "array", "items": {"type": "string"}},
     },
 }
 
 
-def refine(
-    repo: str | Path,
-    rfc_id_or_branch: str,
-    *,
-    horizon: int = 1,
-    rfc_path: str = "rfc.json",
-    approach_path: str = APPROACH_PATH,
-) -> dict[str, Any]:
-    """Split a direction-ok, oversized RFC plan into lineage child branches."""
+def refine(repo: str | Path, rfc_id_or_branch: str, *, horizon: int = 1) -> dict[str, Any]:
+    """Split an approved technical approach into lineage child RFC branches."""
     repo_path = Path(repo).resolve()
     branch = _rfc_branch(rfc_id_or_branch)
-    rfc_result = _read_rfc(repo_path, branch, rfc_path)
-    if not rfc_result["ok"]:
-        return rfc_result
-    approach_result = _read_json(repo_path, branch, approach_path)
-    if not approach_result["ok"]:
-        return approach_result
+    if git_wrapper.file_exists(repo_path, branch, LEDGER_PATH):
+        ledger = _read_json(repo_path, branch, LEDGER_PATH)
+        return {"ok": True, "status": "already-refined", "branch": branch, "ledger": ledger}
 
-    rfc_view = rfc_result["rfc"]
-    approach = approach_result["json"]
-    if right_sized({"rfc": rfc_view, "technical_approach": approach}):
-        return {"ok": True, "status": "right-sized", "branch": branch, "id": _lineage_id(repo_path, branch)}
+    rfc = _read_json(repo_path, branch, "rfc.json")
+    approach = _read_json(repo_path, branch, "technical-approach.json")
+    if not isinstance(rfc, Mapping) or not isinstance(approach, Mapping):
+        return {"ok": False, "status": "missing-input", "branch": branch, "error": "rfc.json and technical-approach.json are required"}
 
-    scope_items = _scope_items(rfc_view, approach)
-    if not scope_items:
-        return {"ok": False, "status": "failed-closed", "branch": branch, "error": "no parent scope items found"}
+    deterministic_right_sized = right_sized({"rfc": rfc, "technical_approach": approach})
+    if deterministic_right_sized:
+        git_wrapper.commit_empty(repo_path, branch, "lineage: right-sized", body="deterministic right-sized leaf")
+        return {"ok": True, "status": "right-sized", "branch": branch, "rationale": "deterministic right-sized leaf", "surplus_children_ignored": 0}
 
-    feedback: list[str] = []
+    scope_items = _scope_items(rfc, approach)
+    feedback = ""
+    last_error: dict[str, Any] | None = None
     contradiction_retried = False
-    parsed: dict[str, Any] | None = None
-    validation: dict[str, Any] = {"ok": False, "errors": ["lineage split did not run"]}
-    for attempt in range(1, MAX_VALIDATION_ATTEMPTS + 1):
-        split_result = _split_with_codex(repo_path, branch, approach, scope_items, horizon, feedback)
+    for attempt in range(1, VALIDATION_ATTEMPTS + 1):
+        split_result = _split_with_codex(repo_path, branch, rfc, approach, scope_items, horizon, feedback)
         if not split_result["ok"]:
             return split_result
-        parsed = split_result["split"]
-        if parsed["right_sized"]:
-            surplus_children_ignored = parsed.get("surplus_children_ignored", 0)
-            if surplus_children_ignored and not contradiction_retried:
+        split = split_result["split"]
+        if split["split_mode"] == "right_sized":
+            surplus_children_ignored = int(split.get("surplus_children_ignored", 0))
+            # Reference facet: required all props payload artifact tolerance.
+            # Safe-subset schemas require children even when split_mode says no
+            # children, so surplus child payload is ignored as an artifact. If
+            # the deterministic pre-check disagreed and surplus exists, ask once
+            # for clarification before honoring the model verdict.
+            if surplus_children_ignored and not deterministic_right_sized and not contradiction_retried:
                 contradiction_retried = True
-                feedback = [
-                    "Clarification: deterministic pre-check says the parent is not already one right-sized leaf, "
-                    "but your verdict was already_right_sized while children were populated. If the children array "
-                    "contains a real decomposition, return verdict='split'. Use verdict='already_right_sized' only "
-                    "when THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD RFCS ARE NEEDED."
-                ]
+                feedback = (
+                    "Clarification: deterministic pre-check says this parent is not already one "
+                    "right-sized leaf, but split_mode was right_sized while children was populated. "
+                    "If children contains a real decomposition, use split_mode=split_into_children. "
+                    "Use split_mode=right_sized only when no child RFCs are needed."
+                )
                 continue
+            git_wrapper.commit_empty(repo_path, branch, "lineage: right-sized", body=split["rationale"])
             return {
                 "ok": True,
                 "status": "right-sized",
                 "branch": branch,
-                "id": _lineage_id(repo_path, branch),
-                "summary_sentence": parsed["summary_sentence"],
+                "rationale": split["rationale"],
                 "surplus_children_ignored": surplus_children_ignored,
             }
-        validation = validate_ledger_contract(parsed, scope_items)
+
+        normalized = _normalize_split(repo_path, branch, split, scope_items, horizon)
+        validation = validate_ledger_contract(normalized, scope_items)
         if validation["ok"]:
-            break
-        feedback = list(validation["errors"])
-    else:
-        return {
-            "ok": False,
-            "status": "failed-closed",
-            "branch": branch,
-            "error": "lineage split failed deterministic 100% coverage validation",
-            "validation_errors": validation["errors"],
-        }
-
-    assert parsed is not None
-    parent_id = _lineage_id(repo_path, branch)
-    root_serial = _root_serial(repo_path, branch)
-    children = _assign_child_ids(repo_path, parent_id, parsed["children"])
-    child_by_key = {child["child_key"]: child for child in children}
-    dependency_edges = _dependency_edges(parsed["depends_on"], child_by_key)
-    cycle = _cycle(dependency_edges)
-    if cycle:
-        return {"ok": False, "status": "failed-closed", "branch": branch, "error": "lineage depends-on DAG is cyclic", "cycle": cycle}
-
-    ledger = _ledger(root_serial, parent_id, branch, scope_items, children, dependency_edges, parsed)
-    git_wrapper.commit_files(
-        repo_path,
-        branch,
-        {LEDGER_PATH: ledger},
-        subject="rfc: lineage split",
-    )
-
-    ordered_children = _topological_children(children, dependency_edges)
-    child_nodes: list[dict[str, Any]] = []
-    for child in ordered_children:
-        child_branch = f"{RFC_PREFIX}{child['id']}"
-        dependency_ids = _dependency_ids_for(child["id"], dependency_edges)
-        base = f"{RFC_PREFIX}{dependency_ids[0]}" if dependency_ids else branch
-        files = {
-            rfc_path: _child_rfc_view(rfc_view, child),
-            approach_path: _child_approach(parent_id, branch, child, approach),
-            METADATA_PATH: _child_metadata(root_serial, parent_id, branch, child, dependency_ids),
-        }
-        written = git_wrapper.create_branch_with_files(
-            repo_path,
-            child_branch,
-            base,
-            files,
-            commit_message=f"rfc: lineage child {child['id']} {child['working_title']}",
-            deletions=[LEDGER_PATH],
-        )
-        git_wrapper.commit_empty(repo_path, child_branch, "rfc: direction-ok inherited")
-        child_nodes.append(
-            {
-                "id": child["id"],
-                "branch": child_branch,
-                "title": child["working_title"],
-                "horizon_status": child["horizon_status"],
-                "commit": written["commit"],
-                "depends_on": dependency_ids,
+            ledger = _ledger(branch, scope_items, normalized, validation)
+            # Gerrit NoteDb's append-only metadata branches influenced this committed parent ledger:
+            # https://gerrit-review.googlesource.com/Documentation/note-db.html
+            ledger_commit = git_wrapper.commit_files(
+                repo_path,
+                branch,
+                {LEDGER_PATH: ledger},
+                subject="lineage: ledger",
+            )
+            children = _create_child_branches(repo_path, branch, normalized, ledger_commit["commit"])
+            return {
+                "ok": True,
+                "status": "refined",
+                "branch": branch,
+                "ledger_commit": ledger_commit["commit"],
+                "children": children,
+                "dependency_graph": ledger["dependency_graph"],
             }
-        )
+        last_error = validation
+        feedback = _validation_feedback(validation)
 
     return {
-        "ok": True,
-        "status": "split",
+        "ok": False,
+        "status": "feedback-retry",
         "branch": branch,
-        "id": parent_id,
-        "root_serial": root_serial,
-        "children": child_nodes,
-        "ledger": ledger,
+        "error": "lineage split failed deterministic validation",
+        "validation": last_error or {},
     }
 
 
-def right_sized(rfc_view_or_approach: Mapping[str, Any]) -> bool:
-    """Return whether the plan looks like one bounded, verifiable leaf."""
-    approach = _unwrap_approach(rfc_view_or_approach)
-    # Memento: child approaches carry lineage_parent/approach_slice instead of
-    # the root patch_plan shape; leafed children are already right-sized.
+def right_sized(view: Mapping[str, Any]) -> bool:
+    """Return whether a lineage view is one bounded executable leaf."""
+    approach = _unwrap_approach(view)
+    if approach.get("split_mode") == "right_sized":
+        return True
+    child = approach.get("lineage_child")
+    if isinstance(child, Mapping):
+        criteria = child.get("acceptance_criteria")
+        return child.get("node_kind") == "leaf" and isinstance(criteria, list) and bool(criteria) and isinstance(child.get("functional_check"), str)
     if isinstance(approach.get("lineage_parent"), Mapping) and isinstance(approach.get("approach_slice"), Mapping):
         return True
-    patch_plan = _patch_plan(approach)
-    implementation = _implementation(approach)
+    if approach.get("node_kind") == "leaf":
+        criteria = approach.get("acceptance_criteria")
+        return isinstance(criteria, list) and len(criteria) > 0 and isinstance(approach.get("functional_check"), str)
 
+    patch_plan = _find_first_mapping(approach, "patch_plan")
     if not patch_plan:
         return False
-    follow_ups = patch_plan.get("follow_ups")
-    deferred = patch_plan.get("deferred")
-    if isinstance(follow_ups, list) and follow_ups:
+    if _list_of_mappings(patch_plan.get("follow_ups")) or _list_of_mappings(patch_plan.get("deferred")):
         return False
-    if isinstance(deferred, list) and deferred:
+    systems = _find_named_strings(approach, {"systems", "subsystem", "key_modules", "implementation"})
+    if len(systems) > 1:
         return False
-
-    systems = implementation.get("systems") if isinstance(implementation, Mapping) else None
-    if isinstance(systems, list) and len(systems) > 1:
-        return False
-
     first_playable = patch_plan.get("first_playable")
     if isinstance(first_playable, Mapping):
-        player_can = first_playable.get("player_can")
-        if isinstance(player_can, list) and len(player_can) > 4:
-            return False
         return bool(first_playable.get("how_verified"))
     return True
 
 
 def resolved(repo: str | Path, branch: str) -> bool:
-    """Return recursive lineage resolution for a leaf or parent branch."""
-    repo_path = Path(repo)
-    rfc_branch = _rfc_branch(branch)
-    return _resolved(repo_path, rfc_branch, 0)
+    """Return whether a leaf or parent lineage node is resolved."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    return _resolved(repo_path, normalized, 0)
 
 
-def _resolved(repo_path: Path, rfc_branch: str, depth: int) -> bool:
+def _resolved(repo_path: Path, normalized: str, depth: int) -> bool:
     if depth >= MAX_RESOLUTION_DEPTH:
-        raise RuntimeError(f"lineage resolution exceeded maximum depth {MAX_RESOLUTION_DEPTH} at {rfc_branch}")
-    ledger_result = _read_json(repo_path, rfc_branch, LEDGER_PATH)
-    if ledger_result["ok"] and ledger_result["json"].get("parent_branch") == rfc_branch:
-        ledger = ledger_result["json"]
-        child_branches = [child.get("branch") for child in ledger.get("children", []) if isinstance(child, Mapping)]
-        if not child_branches or not all(isinstance(item, str) and _resolved(repo_path, item, depth + 1) for item in child_branches):
-            return False
-        return git_wrapper.has_subject(repo_path, rfc_branch, "rfc: integration-gate passed")
-    return _leaf_resolved(repo_path, rfc_branch)
+        raise RuntimeError(f"lineage resolution exceeded maximum depth {MAX_RESOLUTION_DEPTH} at {normalized}")
+    metadata = _read_metadata(repo_path, normalized)
+    parent_branch = str(metadata.get("parent_branch", "")) if metadata else ""
+    if parent_branch and parent_branch != normalized:
+        return _leaf_resolved(repo_path, normalized, parent_branch)
+
+    ledger = _read_ledger_from_first_parent_history(repo_path, normalized)
+    # Reference facet: child branch metadata inheritance hazard. Parent-scope
+    # ledgers can be inherited through branch history, so a ledger only belongs
+    # to this node when its parent_branch matches the queried branch.
+    if (
+        isinstance(ledger, Mapping)
+        and ledger.get("parent_branch") == normalized
+        and isinstance(ledger.get("children"), list)
+    ):
+        child_branches = [
+            str(child.get("branch"))
+            for child in ledger["children"]
+            if isinstance(child, Mapping) and isinstance(child.get("branch"), str)
+        ]
+        return all(_resolved(repo_path, child, depth + 1) for child in child_branches) and _has_integration_gate(repo_path, normalized)
+
+    return _leaf_resolved(repo_path, normalized, parent_branch)
 
 
-def escalate(repo: str | Path, child_branch: str, evidence: str | Mapping[str, Any]) -> dict[str, str]:
-    """Record that a child invalidated its parent plan."""
-    body = evidence if isinstance(evidence, str) else json.dumps(evidence, indent=2, sort_keys=True)
-    return git_wrapper.commit_empty(
-        Path(repo),
-        _rfc_branch(child_branch),
-        "rfc: blocked:parent-invalidated",
-        body=body,
+def _leaf_resolved(repo: Path, branch: str, parent_branch: str = "") -> bool:
+    accepted = git_wrapper.has_subject(repo, branch, "acceptance: passed") or git_wrapper.has_subject(
+        repo, branch, "acceptance: reachable"
     )
+    if not accepted:
+        return False
+    if parent_branch and git_wrapper.is_ancestor(repo, branch, parent_branch):
+        return True
+    default = git_wrapper.default_branch(repo)
+    return git_wrapper.is_ancestor(repo, branch, default)
 
 
-def mark_stale(repo: str | Path, branches: list[str], reason: str) -> list[dict[str, str]]:
-    """Mark affected child branches stale after a parent re-baseline."""
-    return [
-        git_wrapper.commit_empty(Path(repo), _rfc_branch(branch), f"rfc: stale {reason}")
-        for branch in branches
-    ]
+def escalate(repo: str | Path, child_branch: str, evidence: Mapping[str, Any] | str) -> dict[str, Any]:
+    """Record that a child is blocked because the parent scope was invalidated."""
+    repo_path = Path(repo).resolve()
+    branch = _rfc_branch(child_branch)
+    metadata = _read_metadata(repo_path, branch)
+    parent = str(metadata.get("parent_branch", ""))
+    record = dict(metadata)
+    record["lifecycle_status"] = "blocked:parent-invalidated"
+    record["escalation_evidence"] = evidence if isinstance(evidence, Mapping) else {"summary": str(evidence)}
+    child_commit = git_wrapper.commit_files(
+        repo_path,
+        branch,
+        {METADATA_PATH: record},
+        subject="lineage: blocked parent-invalidated",
+    )
+    parent_commit = None
+    stale: list[dict[str, Any]] = []
+    if parent and git_wrapper.branch_exists(repo_path, parent):
+        parent_commit = git_wrapper.commit_empty(
+            repo_path,
+            parent,
+            "rfc: needs-revision lineage parent invalidated",
+            body=json.dumps(record["escalation_evidence"], sort_keys=True),
+        )
+        stale = mark_stale(repo_path, _dependent_branches(repo_path, parent, branch), "upstream child invalidated parent scope")[
+            "branches"
+        ]
+    return {"ok": True, "branch": branch, "parent_branch": parent, "child_commit": child_commit["commit"], "parent_commit": parent_commit, "stale": stale}
+
+
+def mark_stale(repo: str | Path, branches: list[str], reason: str) -> dict[str, Any]:
+    """Mark dependent lineage branches stale after a parent re-baseline."""
+    repo_path = Path(repo).resolve()
+    updated: list[dict[str, Any]] = []
+    for item in branches:
+        branch = _rfc_branch(item)
+        if not git_wrapper.branch_exists(repo_path, branch):
+            continue
+        metadata = _read_metadata(repo_path, branch)
+        metadata["lifecycle_status"] = "stale"
+        metadata["stale_reason"] = reason
+        written = git_wrapper.commit_files(
+            repo_path,
+            branch,
+            {METADATA_PATH: metadata},
+            subject="lineage: stale",
+        )
+        updated.append({"branch": branch, "commit": written["commit"]})
+    return {"ok": True, "branches": updated}
 
 
 def elaborate(repo: str | Path, coarse_child_branch: str, *, horizon: int = 1) -> dict[str, Any]:
-    """Re-elaborate a coarse child once its dependencies are resolved."""
-    repo_path = Path(repo)
+    """Refine a coarse child once its declared dependencies are resolved."""
+    repo_path = Path(repo).resolve()
     branch = _rfc_branch(coarse_child_branch)
-    metadata = _read_json(repo_path, branch, METADATA_PATH)
-    if not metadata["ok"]:
-        return {"ok": False, "status": "failed-closed", "branch": branch, "error": "coarse child metadata missing"}
-    lineage = metadata["json"].get("lineage", {})
-    if not isinstance(lineage, Mapping) or lineage.get("horizon_status") != "coarse":
-        return {"ok": False, "status": "not-coarse", "branch": branch}
-    blocked = [dep for dep in lineage.get("depends_on", []) if isinstance(dep, str) and not resolved(repo_path, f"{RFC_PREFIX}{dep}")]
-    if blocked:
-        return {"ok": False, "status": "blocked", "branch": branch, "blocked_by": blocked}
+    if not coarse_ready(repo_path, branch):
+        return {"ok": False, "status": "blocked-by-dependencies", "branch": branch}
     return refine(repo_path, branch, horizon=horizon)
 
 
 def split_pending(repo: str | Path, branch: str) -> bool:
-    """Return whether a direction-ok non-coarse node still needs lineage splitting."""
-    repo_path = Path(repo)
-    rfc_branch = _rfc_branch(branch)
-    if not git_wrapper.has_subject(repo_path, rfc_branch, "rfc: direction-ok"):
+    """Return whether a branch has an approved approach but no lineage decision."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    if not git_wrapper.branch_exists(repo_path, normalized):
         return False
-    if _root_serial(repo_path, rfc_branch) == "":
+    if not git_wrapper.has_subject(repo_path, normalized, "rfc: direction-ok"):
         return False
-    if git_wrapper.file_exists(repo_path, rfc_branch, LEDGER_PATH):
+    if git_wrapper.file_exists(repo_path, normalized, LEDGER_PATH):
         return False
-    metadata = _read_json(repo_path, rfc_branch, METADATA_PATH)
-    if metadata["ok"] and isinstance(metadata["json"].get("lineage"), Mapping):
-        horizon_status = metadata["json"]["lineage"].get("horizon_status")
-        # Memento: leafed means already right-sized; leaves go to patch, never
-        # back through lineage refine.
-        if horizon_status in {"leafed", "coarse"}:
-            return False
-    approach = _read_json(repo_path, rfc_branch, APPROACH_PATH)
-    rfc = _read_rfc(repo_path, rfc_branch, "rfc.json")
-    if not approach["ok"] or not rfc["ok"]:
+    if git_wrapper.has_subject(repo_path, normalized, "lineage: right-sized"):
         return False
-    return not right_sized({"rfc": rfc["rfc"], "technical_approach": approach["json"]})
+    metadata = _read_metadata(repo_path, normalized)
+    # Reference facet: child branch metadata inheritance hazard. Child metadata
+    # identifies leaf/coarse lineage nodes; leaf nodes go to patch, and coarse
+    # nodes wait for dependency readiness, so neither re-enters split_pending.
+    if metadata.get("node_kind") in {"leaf", "leafed", "coarse"}:
+        return False
+    lineage = metadata.get("lineage")
+    if isinstance(lineage, Mapping) and lineage.get("horizon_status") in {"leafed", "coarse"}:
+        return False
+    approach = _read_json(repo_path, normalized, "technical-approach.json")
+    if not isinstance(approach, Mapping):
+        return False
+    if right_sized(approach):
+        return False
+    return (
+        git_wrapper.file_exists(repo_path, normalized, "technical-approach.json")
+    )
 
 
 def coarse_ready(repo: str | Path, branch: str) -> bool:
-    """Return whether a coarse child can be elaborated now."""
-    repo_path = Path(repo)
-    rfc_branch = _rfc_branch(branch)
-    metadata = _read_json(repo_path, rfc_branch, METADATA_PATH)
-    if not metadata["ok"]:
+    """Return whether a coarse child may be elaborated."""
+    repo_path = Path(repo).resolve()
+    normalized = _rfc_branch(branch)
+    metadata = _read_metadata(repo_path, normalized)
+    if metadata.get("node_kind") != "coarse" or git_wrapper.file_exists(repo_path, normalized, LEDGER_PATH):
         return False
-    lineage = metadata["json"].get("lineage")
-    if not isinstance(lineage, Mapping) or lineage.get("horizon_status") != "coarse":
+    deps = metadata.get("depends_on_branches")
+    if not isinstance(deps, list):
         return False
-    if git_wrapper.file_exists(repo_path, rfc_branch, LEDGER_PATH):
-        return False
-    deps = [dep for dep in lineage.get("depends_on", []) if isinstance(dep, str)]
-    return all(resolved(repo_path, f"{RFC_PREFIX}{dep}") for dep in deps)
+    return all(isinstance(dep, str) and resolved(repo_path, dep) for dep in deps)
 
 
-def validate_ledger_contract(split: Mapping[str, Any], scope_items: list[dict[str, str]]) -> dict[str, Any]:
-    """Validate the deterministic 100% coverage rule before writing branches."""
-    errors: list[str] = []
-    parent_scope_ids = {item["id"] for item in scope_items}
-    child_keys: set[str] = set()
-    assignments: dict[str, list[str]] = {item_id: [] for item_id in parent_scope_ids}
-
+def validate_ledger_contract(split: Mapping[str, Any], scope_items: list[Mapping[str, str]]) -> dict[str, Any]:
+    """Validate exact parent-scope coverage and child dependency topology."""
     children = split.get("children")
-    if not isinstance(children, list) or not children:
-        errors.append("split must contain children")
-        children = []
+    retained = split.get("parent_retained_scope_ids")
+    if not isinstance(children, list) or not isinstance(retained, list):
+        return _invalid("split must contain children and parent_retained_scope_ids arrays")
+    scope_ids = {item["id"] for item in scope_items}
+    child_keys = [child.get("child_key") for child in children if isinstance(child, Mapping)]
+    if len(child_keys) != len(set(child_keys)) or not all(isinstance(key, str) and key for key in child_keys):
+        return _invalid("child keys must be unique non-empty strings")
+    child_key_set = set(child_keys)
+
+    coverage: dict[str, list[str]] = {scope_id: [] for scope_id in scope_ids}
+    unknown: list[str] = []
     for child in children:
-        if not isinstance(child, Mapping) or set(child) != set(CHILD_FIELDS):
-            errors.append("child has invalid fields")
-            continue
-        child_key = child["child_key"]
-        if not isinstance(child_key, str) or not child_key:
-            errors.append("child_key must be a non-empty string")
-            continue
-        if child_key in child_keys:
-            errors.append(f"duplicate child_key: {child_key}")
-        child_keys.add(child_key)
-        if child["horizon_status"] not in {"leafed", "coarse"}:
-            errors.append(f"{child_key}: invalid horizon_status")
-        for field in ("scope_item_ids", "acceptance_criteria", "relevant_systems"):
-            if not isinstance(child[field], list) or not all(isinstance(item, str) for item in child[field]):
-                errors.append(f"{child_key}: invalid {field}")
-        if not isinstance(child["working_title"], str) or not isinstance(child["summary"], str):
-            errors.append(f"{child_key}: invalid title or summary")
-        if not isinstance(child["patch_plan_slice"], str):
-            errors.append(f"{child_key}: invalid patch_plan_slice")
-        for item_id in child.get("scope_item_ids", []):
-            if item_id not in parent_scope_ids:
-                errors.append(f"{child_key} claims unknown scope item {item_id}")
-                continue
-            assignments[item_id].append(child_key)
+        if not isinstance(child, Mapping):
+            return _invalid("child entries must be objects")
+        child_key = str(child["child_key"])
+        item_ids = child.get("scope_item_ids")
+        if not isinstance(item_ids, list) or not all(isinstance(item, str) for item in item_ids):
+            return _invalid(f"{child_key} scope_item_ids must be strings")
+        for scope_id in item_ids:
+            if scope_id not in scope_ids:
+                unknown.append(scope_id)
+            else:
+                coverage[scope_id].append(child_key)
 
-    parent_gate_ids = split.get("parent_gate_scope_item_ids")
-    if not isinstance(parent_gate_ids, list) or not all(isinstance(item, str) for item in parent_gate_ids):
-        errors.append("parent_gate_scope_item_ids must be a string array")
-        parent_gate_ids = []
-    for item_id in parent_gate_ids:
-        if item_id not in parent_scope_ids:
-            errors.append(f"parent gate claims unknown scope item {item_id}")
-            continue
-        assignments[item_id].append("parent_gate")
+    retained_ids: list[str] = []
+    for scope_id in retained:
+        if not isinstance(scope_id, str):
+            return _invalid("parent_retained_scope_ids must be strings")
+        if scope_id not in scope_ids:
+            unknown.append(scope_id)
+        else:
+            coverage[scope_id].append("parent:integration-gate")
+            retained_ids.append(scope_id)
 
-    for item_id, targets in assignments.items():
-        if len(targets) == 0:
-            errors.append(f"{item_id} is unmapped")
-        elif len(targets) > 1:
-            errors.append(f"{item_id} is mapped more than once: {', '.join(targets)}")
-
-    depends_on = split.get("depends_on")
-    if not isinstance(depends_on, list):
-        errors.append("depends_on must be an array")
-        depends_on = []
-    for edge in depends_on:
-        if not isinstance(edge, Mapping) or set(edge) != set(DEPENDENCY_FIELDS):
-            errors.append("depends_on edge has invalid fields")
-            continue
-        dependent = edge["dependent_child_key"]
-        prerequisite = edge["prerequisite_child_key"]
-        if dependent not in child_keys:
-            errors.append(f"depends_on dependent child is unknown: {dependent}")
-        if prerequisite not in child_keys:
-            errors.append(f"depends_on prerequisite child is unknown: {prerequisite}")
-        if dependent == prerequisite:
-            errors.append(f"depends_on self-edge is invalid: {dependent}")
-        if not isinstance(edge["reason"], str):
-            errors.append("depends_on reason must be a string")
-
-    if not isinstance(split.get("elaboration_notes"), list) or not all(
-        isinstance(item, str) for item in split.get("elaboration_notes", [])
-    ):
-        errors.append("elaboration_notes must be a string array")
-
-    if not errors:
-        children_by_key = {child["child_key"]: child for child in children}
-        for edge in depends_on:
-            dependent = children_by_key[edge["dependent_child_key"]]
-            prerequisite = children_by_key[edge["prerequisite_child_key"]]
-            if (
-                "patch_plan:first_playable" in dependent["scope_item_ids"]
-                and prerequisite["horizon_status"] == "coarse"
-            ):
-                errors.append(
-                    "patch_plan:first_playable child cannot depend on a coarse child: "
-                    f"{dependent['child_key']} depends on {prerequisite['child_key']}"
-                )
-        edges = [(edge["prerequisite_child_key"], edge["dependent_child_key"]) for edge in depends_on]
-        cycle = _cycle(edges)
-        if cycle:
-            errors.append("depends_on DAG is cyclic: " + " -> ".join(cycle))
-
-    return {"ok": not errors, "errors": errors}
+    unmapped = sorted(scope_id for scope_id, owners in coverage.items() if not owners)
+    double_mapped = sorted(scope_id for scope_id, owners in coverage.items() if len(owners) > 1)
+    dependency_errors = _dependency_errors(children, child_key_set)
+    cycle = _cycle(_dependency_edges(children))
+    first_playable_errors = _first_playable_dependency_errors(children)
+    if unknown or unmapped or double_mapped or dependency_errors or cycle:
+        return {
+            "ok": False,
+            "status": "feedback-retry",
+            "unknown_scope_ids": sorted(set(unknown)),
+            "unmapped_scope_ids": unmapped,
+            "double_mapped_scope_ids": double_mapped,
+            "dependency_errors": dependency_errors,
+            "cycle": cycle,
+        }
+    if first_playable_errors:
+        return {
+            "ok": False,
+            "status": "feedback-retry",
+            "unknown_scope_ids": [],
+            "unmapped_scope_ids": [],
+            "double_mapped_scope_ids": [],
+            "dependency_errors": first_playable_errors,
+            "cycle": [],
+        }
+    return {
+        "ok": True,
+        "coverage": [{"scope_item_id": scope_id, "owner": coverage[scope_id][0]} for scope_id in sorted(scope_ids)],
+        "retained_scope_ids": sorted(retained_ids),
+    }
 
 
 def _split_with_codex(
     repo: Path,
     branch: str,
+    rfc: Mapping[str, Any],
     approach: Mapping[str, Any],
-    scope_items: list[dict[str, str]],
+    scope_items: list[Mapping[str, str]],
     horizon: int,
-    feedback: list[str],
+    feedback: str,
 ) -> dict[str, Any]:
     run = codex_exec.run_json(
         repo,
         schema=LINEAGE_SPLIT_SCHEMA,
-        prompt=_split_prompt(branch, approach, scope_items, horizon, feedback),
-        schema_filename="rfc-lineage-split.schema.json",
-        output_filename="rfc-lineage-split.json",
+        prompt=_split_prompt(branch, rfc, approach, scope_items, horizon, feedback),
+        schema_filename="rfc-lineage-b.schema.json",
+        output_filename="rfc-lineage-b.json",
         failure_label="Codex lineage split",
     )
     if not run["ok"]:
-        return {"ok": False, "error": run["error"], "branch": branch}
+        return {"ok": False, "status": "codex-failed", "branch": branch, "error": run["error"]}
     return _parse_split(run["raw"], branch)
 
 
 def _split_prompt(
     branch: str,
+    rfc: Mapping[str, Any],
     approach: Mapping[str, Any],
-    scope_items: list[dict[str, str]],
+    scope_items: list[Mapping[str, str]],
     horizon: int,
-    feedback: list[str],
+    feedback: str,
 ) -> str:
-    feedback_text = "\n".join(f"- {item}" for item in feedback) if feedback else "(none)"
+    scope_text = json.dumps(scope_items, indent=2, sort_keys=True, ensure_ascii=True)
+    approach_text = json.dumps(_approach_split_view(approach), indent=2, sort_keys=True, ensure_ascii=True)
+    rfc_text = json.dumps(rfc, indent=2, sort_keys=True, ensure_ascii=True)
+    feedback_text = f"\nPrevious deterministic validation failed. Fix only these issues:\n{feedback}\n" if feedback else ""
     return (
-        "You are the RFC LINEAGE split step for AI Org.\n"
-        "Primary input is the already approved Technical Approach. Map the deliberated patch_plan stages, "
-        "implementation systems, UX acceptance tests, success criteria, and must-address risks onto child RFCs. "
-        "Do not re-derive a split from RFC prose.\n\n"
-        "Rules:\n"
-        "- Use split-into[AND]; alternatives were resolved before direction-ok.\n"
-        "- Set verdict='already_right_sized' only when THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD "
-        "RFCS ARE NEEDED.\n"
-        "- Set verdict='split' when the children array contains the decomposition of the parent.\n"
-        "- Near-horizon stages become right-sized leafed children.\n"
-        "- Later stages stay coarse but must have acceptance criteria and exit criteria.\n"
-        "- Every parent scope item must appear exactly once, either in one child scope_item_ids or in "
-        "parent_gate_scope_item_ids.\n"
-        "- Do not invent scope_item_ids outside the provided ledger.\n"
-        "- depends_on is a DAG between child_key values. It is not an execution order.\n"
-        "- Example: if child 'gate_evidence' builds on child 'first_playable', set "
-        "dependent_child_key='gate_evidence' and prerequisite_child_key='first_playable'.\n"
-        "- Do not include an integer order field anywhere.\n\n"
-        f"RFC branch: {branch}\n"
-        f"Near horizon leaf budget: {horizon}\n"
-        f"Previous deterministic validation feedback:\n{feedback_text}\n\n"
-        f"Parent scope items:\n{json.dumps(scope_items, indent=2, sort_keys=True, ensure_ascii=True)}\n\n"
-        f"Approved Technical Approach:\n{json.dumps(approach, indent=2, sort_keys=True, ensure_ascii=True, default=str)}\n\n"
+        "You are the clean-room RFC lineage split step. Split only the approved technical-approach: "
+        "patch_plan, implementation systems, UX acceptance, and must-address risks. Do not derive new "
+        "scope from prose.\n\n"
+        "Typed relations: version-of stays on the same branch and is not part of this output; "
+        "split-into creates child RFC branches; depends-on is a separate DAG; supersedes is rare and "
+        "not emitted unless already present in input.\n"
+        "Rolling wave: define every stage now. Children within the near horizon must be leaf nodes. "
+        "Later-stage children must be coarse nodes with acceptance criteria.\n"
+        "Every scope item id must be mapped exactly once to either one child scope_item_ids array or "
+        "parent_retained_scope_ids for an integration gate. Use serial_after_child_key for serial chains; "
+        "parallel children branch from the parent. Do not use order numbers.\n"
+        # Airflow DAG scheduling shaped this separation of topology from execution:
+        # https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html
+        "Return only topology and scope mapping. Do not schedule execution or write patches.\n"
+        f"{feedback_text}\nRFC branch: {branch}\nHorizon: {max(1, horizon)}\n"
+        f"Scope items:\n{scope_text}\n\nTechnical approach split input:\n{approach_text}\n\nRFC context:\n{rfc_text}\n"
         "Return only JSON matching the provided schema."
     )
 
@@ -544,184 +514,446 @@ def _parse_split(raw: str, branch: str) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        return {"ok": False, "error": f"Codex lineage split returned invalid JSON: {exc}", "branch": branch}
-    if not isinstance(parsed, dict) or set(parsed) != set(LINEAGE_SPLIT_SCHEMA["properties"]):
-        return {"ok": False, "error": "Codex lineage split returned invalid fields", "branch": branch}
-    if parsed.get("verdict") not in {"split", "already_right_sized"}:
-        return {"ok": False, "error": "Codex lineage split returned invalid verdict", "branch": branch}
-    if not isinstance(parsed.get("summary_sentence"), str) or not isinstance(parsed.get("sizing_reason"), str):
-        return {"ok": False, "error": "Codex lineage split returned invalid sizing text", "branch": branch}
-    parsed = {**parsed, "right_sized": parsed["verdict"] == "already_right_sized"}
-    if parsed["right_sized"]:
-        children = parsed.get("children")
-        surplus_children_ignored = len(children) if isinstance(children, list) else 0
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": f"invalid JSON: {exc}"}
+    if not isinstance(parsed, dict):
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "output must be an object"}
+    if set(parsed) != set(LINEAGE_SPLIT_SCHEMA["properties"]):
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "output fields do not match schema"}
+    if parsed["split_mode"] not in {"right_sized", "split_into_children"}:
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "invalid split_mode"}
+    if not isinstance(parsed["rationale"], str):
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "invalid rationale"}
+    if not isinstance(parsed["parent_retained_scope_ids"], list) or not all(
+        isinstance(item, str) for item in parsed["parent_retained_scope_ids"]
+    ):
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "invalid parent_retained_scope_ids"}
+    if not isinstance(parsed["children"], list):
+        return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": "invalid children"}
+    if parsed["split_mode"] == "right_sized":
+        # Reference facet: required all props payload artifact tolerance.
+        # Mode-irrelevant children are counted and ignored, not interpreted as
+        # semantic child commitments.
+        surplus_children_ignored = len(parsed["children"])
         return {
             "ok": True,
             "split": {
                 **parsed,
                 "children": [],
-                "parent_gate_scope_item_ids": [],
-                "depends_on": [],
-                "elaboration_notes": [],
+                "parent_retained_scope_ids": [],
                 "surplus_children_ignored": surplus_children_ignored,
             },
         }
-    shape_error = _split_shape_error(parsed)
-    if shape_error:
-        return {"ok": False, "error": shape_error, "branch": branch}
+    for child in parsed["children"]:
+        error = _child_error(child)
+        if error:
+            return {"ok": False, "status": "invalid-codex-output", "branch": branch, "error": error}
     return {"ok": True, "split": parsed}
 
 
-def _split_shape_error(parsed: Mapping[str, Any]) -> str:
-    if not isinstance(parsed.get("children"), list):
-        return "Codex lineage split returned invalid children"
-    for child in parsed["children"]:
-        if not isinstance(child, Mapping) or set(child) != set(CHILD_FIELDS):
-            return "Codex lineage split returned child with invalid fields"
-        if child.get("horizon_status") not in {"leafed", "coarse"}:
-            return "Codex lineage split returned invalid horizon_status"
-        for field in ("child_key", "working_title", "summary", "patch_plan_slice"):
-            if not isinstance(child.get(field), str):
-                return f"Codex lineage split returned invalid {field}"
-        for field in ("scope_item_ids", "acceptance_criteria", "relevant_systems"):
-            if not isinstance(child.get(field), list) or not all(isinstance(item, str) for item in child[field]):
-                return f"Codex lineage split returned invalid {field}"
-    if not isinstance(parsed.get("parent_gate_scope_item_ids"), list) or not all(
-        isinstance(item, str) for item in parsed.get("parent_gate_scope_item_ids", [])
-    ):
-        return "Codex lineage split returned invalid parent_gate_scope_item_ids"
-    if not isinstance(parsed.get("depends_on"), list):
-        return "Codex lineage split returned invalid depends_on"
-    for edge in parsed["depends_on"]:
-        if not isinstance(edge, Mapping) or set(edge) != set(DEPENDENCY_FIELDS):
-            return "Codex lineage split returned depends_on edge with invalid fields"
-        if not all(isinstance(edge[field], str) for field in DEPENDENCY_FIELDS):
-            return "Codex lineage split returned depends_on edge with invalid values"
-    if not isinstance(parsed.get("elaboration_notes"), list) or not all(
-        isinstance(item, str) for item in parsed.get("elaboration_notes", [])
-    ):
-        return "Codex lineage split returned invalid elaboration_notes"
+def _child_error(child: object) -> str:
+    child_fields = set(LINEAGE_SPLIT_SCHEMA["properties"]["children"]["items"]["properties"])
+    if not isinstance(child, dict) or set(child) != child_fields:
+        return "child fields do not match schema"
+    string_fields = (
+        "child_key",
+        "title",
+        "stage_name",
+        "serial_after_child_key",
+        "summary",
+        "functional_check",
+    )
+    if not all(isinstance(child[field], str) for field in string_fields):
+        return "child string fields are invalid"
+    if child["node_kind"] not in {"leaf", "coarse"}:
+        return "child node_kind is invalid"
+    if child["branching_mode"] not in {"parallel_from_parent", "serial_after_child"}:
+        return "child branching_mode is invalid"
+    for field in ("depends_on_child_keys", "acceptance_criteria", "scope_item_ids", "systems", "ux_acceptance_tests", "risks"):
+        if not isinstance(child[field], list) or not all(isinstance(item, str) for item in child[field]):
+            return f"child {field} is invalid"
+    if child["branching_mode"] == "serial_after_child" and not child["serial_after_child_key"].strip():
+        return "serial child must name serial_after_child_key"
+    if child["branching_mode"] == "parallel_from_parent" and child["serial_after_child_key"].strip():
+        return "parallel child must not name serial_after_child_key"
     return ""
 
 
-def _scope_items(rfc_view: Mapping[str, Any], approach: Mapping[str, Any]) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    problem = approach.get("problem") if isinstance(approach, Mapping) else None
-    goals = problem.get("goals", []) if isinstance(problem, Mapping) else []
-    for index, goal in enumerate(goals):
-        if isinstance(goal, Mapping):
-            items.append(_scope_item(f"success_criteria:{index}", f"technical_approach.problem.goals[{index}]", goal))
-    if not items and isinstance(rfc_view.get("desired_outcomes_success"), str):
-        items.append(
-            {
-                "id": "success_criteria:rfc",
-                "source": "rfc.desired_outcomes_success",
-                "text": rfc_view["desired_outcomes_success"],
-            }
-        )
-
-    ux = rfc_view.get("user_experience_requirements")
-    acceptance = ux.get("acceptance_tests") if isinstance(ux, Mapping) else None
-    if isinstance(acceptance, Mapping):
-        for field in sorted(acceptance):
-            values = acceptance.get(field)
-            if isinstance(values, list):
-                for index, value in enumerate(values):
-                    if isinstance(value, str):
-                        items.append(
-                            {
-                                "id": f"acceptance_tests:{field}:{index}",
-                                "source": f"rfc.user_experience_requirements.acceptance_tests.{field}[{index}]",
-                                "text": value,
-                            }
-                        )
-
-    patch_plan = _patch_plan(approach)
-    if isinstance(patch_plan.get("first_playable"), Mapping):
-        items.append(_scope_item("patch_plan:first_playable", "technical_approach.patch_plan.first_playable", patch_plan["first_playable"]))
-    for field in ("follow_ups", "deferred"):
-        values = patch_plan.get(field)
-        if isinstance(values, list):
-            for index, value in enumerate(values):
-                if isinstance(value, Mapping):
-                    items.append(_scope_item(f"patch_plan:{field}:{index}", f"technical_approach.patch_plan.{field}[{index}]", value))
-
-    for risk in _risks(approach):
-        risk_id = str(risk.get("id") or len(items))
-        items.append(_scope_item(f"must_address_risks:{risk_id}", "technical_approach.risks", risk))
-    return items
-
-
-def _scope_item(item_id: str, source: str, value: Mapping[str, Any]) -> dict[str, str]:
-    return {"id": item_id, "source": source, "text": json.dumps(value, sort_keys=True, ensure_ascii=True)}
-
-
-def _assign_child_ids(repo: Path, parent_id: str, children: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    assigned: list[dict[str, Any]] = []
-    next_index = 1
-    for child in children:
-        while git_wrapper.branch_exists(repo, f"{RFC_PREFIX}{parent_id}-{next_index}"):
-            next_index += 1
+def _normalize_split(
+    repo: Path,
+    parent_branch: str,
+    split: Mapping[str, Any],
+    scope_items: list[Mapping[str, str]],
+    horizon: int,
+) -> dict[str, Any]:
+    root_id = _root_serial_id(repo, parent_branch)
+    depths = _child_depths(split["children"])
+    normalized_children: list[dict[str, Any]] = []
+    for index, child in enumerate(split["children"], start=1):
         copy = dict(child)
-        copy["id"] = f"{parent_id}-{next_index}"
-        assigned.append(copy)
-        next_index += 1
-    return assigned
+        copy["declared_node_kind"] = child.get("node_kind")
+        child_id = f"{root_id}-{index}"
+        copy["id"] = child_id
+        copy["branch"] = f"{RFC_PREFIX}{child_id}"
+        depth = depths.get(copy["child_key"], 0)
+        copy["node_kind"] = "leaf" if depth < max(1, horizon) else "coarse"
+        copy["acceptance_criteria"] = list(copy["acceptance_criteria"]) or _criteria_for_scope(scope_items, copy["scope_item_ids"])
+        normalized_children.append(copy)
+    return {
+        "split_mode": split["split_mode"],
+        "rationale": split["rationale"],
+        "parent_retained_scope_ids": list(split["parent_retained_scope_ids"]),
+        "children": normalized_children,
+    }
 
 
-def _dependency_edges(raw_edges: list[Mapping[str, Any]], child_by_key: Mapping[str, Mapping[str, Any]]) -> list[dict[str, str]]:
-    edges: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for edge in raw_edges:
-        dependent = child_by_key[edge["dependent_child_key"]]["id"]
-        prerequisite = child_by_key[edge["prerequisite_child_key"]]["id"]
-        key = (dependent, prerequisite)
-        if key in seen:
-            continue
-        seen.add(key)
-        edges.append(
+def _create_child_branches(repo: Path, parent_branch: str, split: Mapping[str, Any], ledger_commit: str) -> list[dict[str, Any]]:
+    by_key = {child["child_key"]: child for child in split["children"]}
+    created: list[dict[str, Any]] = []
+    created_keys: set[str] = set()
+    for child in _topological_children(split["children"]):
+        base = parent_branch
+        if child["branching_mode"] == "serial_after_child":
+            base = by_key[child["serial_after_child_key"]]["branch"]
+        metadata = _child_metadata(parent_branch, child, by_key, ledger_commit)
+        files = {
+            "rfc.json": _child_rfc(child),
+            "technical-approach.json": _child_approach(child),
+            METADATA_PATH: metadata,
+        }
+        written = git_wrapper.create_branch_with_files(
+            repo,
+            child["branch"],
+            base,
+            files,
+            commit_message=f"lineage: child {child['id']}",
+            deletions=[LEDGER_PATH],
+        )
+        # Graphite/git-branchless restack concepts shaped serial ancestry invariants:
+        # https://graphite.com/docs/command-reference
+        created.append(
             {
-                "dependent_child_id": dependent,
-                "prerequisite_child_id": prerequisite,
-                "reason": edge["reason"],
+                "id": child["id"],
+                "child_key": child["child_key"],
+                "branch": child["branch"],
+                "commit": written["commit"],
+                "base": base,
+                "node_kind": child["node_kind"],
             }
         )
+        created_keys.add(child["child_key"])
+    if len(created_keys) != len(split["children"]):
+        raise RuntimeError("lineage child creation did not cover every child")
+    return created
+
+
+def _ledger(
+    parent_branch: str,
+    scope_items: list[Mapping[str, str]],
+    split: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    edges = _dependency_edges(split["children"])
+    by_key = {child["child_key"]: child for child in split["children"]}
+    # Airflow's scheduler model influenced storing topology separately from execution state:
+    # https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/scheduler.html
+    return {
+        "schema": "lineage-ledger-v1",
+        "parent_branch": parent_branch,
+        "relation": "split-into",
+        "split_operator": "AND",
+        "scope_items": list(scope_items),
+        "coverage": validation["coverage"],
+        "parent_retained_scope_ids": validation["retained_scope_ids"],
+        # Reference facet: schema field mode naming discipline. Persist
+        # dependency endpoints with prerequisite/dependent names, never from/to.
+        "dependency_graph": [
+            {
+                "prerequisite_branch": by_key[edge["prerequisite_child_key"]]["branch"],
+                "dependent_branch": by_key[edge["dependent_child_key"]]["branch"],
+            }
+            for edge in edges
+        ],
+        "children": [
+            {
+                "id": child["id"],
+                "child_key": child["child_key"],
+                "branch": child["branch"],
+                "node_kind": child["node_kind"],
+                "branching_mode": child["branching_mode"],
+                "depends_on_child_keys": child["depends_on_child_keys"],
+                "serial_after_child_key": child["serial_after_child_key"],
+                "scope_item_ids": child["scope_item_ids"],
+            }
+            for child in split["children"]
+        ],
+    }
+
+
+def _child_metadata(parent_branch: str, child: Mapping[str, Any], by_key: Mapping[str, Mapping[str, Any]], ledger_commit: str) -> dict[str, Any]:
+    depends_on_keys = _edge_dependencies(child)
+    depends_on_branches = [by_key[key]["branch"] for key in depends_on_keys if key in by_key]
+    return {
+        "schema": "rfc-lineage-node-v1",
+        "id": child["id"],
+        "child_key": child["child_key"],
+        "parent_branch": parent_branch,
+        "ledger_commit": ledger_commit,
+        "relation_from_parent": "split-into",
+        "split_operator": "AND",
+        "node_kind": child["node_kind"],
+        "branching_mode": child["branching_mode"],
+        "serial_after_child_key": child["serial_after_child_key"],
+        "depends_on_child_keys": child["depends_on_child_keys"],
+        "depends_on_branches": depends_on_branches,
+        "scope_item_ids": child["scope_item_ids"],
+        "lifecycle_status": "active",
+    }
+
+
+def _child_rfc(child: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "raw_request": child["summary"],
+        "working_title": child["title"],
+        "request_type": "feature",
+        "problem_or_motivation": child["summary"],
+        "intended_users_or_jobs": "Implement the approved RFC technical approach as a bounded lineage child.",
+        "desired_outcomes_success": "; ".join(child["acceptance_criteria"]),
+        "affected_area_platform": ", ".join(child["systems"]),
+        "tech_stack": {
+            "build_strategy": "",
+            "engine": "",
+            "framework": "",
+            "language": "",
+            "platform": "",
+            "rationale": "",
+            "provenance": "unspecified",
+        },
+        "user_experience_requirements": empty_user_experience_requirements(),
+        "background_facts": "Generated from the parent lineage ledger.",
+        "constraints_assumptions": [],
+        "references": [],
+        "grounding_provenance": "lineage_b clean-room split",
+        "open_questions": [],
+        "non_goals_out_of_scope": [],
+        "proposal_hint": child["functional_check"],
+        "alternatives_considered": [],
+    }
+
+
+def _child_approach(child: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "lineage_child": {
+            "id": child["id"],
+            "node_kind": child["node_kind"],
+            "summary": child["summary"],
+            "systems": child["systems"],
+            "acceptance_criteria": child["acceptance_criteria"],
+            "functional_check": child["functional_check"],
+            "ux_acceptance_tests": child["ux_acceptance_tests"],
+            "risks": child["risks"],
+        }
+    }
+
+
+def _unwrap_approach(view: Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(view.get("technical_approach"), Mapping):
+        return view["technical_approach"]
+    return view
+
+
+def _scope_items(rfc: Mapping[str, Any], approach: Mapping[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    _append_text_item(items, "goal:rfc.desired_outcomes_success", "goal", rfc.get("desired_outcomes_success"))
+    for index, text in enumerate(_find_named_strings(approach, {"goal", "goals", "success_criteria", "success_criterion"}), start=1):
+        _append_text_item(items, f"goal:technical_approach:{index}", "goal", text)
+    for path, text in _acceptance_tests(rfc, approach):
+        _append_text_item(items, f"ux:{path}", "ux_acceptance_test", text)
+    patch_plan = _find_first_mapping(approach, "patch_plan")
+    if patch_plan:
+        _append_text_item(items, "patch_plan:first_playable", "patch_plan", patch_plan.get("first_playable"))
+        for index, item in enumerate(_list_of_mappings(patch_plan.get("follow_ups")), start=1):
+            _append_text_item(items, f"patch_plan:follow_up:{index}", "patch_plan", item)
+        for index, item in enumerate(_list_of_mappings(patch_plan.get("deferred")), start=1):
+            _append_text_item(items, f"patch_plan:deferred:{index}", "patch_plan", item)
+    for index, risk in enumerate(_risk_items(approach), start=1):
+        risk_id = risk.get("id") if isinstance(risk.get("id"), str) and risk["id"] else str(index)
+        _append_text_item(items, f"risk:{risk_id}", "must_address_risk", risk)
+    deduped: dict[str, dict[str, str]] = {}
+    for item in items:
+        deduped.setdefault(item["id"], item)
+    return list(deduped.values())
+
+
+def _append_text_item(items: list[dict[str, str]], item_id: str, kind: str, value: Any) -> None:
+    text = _compact_text(value)
+    if text:
+        items.append({"id": item_id, "kind": kind, "text": text})
+
+
+def _acceptance_tests(rfc: Mapping[str, Any], approach: Mapping[str, Any]) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    for source_name, source in (("rfc", rfc), ("technical_approach", approach)):
+        for ux_index, ux in enumerate(_find_mappings_named(source, "user_experience_requirements"), start=1):
+            acceptance = ux.get("acceptance_tests")
+            if not isinstance(acceptance, Mapping):
+                continue
+            for field in sorted(acceptance):
+                tests = acceptance[field]
+                if isinstance(tests, list):
+                    for index, text in enumerate(tests, start=1):
+                        if isinstance(text, str) and text.strip():
+                            values.append((f"{source_name}:{ux_index}:{field}:{index}", text))
+    return values
+
+
+def _risk_items(value: Any) -> list[Mapping[str, Any]]:
+    risks: list[Mapping[str, Any]] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key == "risks" and isinstance(child, list):
+                risks.extend(item for item in child if isinstance(item, Mapping))
+            else:
+                risks.extend(_risk_items(child))
+    elif isinstance(value, list):
+        for child in value:
+            risks.extend(_risk_items(child))
+    return risks
+
+
+def _approach_split_view(approach: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "patch_plan": _find_first_mapping(approach, "patch_plan") or {},
+        "implementation_systems": _find_named_strings(approach, {"systems", "subsystem", "key_modules", "implementation"}),
+        "user_experience_requirements": _find_mappings_named(approach, "user_experience_requirements"),
+        "risks": _risk_items(approach),
+    }
+
+
+def _find_first_mapping(value: Any, target_key: str) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        found = value.get(target_key)
+        if isinstance(found, Mapping):
+            return found
+        for child in value.values():
+            nested = _find_first_mapping(child, target_key)
+            if nested is not None:
+                return nested
+    elif isinstance(value, list):
+        for child in value:
+            nested = _find_first_mapping(child, target_key)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _find_mappings_named(value: Any, target_key: str) -> list[Mapping[str, Any]]:
+    found: list[Mapping[str, Any]] = []
+    if isinstance(value, Mapping):
+        child = value.get(target_key)
+        if isinstance(child, Mapping):
+            found.append(child)
+        for nested in value.values():
+            found.extend(_find_mappings_named(nested, target_key))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_find_mappings_named(child, target_key))
+    return found
+
+
+def _find_named_strings(value: Any, target_keys: set[str]) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key in target_keys:
+                text = _compact_text(child)
+                if text:
+                    strings.append(text)
+            else:
+                strings.extend(_find_named_strings(child, target_keys))
+    elif isinstance(value, list):
+        for child in value:
+            strings.extend(_find_named_strings(child, target_keys))
+    return strings
+
+
+def _compact_text(value: Any) -> str:
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, Mapping) or isinstance(value, list):
+        return json.dumps(value, sort_keys=True, ensure_ascii=True)
+    return ""
+
+
+def _list_of_mappings(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _root_serial_id(repo: Path, branch: str) -> str:
+    local = _rfc_id(branch)
+    if _looks_like_serial_chain(local):
+        return local
+    return git_wrapper.ensure_serial(repo, branch)
+
+
+def _looks_like_serial_chain(value: str) -> bool:
+    parts = value.split("-")
+    return bool(parts) and parts[0].isdigit() and len(parts[0]) == 4 and all(part.isdigit() for part in parts[1:])
+
+
+def _criteria_for_scope(scope_items: list[Mapping[str, str]], ids: list[str]) -> list[str]:
+    by_id = {item["id"]: item["text"] for item in scope_items}
+    return [by_id[item] for item in ids if item in by_id]
+
+
+def _dependency_errors(children: list[Any], child_keys: set[str]) -> list[str]:
+    errors: list[str] = []
+    for child in children:
+        if not isinstance(child, Mapping):
+            continue
+        child_key = str(child.get("child_key", ""))
+        if child.get("branching_mode") == "serial_after_child":
+            predecessor = child.get("serial_after_child_key")
+            if predecessor not in child_keys:
+                errors.append(f"{child_key} serial_after_child_key references unknown child {predecessor}")
+            if predecessor == child_key:
+                errors.append(f"{child_key} cannot serially follow itself")
+        deps = child.get("depends_on_child_keys")
+        if isinstance(deps, list):
+            for dep in deps:
+                if dep not in child_keys:
+                    errors.append(f"{child_key} depends_on_child_keys references unknown child {dep}")
+                if dep == child_key:
+                    errors.append(f"{child_key} cannot depend on itself")
+    return sorted(set(errors))
+
+
+def _edge_dependencies(child: Mapping[str, Any]) -> list[str]:
+    deps = list(child.get("depends_on_child_keys", []))
+    if child.get("branching_mode") == "serial_after_child":
+        predecessor = str(child.get("serial_after_child_key", ""))
+        if predecessor and predecessor not in deps:
+            deps.append(predecessor)
+    return deps
+
+
+def _dependency_edges(children: list[Any]) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for child in children:
+        if not isinstance(child, Mapping):
+            continue
+        dependent_key = str(child.get("child_key", ""))
+        for dep in _edge_dependencies(child):
+            if dep:
+                edges.append({"prerequisite_child_key": dep, "dependent_child_key": dependent_key})
     return edges
 
 
-def _topological_children(children: list[dict[str, Any]], edges: list[dict[str, str]]) -> list[dict[str, Any]]:
-    by_id = {child["id"]: child for child in children}
-    incoming = {child["id"]: 0 for child in children}
-    outgoing: dict[str, list[str]] = {child["id"]: [] for child in children}
-    for edge in edges:
-        dependent = edge["dependent_child_id"]
-        prerequisite = edge["prerequisite_child_id"]
-        incoming[dependent] += 1
-        outgoing[prerequisite].append(dependent)
-
-    ready = [child["id"] for child in children if incoming[child["id"]] == 0]
-    ordered: list[dict[str, Any]] = []
-    while ready:
-        child_id = ready.pop(0)
-        ordered.append(by_id[child_id])
-        for next_id in outgoing[child_id]:
-            incoming[next_id] -= 1
-            if incoming[next_id] == 0:
-                ready.append(next_id)
-    return ordered
-
-
-def _cycle(edges: list[Mapping[str, str] | tuple[str, str]]) -> list[str]:
+def _cycle(edges: list[Mapping[str, str]]) -> list[str]:
     graph: dict[str, list[str]] = {}
     for edge in edges:
-        if isinstance(edge, tuple):
-            source, target = edge
-        elif "prerequisite_child_id" in edge and "dependent_child_id" in edge:
-            source, target = edge["prerequisite_child_id"], edge["dependent_child_id"]
-        else:
-            source, target = edge["from"], edge["to"]
-        graph.setdefault(source, []).append(target)
-
+        graph.setdefault(edge["prerequisite_child_key"], []).append(edge["dependent_child_key"])
     visiting: set[str] = set()
     visited: set[str] = set()
     stack: list[str] = []
@@ -733,7 +965,7 @@ def _cycle(edges: list[Mapping[str, str] | tuple[str, str]]) -> list[str]:
             return []
         visiting.add(node)
         stack.append(node)
-        for next_node in graph.get(node, []):
+        for next_node in sorted(graph.get(node, [])):
             found = visit(next_node)
             if found:
                 return found
@@ -742,224 +974,134 @@ def _cycle(edges: list[Mapping[str, str] | tuple[str, str]]) -> list[str]:
         visited.add(node)
         return []
 
-    for node in graph:
+    for node in sorted(graph):
         found = visit(node)
         if found:
             return found
     return []
 
 
-def _dependency_ids_for(child_id: str, edges: list[dict[str, str]]) -> list[str]:
-    return [edge["prerequisite_child_id"] for edge in edges if edge["dependent_child_id"] == child_id]
+def _child_depths(children: list[Mapping[str, Any]]) -> dict[str, int]:
+    incoming = {child["child_key"]: 0 for child in children}
+    outgoing: dict[str, list[str]] = {child["child_key"]: [] for child in children}
+    for edge in _dependency_edges(list(children)):
+        if edge["prerequisite_child_key"] in outgoing and edge["dependent_child_key"] in incoming:
+            incoming[edge["dependent_child_key"]] += 1
+            outgoing[edge["prerequisite_child_key"]].append(edge["dependent_child_key"])
+    ready = sorted(key for key, count in incoming.items() if count == 0)
+    depths = {key: 0 for key in incoming}
+    while ready:
+        key = ready.pop(0)
+        for child_key in sorted(outgoing[key]):
+            incoming[child_key] -= 1
+            depths[child_key] = max(depths[child_key], depths[key] + 1)
+            if incoming[child_key] == 0:
+                ready.append(child_key)
+                ready.sort()
+    return depths
 
 
-def _ledger(
-    root_serial: str,
-    parent_id: str,
-    parent_branch: str,
-    scope_items: list[dict[str, str]],
-    children: list[dict[str, Any]],
-    dependency_edges: list[dict[str, str]],
-    split: Mapping[str, Any],
-) -> dict[str, Any]:
-    coverage: dict[str, str] = {}
-    for child in children:
-        for item_id in child["scope_item_ids"]:
-            coverage[item_id] = child["id"]
-    for item_id in split["parent_gate_scope_item_ids"]:
-        coverage[item_id] = "parent_gate"
+def _topological_children(children: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    by_key = {child["child_key"]: child for child in children}
+    incoming = {child["child_key"]: 0 for child in children}
+    outgoing: dict[str, list[str]] = {child["child_key"]: [] for child in children}
+    for edge in _dependency_edges(list(children)):
+        incoming[edge["dependent_child_key"]] += 1
+        outgoing[edge["prerequisite_child_key"]].append(edge["dependent_child_key"])
+    ready = sorted(key for key, count in incoming.items() if count == 0)
+    ordered: list[Mapping[str, Any]] = []
+    while ready:
+        key = ready.pop(0)
+        ordered.append(by_key[key])
+        for child_key in sorted(outgoing[key]):
+            incoming[child_key] -= 1
+            if incoming[child_key] == 0:
+                ready.append(child_key)
+                ready.sort()
+    return ordered
+
+
+def _first_playable_dependency_errors(children: list[Any]) -> list[str]:
+    by_key = {child.get("child_key"): child for child in children if isinstance(child, Mapping)}
+    errors: list[str] = []
+    for edge in _dependency_edges(children):
+        dependent = by_key.get(edge["dependent_child_key"])
+        prerequisite = by_key.get(edge["prerequisite_child_key"])
+        if not isinstance(dependent, Mapping) or not isinstance(prerequisite, Mapping):
+            continue
+        if (
+            "patch_plan:first_playable" in dependent.get("scope_item_ids", [])
+            and (prerequisite.get("declared_node_kind") or prerequisite.get("node_kind")) == "coarse"
+        ):
+            errors.append(
+                "patch_plan:first_playable child cannot depend on a coarse child: "
+                f"{dependent['child_key']} depends on {prerequisite['child_key']}"
+            )
+    return errors
+
+
+def _validation_feedback(validation: Mapping[str, Any]) -> str:
+    return json.dumps({key: value for key, value in validation.items() if key != "ok"}, sort_keys=True, ensure_ascii=True)
+
+
+def _invalid(reason: str) -> dict[str, Any]:
     return {
-        "schema_version": 1,
-        "relation": "split-into[AND]",
-        "root_serial": root_serial,
-        "parent_id": parent_id,
-        "parent_branch": parent_branch,
-        "scope_items": scope_items,
-        "coverage": coverage,
-        "depends_on": dependency_edges,
-        "children": [
-            {
-                "id": child["id"],
-                "branch": f"{RFC_PREFIX}{child['id']}",
-                "title": child["working_title"],
-                "horizon_status": child["horizon_status"],
-                "scope_item_ids": list(child["scope_item_ids"]),
-                "acceptance_criteria": list(child["acceptance_criteria"]),
-                "elaboration_note": child["summary"] if child["horizon_status"] == "coarse" else "",
-            }
-            for child in children
-        ],
-        "parent_gate": {
-            "scope_item_ids": list(split["parent_gate_scope_item_ids"]),
-            "acceptance_criteria": ["All child branches are resolved and integrated without violating retained parent scope."],
-        },
-        "elaboration_notes": list(split["elaboration_notes"]),
+        "ok": False,
+        "status": "feedback-retry",
+        "error": reason,
+        "unknown_scope_ids": [],
+        "unmapped_scope_ids": [],
+        "double_mapped_scope_ids": [],
+        "dependency_errors": [],
+        "cycle": [],
     }
 
 
-def _child_metadata(
-    root_serial: str,
-    parent_id: str,
-    parent_branch: str,
-    child: Mapping[str, Any],
-    dependency_ids: list[str],
-) -> dict[str, Any]:
-    return {
-        "lineage": {
-            "node_id": child["id"],
-            "root_serial": root_serial,
-            "parent_id": parent_id,
-            "parent_branch": parent_branch,
-            "relation": "split-into[AND]",
-            "horizon_status": child["horizon_status"],
-            "depends_on": dependency_ids,
-            "primary_dependency": dependency_ids[0] if dependency_ids else "",
-            "additional_dependencies": dependency_ids[1:],
-            "scope_item_ids": list(child["scope_item_ids"]),
-            "acceptance_criteria": list(child["acceptance_criteria"]),
-            "elaboration_note": child["summary"] if child["horizon_status"] == "coarse" else "",
-        }
-    }
-
-
-def _child_rfc_view(parent: Mapping[str, Any], child: Mapping[str, Any]) -> dict[str, Any]:
-    view = {field: parent[field] for field in RFC_FIELDS}
-    view["raw_request"] = f"{parent['raw_request']}\n\nLineage child {child['id']}: {child['summary']}"
-    view["working_title"] = child["working_title"]
-    view["problem_or_motivation"] = child["summary"]
-    view["desired_outcomes_success"] = " ".join(child["acceptance_criteria"]) or child["summary"]
-    view["constraints_assumptions"] = list(parent.get("constraints_assumptions", [])) + [
-        f"Lineage scope item ids: {', '.join(child['scope_item_ids'])}",
-        "Child direction is inherited from the parent direction-ok review.",
-    ]
-    view["proposal_hint"] = child["patch_plan_slice"]
-    return view
-
-
-def _child_approach(
-    parent_id: str,
-    parent_branch: str,
-    child: Mapping[str, Any],
-    approach: Mapping[str, Any],
-) -> dict[str, Any]:
-    return {
-        "lineage_parent": {"id": parent_id, "branch": parent_branch},
-        "scope_item_ids": list(child["scope_item_ids"]),
-        "approach_slice": {
-            "summary": child["summary"],
-            "horizon_status": child["horizon_status"],
-            "acceptance_criteria": list(child["acceptance_criteria"]),
-            "relevant_systems": list(child["relevant_systems"]),
-            "patch_plan_slice": child["patch_plan_slice"],
-        },
-        "parent_patch_plan": _patch_plan(approach),
-    }
-
-
-def _leaf_resolved(repo: Path, rfc_branch: str) -> bool:
-    rfc_id = rfc_branch.removeprefix(RFC_PREFIX)
-    contrib = f"{CONTRIB_PREFIX}{rfc_id}"
-    accepted = git_wrapper.has_subject(repo, contrib, "acceptance: reachable") or git_wrapper.has_subject(
-        repo, rfc_branch, "acceptance: reachable"
-    )
-    merged = (
-        git_wrapper.branch_exists(repo, contrib)
-        and (
-            git_wrapper.is_ancestor(repo, contrib, "ai-org/subsystem")
-            or git_wrapper.is_ancestor(repo, contrib, "ai-org/mainline")
-            or git_wrapper.is_ancestor(repo, contrib, git_wrapper.default_branch(repo))
-        )
-    ) or git_wrapper.has_subject(repo, rfc_branch, "rfc: merged")
-    return accepted and merged
-
-
-def _unwrap_approach(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    if isinstance(value.get("technical_approach"), Mapping):
-        return value["technical_approach"]
-    return value
-
-
-def _implementation(approach: Mapping[str, Any]) -> Mapping[str, Any]:
-    decision = _decision(approach)
-    implementation = decision.get("implementation") if isinstance(decision, Mapping) else None
-    return implementation if isinstance(implementation, Mapping) else {}
-
-
-def _patch_plan(approach: Mapping[str, Any]) -> Mapping[str, Any]:
-    implementation = _implementation(approach)
-    patch_plan = implementation.get("patch_plan") if isinstance(implementation, Mapping) else None
-    return patch_plan if isinstance(patch_plan, Mapping) else {}
-
-
-def _risks(approach: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    risks: list[Mapping[str, Any]] = []
-    decision = _decision(approach)
-    if isinstance(decision.get("risks"), list):
-        risks.extend(item for item in decision["risks"] if isinstance(item, Mapping))
-    implementation = _implementation(approach)
-    if isinstance(implementation.get("risks"), list):
-        risks.extend(item for item in implementation["risks"] if isinstance(item, Mapping))
-    return risks
-
-
-def _decision(approach: Mapping[str, Any]) -> Mapping[str, Any]:
-    problem = approach.get("problem") if isinstance(approach, Mapping) else None
-    question = problem.get("question") if isinstance(problem, Mapping) else None
-    decision = question.get("decision") if isinstance(question, Mapping) else None
-    return decision if isinstance(decision, Mapping) else {}
-
-
-def _read_rfc(repo: Path, branch: str, rfc_path: str) -> dict[str, Any]:
-    raw = git_wrapper.show_file(repo, branch, rfc_path)
-    if raw is None:
-        return {"ok": False, "error": f"{rfc_path} missing at {branch}", "branch": branch}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return {"ok": False, "error": f"{rfc_path} at {branch} is not parseable JSON: {exc}", "branch": branch}
-    if not _is_rfc_view(parsed):
-        return {"ok": False, "error": f"{rfc_path} at {branch} must contain exactly the RFC field registry fields", "branch": branch}
-    return {"ok": True, "rfc": {field: parsed[field] for field in RFC_FIELDS}}
-
-
-def _read_json(repo: Path, branch: str, path: str) -> dict[str, Any]:
+def _read_json(repo: Path, branch: str, path: str) -> Any:
     raw = git_wrapper.show_file(repo, branch, path)
     if raw is None:
-        return {"ok": False, "error": f"{path} missing at {branch}", "branch": branch}
+        return None
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return {"ok": False, "error": f"{path} at {branch} is not parseable JSON: {exc}", "branch": branch}
-    if not isinstance(parsed, dict):
-        return {"ok": False, "error": f"{path} at {branch} must contain a JSON object", "branch": branch}
-    return {"ok": True, "json": parsed}
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
-def _is_rfc_view(value: object) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == set(RFC_FIELDS)
-        and all(isinstance(value[field], str) for field in STRING_FIELDS)
-        and all(
-            isinstance(value[field], list) and all(isinstance(item, str) for item in value[field])
-            for field in STRING_ARRAY_FIELDS
-        )
-        and validate_tech_stack(value.get("tech_stack"))
-        and validate_user_experience_requirements(value.get("user_experience_requirements"))
-    )
+def _read_metadata(repo: Path, branch: str) -> dict[str, Any]:
+    data = _read_json(repo, branch, METADATA_PATH)
+    return dict(data) if isinstance(data, Mapping) else {}
 
 
-def _root_serial(repo: Path, branch: str) -> str:
-    serial = git_wrapper.serial_for_ref(repo, branch)
-    return serial or ""
+def _read_ledger_from_first_parent_history(repo: Path, ref: str) -> Any:
+    current = ref
+    for _ in range(50):
+        data = _read_json(repo, current, LEDGER_PATH)
+        if isinstance(data, Mapping):
+            return data
+        parents = git_wrapper.parent_commits(repo, current)
+        if not parents:
+            return None
+        current = parents[0]
+    return None
 
 
-def _lineage_id(repo: Path, branch: str) -> str:
-    rfc_id = _rfc_id(branch)
-    serial = _root_serial(repo, branch)
-    if serial and (rfc_id == serial or rfc_id.startswith(serial + "-")):
-        return rfc_id
-    return serial or rfc_id
+def _has_integration_gate(repo: Path, branch: str) -> bool:
+    return git_wrapper.has_subject(repo, branch, "lineage: integration-gate")
+
+
+def _dependent_branches(repo: Path, parent_branch: str, changed_branch: str) -> list[str]:
+    ledger = _read_json(repo, parent_branch, LEDGER_PATH)
+    if not isinstance(ledger, Mapping) or not isinstance(ledger.get("children"), list):
+        return []
+    dependents: list[str] = []
+    for child in ledger["children"]:
+        if not isinstance(child, Mapping) or child.get("branch") == changed_branch:
+            continue
+        metadata = _read_metadata(repo, str(child.get("branch", "")))
+        deps = metadata.get("depends_on_branches")
+        if isinstance(deps, list) and changed_branch in deps:
+            dependents.append(str(child["branch"]))
+    return dependents
 
 
 def _rfc_branch(rfc_id_or_branch: str) -> str:
