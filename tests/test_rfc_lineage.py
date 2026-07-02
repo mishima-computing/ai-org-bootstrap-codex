@@ -58,7 +58,13 @@ def test_refine_maps_approved_patch_plan_to_subnumbered_child_branches(tmp_path,
                     ["Acceptance notes"],
                 ),
             ],
-            depends_on=[{"from_child_key": "prep", "to_child_key": "behavior", "reason": "Behavior uses state."}],
+            depends_on=[
+                {
+                    "dependent_child_key": "behavior",
+                    "prerequisite_child_key": "prep",
+                    "reason": "Behavior uses state.",
+                }
+            ],
         )
 
     _install_codex_fake(monkeypatch, handler)
@@ -77,6 +83,11 @@ def test_refine_maps_approved_patch_plan_to_subnumbered_child_branches(tmp_path,
     assert set(child_rfc) == set(lineage.RFC_FIELDS)
     assert child_rfc["tech_stack"] == _rfc()["tech_stack"]
     assert child_rfc["user_experience_requirements"] == _rfc()["user_experience_requirements"]
+    for child in result["children"]:
+        assert git_wrapper.file_exists(repo, child["branch"], "rfc.json") is True
+        assert git_wrapper.file_exists(repo, child["branch"], "technical-approach.json") is True
+        assert git_wrapper.file_exists(repo, child["branch"], "rfc-metadata.json") is True
+        assert git_wrapper.file_exists(repo, child["branch"], "lineage-ledger.json") is False
     metadata = json.loads(_git(repo, "show", "ai-org/rfc/0001-2:rfc-metadata.json"))
     assert metadata["lineage"]["depends_on"] == ["0001-1"]
     assert metadata["lineage"]["primary_dependency"] == "0001-1"
@@ -85,9 +96,17 @@ def test_refine_maps_approved_patch_plan_to_subnumbered_child_branches(tmp_path,
     ledger = json.loads(_git(repo, "show", "ai-org/rfc/feature:lineage-ledger.json"))
     assert ledger["relation"] == "split-into[AND]"
     assert ledger["coverage"]["patch_plan:follow_ups:0"] == "0001-2"
-    assert ledger["depends_on"] == [{"from": "0001-1", "to": "0001-2", "reason": "Behavior uses state."}]
+    assert ledger["depends_on"] == [
+        {
+            "dependent_child_id": "0001-2",
+            "prerequisite_child_id": "0001-1",
+            "reason": "Behavior uses state.",
+        }
+    ]
     assert '"order"' not in json.dumps(ledger)
     assert prompts
+    assert lineage.resolved(repo, "ai-org/rfc/feature") is False
+    assert lineage.resolved(repo, "ai-org/rfc/0001-1") is False
 
 
 def test_lineage_coverage_validation_retries_then_fails_closed(tmp_path, monkeypatch):
@@ -148,7 +167,11 @@ def test_refine_accepts_right_sized_codex_answer_with_surplus_children(tmp_path,
             ],
             "parent_gate_scope_item_ids": ["patch_plan:first_playable"],
             "depends_on": [
-                {"from_child_key": "surplus", "to_child_key": "surplus", "reason": "Schema-forced surplus."}
+                {
+                    "dependent_child_key": "surplus",
+                    "prerequisite_child_key": "surplus",
+                    "reason": "Schema-forced surplus.",
+                }
             ],
             "elaboration_notes": ["Schema-forced surplus."],
         }
@@ -270,6 +293,39 @@ def test_double_mapped_scope_item_is_rejected():
     assert result["errors"] == ["success_criteria:0 is mapped more than once: one, two"]
 
 
+def test_dependency_edges_require_unambiguous_field_names():
+    scope_items = [
+        {"id": "first", "source": "test", "text": "first"},
+        {"id": "second", "source": "test", "text": "second"},
+    ]
+    children = [
+        _child("prep", "Prep", "leafed", ["first"], ["ok"], ["system"]),
+        _child("behavior", "Behavior", "leafed", ["second"], ["ok"], ["system"]),
+    ]
+
+    accepted = lineage.validate_ledger_contract(
+        _split(
+            children,
+            depends_on=[
+                {
+                    "dependent_child_key": "behavior",
+                    "prerequisite_child_key": "prep",
+                    "reason": "Behavior uses prep.",
+                }
+            ],
+        ),
+        scope_items,
+    )
+    rejected = lineage.validate_ledger_contract(
+        _split(children, depends_on=[{"from_child_key": "prep", "to_child_key": "behavior", "reason": "Old shape."}]),
+        scope_items,
+    )
+
+    assert accepted["ok"] is True
+    assert rejected["ok"] is False
+    assert rejected["errors"] == ["depends_on edge has invalid fields"]
+
+
 def test_rolling_wave_keeps_later_stage_coarse_with_exit_criteria(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
@@ -302,7 +358,13 @@ def test_rolling_wave_keeps_later_stage_coarse_with_exit_criteria(tmp_path, monk
                     ["Battle UI"],
                 ),
             ],
-            depends_on=[{"from_child_key": "near", "to_child_key": "later", "reason": "Later pass builds on first playable."}],
+            depends_on=[
+                {
+                    "dependent_child_key": "later",
+                    "prerequisite_child_key": "near",
+                    "reason": "Later pass builds on first playable.",
+                }
+            ],
             notes=["Re-elaborate later at the horizon boundary."],
         ),
     )
@@ -320,6 +382,68 @@ def test_rolling_wave_keeps_later_stage_coarse_with_exit_criteria(tmp_path, monk
     assert ledger["children"][1]["horizon_status"] == "coarse"
 
 
+def test_first_playable_cannot_depend_on_coarse_child_and_retries(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
+    git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+    prompts: list[str] = []
+
+    first_playable = _child(
+        "near",
+        "Near horizon playable",
+        "leafed",
+        [
+            "success_criteria:0",
+            "patch_plan:first_playable",
+            "acceptance_tests:screenshot_checks:0",
+            "acceptance_tests:interaction_checks:0",
+            "must_address_risks:risk-ui",
+        ],
+        ["The first playable passes functional_check."],
+        ["Battle state"],
+    )
+    later = _child(
+        "later",
+        "Later evidence pass",
+        "coarse",
+        ["patch_plan:follow_ups:0", "acceptance_tests:playtest_checks:0"],
+        ["Dependencies are resolved."],
+        ["Battle UI"],
+    )
+
+    def handler(prompt: str) -> dict[str, Any]:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _split(
+                [first_playable, later],
+                depends_on=[
+                    {
+                        "dependent_child_key": "near",
+                        "prerequisite_child_key": "later",
+                        "reason": "Inverted edge.",
+                    }
+                ],
+            )
+        return _split(
+            [first_playable, later],
+            depends_on=[
+                {
+                    "dependent_child_key": "later",
+                    "prerequisite_child_key": "near",
+                    "reason": "Later pass builds on first playable.",
+                }
+            ],
+        )
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = lineage.refine(repo, "feature", horizon=1)
+
+    assert result["ok"] is True
+    assert len(prompts) == 2
+    assert "patch_plan:first_playable child cannot depend on a coarse child" in prompts[1]
+
+
 def test_resolved_rolls_up_leaf_parent_and_integration_gate(tmp_path):
     repo = _init_repo(tmp_path)
     _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
@@ -331,6 +455,7 @@ def test_resolved_rolls_up_leaf_parent_and_integration_gate(tmp_path):
         "ai-org/rfc/feature",
         {
             "lineage-ledger.json": {
+                "parent_branch": "ai-org/rfc/feature",
                 "children": [
                     {"branch": "ai-org/rfc/0001-1"},
                     {"branch": "ai-org/rfc/0001-2"},
@@ -346,6 +471,47 @@ def test_resolved_rolls_up_leaf_parent_and_integration_gate(tmp_path):
     assert lineage.resolved(repo, "ai-org/rfc/feature") is False
     git_wrapper.commit_empty(repo, "ai-org/rfc/feature", "rfc: integration-gate passed")
     assert lineage.resolved(repo, "ai-org/rfc/feature") is True
+
+
+def test_resolved_treats_foreign_inherited_ledger_as_absent_leaf(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write_child_rfc(repo, "0001-1", "main")
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/0001-1",
+        {
+            "lineage-ledger.json": {
+                "parent_branch": "ai-org/rfc/feature",
+                "children": [{"branch": "ai-org/rfc/0001-1"}],
+            }
+        },
+        subject="rfc: inherited ledger fixture",
+    )
+    _accepted_and_merged(repo, "0001-1")
+
+    assert lineage.resolved(repo, "ai-org/rfc/0001-1") is True
+
+
+def test_resolved_depth_guard_reports_lineage_cycle(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_child_rfc(repo, "0001-1", "main")
+    _write_child_rfc(repo, "0001-2", "main")
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/0001-1",
+        {"lineage-ledger.json": {"parent_branch": "ai-org/rfc/0001-1", "children": [{"branch": "ai-org/rfc/0001-2"}]}},
+        subject="rfc: cycle fixture",
+    )
+    git_wrapper.commit_files(
+        repo,
+        "ai-org/rfc/0001-2",
+        {"lineage-ledger.json": {"parent_branch": "ai-org/rfc/0001-2", "children": [{"branch": "ai-org/rfc/0001-1"}]}},
+        subject="rfc: cycle fixture",
+    )
+    monkeypatch.setattr(lineage, "MAX_RESOLUTION_DEPTH", 3)
+
+    with pytest.raises(RuntimeError, match="lineage resolution exceeded maximum depth 3"):
+        lineage.resolved(repo, "ai-org/rfc/0001-1")
 
 
 def test_escalate_and_stale_markers(tmp_path):

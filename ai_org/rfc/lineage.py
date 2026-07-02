@@ -52,6 +52,7 @@ METADATA_PATH = "rfc-metadata.json"
 APPROACH_PATH = "technical-approach.json"
 RFC_FIELDS = RFC_VIEW_FIELDS
 MAX_VALIDATION_ATTEMPTS = 2
+MAX_RESOLUTION_DEPTH = 64
 
 CHILD_FIELDS = (
     "child_key",
@@ -64,7 +65,7 @@ CHILD_FIELDS = (
     "patch_plan_slice",
 )
 
-DEPENDENCY_FIELDS = ("from_child_key", "to_child_key", "reason")
+DEPENDENCY_FIELDS = ("dependent_child_key", "prerequisite_child_key", "reason")
 
 LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -112,8 +113,14 @@ LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": list(DEPENDENCY_FIELDS),
                 "properties": {
-                    "from_child_key": {"type": "string"},
-                    "to_child_key": {"type": "string"},
+                    "dependent_child_key": {
+                        "type": "string",
+                        "description": "The child_key for the child that cannot start until the prerequisite child is resolved.",
+                    },
+                    "prerequisite_child_key": {
+                        "type": "string",
+                        "description": "The child_key for the child that must resolve before the dependent child can start.",
+                    },
                     "reason": {"type": "string"},
                 },
             },
@@ -226,6 +233,7 @@ def refine(
             base,
             files,
             commit_message=f"rfc: lineage child {child['id']} {child['working_title']}",
+            deletions=[LEDGER_PATH],
         )
         git_wrapper.commit_empty(repo_path, child_branch, "rfc: direction-ok inherited")
         child_nodes.append(
@@ -282,11 +290,17 @@ def resolved(repo: str | Path, branch: str) -> bool:
     """Return recursive lineage resolution for a leaf or parent branch."""
     repo_path = Path(repo)
     rfc_branch = _rfc_branch(branch)
+    return _resolved(repo_path, rfc_branch, 0)
+
+
+def _resolved(repo_path: Path, rfc_branch: str, depth: int) -> bool:
+    if depth >= MAX_RESOLUTION_DEPTH:
+        raise RuntimeError(f"lineage resolution exceeded maximum depth {MAX_RESOLUTION_DEPTH} at {rfc_branch}")
     ledger_result = _read_json(repo_path, rfc_branch, LEDGER_PATH)
-    if ledger_result["ok"]:
+    if ledger_result["ok"] and ledger_result["json"].get("parent_branch") == rfc_branch:
         ledger = ledger_result["json"]
         child_branches = [child.get("branch") for child in ledger.get("children", []) if isinstance(child, Mapping)]
-        if not child_branches or not all(isinstance(item, str) and resolved(repo_path, item) for item in child_branches):
+        if not child_branches or not all(isinstance(item, str) and _resolved(repo_path, item, depth + 1) for item in child_branches):
             return False
         return git_wrapper.has_subject(repo_path, rfc_branch, "rfc: integration-gate passed")
     return _leaf_resolved(repo_path, rfc_branch)
@@ -425,14 +439,14 @@ def validate_ledger_contract(split: Mapping[str, Any], scope_items: list[dict[st
         if not isinstance(edge, Mapping) or set(edge) != set(DEPENDENCY_FIELDS):
             errors.append("depends_on edge has invalid fields")
             continue
-        source = edge["from_child_key"]
-        target = edge["to_child_key"]
-        if source not in child_keys:
-            errors.append(f"depends_on source is unknown: {source}")
-        if target not in child_keys:
-            errors.append(f"depends_on target is unknown: {target}")
-        if source == target:
-            errors.append(f"depends_on self-edge is invalid: {source}")
+        dependent = edge["dependent_child_key"]
+        prerequisite = edge["prerequisite_child_key"]
+        if dependent not in child_keys:
+            errors.append(f"depends_on dependent child is unknown: {dependent}")
+        if prerequisite not in child_keys:
+            errors.append(f"depends_on prerequisite child is unknown: {prerequisite}")
+        if dependent == prerequisite:
+            errors.append(f"depends_on self-edge is invalid: {dependent}")
         if not isinstance(edge["reason"], str):
             errors.append("depends_on reason must be a string")
 
@@ -442,8 +456,20 @@ def validate_ledger_contract(split: Mapping[str, Any], scope_items: list[dict[st
         errors.append("elaboration_notes must be a string array")
 
     if not errors:
-        edges = [(edge["from_child_key"], edge["to_child_key"]) for edge in depends_on]
-        cycle = _cycle([{"from": source, "to": target} for source, target in edges])
+        children_by_key = {child["child_key"]: child for child in children}
+        for edge in depends_on:
+            dependent = children_by_key[edge["dependent_child_key"]]
+            prerequisite = children_by_key[edge["prerequisite_child_key"]]
+            if (
+                "patch_plan:first_playable" in dependent["scope_item_ids"]
+                and prerequisite["horizon_status"] == "coarse"
+            ):
+                errors.append(
+                    "patch_plan:first_playable child cannot depend on a coarse child: "
+                    f"{dependent['child_key']} depends on {prerequisite['child_key']}"
+                )
+        edges = [(edge["prerequisite_child_key"], edge["dependent_child_key"]) for edge in depends_on]
+        cycle = _cycle(edges)
         if cycle:
             errors.append("depends_on DAG is cyclic: " + " -> ".join(cycle))
 
@@ -495,6 +521,8 @@ def _split_prompt(
         "parent_gate_scope_item_ids.\n"
         "- Do not invent scope_item_ids outside the provided ledger.\n"
         "- depends_on is a DAG between child_key values. It is not an execution order.\n"
+        "- Example: if child 'gate_evidence' builds on child 'first_playable', set "
+        "dependent_child_key='gate_evidence' and prerequisite_child_key='first_playable'.\n"
         "- Do not include an integer order field anywhere.\n\n"
         f"RFC branch: {branch}\n"
         f"Near horizon leaf budget: {horizon}\n"
@@ -638,13 +666,19 @@ def _dependency_edges(raw_edges: list[Mapping[str, Any]], child_by_key: Mapping[
     edges: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for edge in raw_edges:
-        source = child_by_key[edge["from_child_key"]]["id"]
-        target = child_by_key[edge["to_child_key"]]["id"]
-        key = (source, target)
+        dependent = child_by_key[edge["dependent_child_key"]]["id"]
+        prerequisite = child_by_key[edge["prerequisite_child_key"]]["id"]
+        key = (dependent, prerequisite)
         if key in seen:
             continue
         seen.add(key)
-        edges.append({"from": source, "to": target, "reason": edge["reason"]})
+        edges.append(
+            {
+                "dependent_child_id": dependent,
+                "prerequisite_child_id": prerequisite,
+                "reason": edge["reason"],
+            }
+        )
     return edges
 
 
@@ -653,8 +687,10 @@ def _topological_children(children: list[dict[str, Any]], edges: list[dict[str, 
     incoming = {child["id"]: 0 for child in children}
     outgoing: dict[str, list[str]] = {child["id"]: [] for child in children}
     for edge in edges:
-        incoming[edge["to"]] += 1
-        outgoing[edge["from"]].append(edge["to"])
+        dependent = edge["dependent_child_id"]
+        prerequisite = edge["prerequisite_child_id"]
+        incoming[dependent] += 1
+        outgoing[prerequisite].append(dependent)
 
     ready = [child["id"] for child in children if incoming[child["id"]] == 0]
     ordered: list[dict[str, Any]] = []
@@ -673,6 +709,8 @@ def _cycle(edges: list[Mapping[str, str] | tuple[str, str]]) -> list[str]:
     for edge in edges:
         if isinstance(edge, tuple):
             source, target = edge
+        elif "prerequisite_child_id" in edge and "dependent_child_id" in edge:
+            source, target = edge["prerequisite_child_id"], edge["dependent_child_id"]
         else:
             source, target = edge["from"], edge["to"]
         graph.setdefault(source, []).append(target)
@@ -705,7 +743,7 @@ def _cycle(edges: list[Mapping[str, str] | tuple[str, str]]) -> list[str]:
 
 
 def _dependency_ids_for(child_id: str, edges: list[dict[str, str]]) -> list[str]:
-    return [edge["from"] for edge in edges if edge["to"] == child_id]
+    return [edge["prerequisite_child_id"] for edge in edges if edge["dependent_child_id"] == child_id]
 
 
 def _ledger(

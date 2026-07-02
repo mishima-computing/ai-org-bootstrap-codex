@@ -126,12 +126,15 @@ def create_branch_with_files(
     *,
     commit_message: str,
     extra_parents: list[str] | None = None,
+    deletions: list[str] | None = None,
 ) -> dict[str, str]:
     """Create or replace a branch at base with the given files committed.
 
     Additional parents are encoded on the resulting commit, which lets branch
     ancestry represent dependency on multiple prerequisite branches without
-    sidecar graph data.
+    sidecar graph data. Paths in deletions are removed from the committed tree
+    in the same commit, which prevents inherited branch-local files from
+    appearing on the new branch without adding tombstone content.
     """
     repo_path = Path(repo)
     original = current_branch(repo_path)
@@ -149,7 +152,11 @@ def create_branch_with_files(
                 content = json.dumps(payload, indent=2) + "\n"
             path.write_text(content, encoding="utf-8")
             add_paths.append(rel_path)
-        _git_required(repo_path, "add", *add_paths)
+        if add_paths:
+            _git_required(repo_path, "add", *add_paths)
+        delete_paths = list(deletions or [])
+        if delete_paths:
+            _git_required(repo_path, "rm", "-q", "--ignore-unmatch", "--", *delete_paths)
         _git_required(repo_path, "commit", "--allow-empty", "-m", commit_message)
         if len(parents) > 1:
             tree = _git_required(repo_path, "rev-parse", "HEAD^{tree}").stdout.strip()

@@ -129,6 +129,28 @@ def test_create_branch_with_files_notes_and_dependency_graph(tmp_path):
     assert git_wrapper.is_ancestor(repo, "rfc/prep", "rfc/docs") is False
 
 
+def test_create_branch_with_files_can_delete_inherited_paths(tmp_path):
+    repo = _init_repo(tmp_path)
+    git_wrapper.create_branch_with_files(
+        repo,
+        "rfc/parent",
+        "main",
+        {"lineage-ledger.json": {"children": []}, "rfc.json": {"title": "Parent"}},
+        commit_message="rfc: parent",
+    )
+    git_wrapper.create_branch_with_files(
+        repo,
+        "rfc/child",
+        "rfc/parent",
+        {"rfc.json": {"title": "Child"}},
+        commit_message="rfc: child",
+        deletions=["lineage-ledger.json"],
+    )
+
+    assert git_wrapper.file_exists(repo, "rfc/child", "rfc.json") is True
+    assert git_wrapper.file_exists(repo, "rfc/child", "lineage-ledger.json") is False
+
+
 def test_serial_registry_uses_tags_and_is_idempotent(tmp_path):
     repo = _init_repo(tmp_path)
     _branch_with_commit(repo, "ai-org/rfc/one", "rfc: direction-ok")
