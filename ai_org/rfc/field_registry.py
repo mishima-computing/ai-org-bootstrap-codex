@@ -238,7 +238,7 @@ def empty_tech_stack() -> dict[str, str]:
         "framework": "",
         "language": "",
         "platform": "",
-        "rationale": "No stack was specified at entrance; approach formation must evaluate engine/framework/platform candidates before promotion.",
+        "rationale": "",
         "provenance": "unspecified",
     }
 
@@ -279,7 +279,7 @@ def validate_tech_stack(value: object, *, require_choice: bool = True) -> bool:
     if value["provenance"] not in TECH_STACK_PROVENANCE:
         return False
     if value["provenance"] == "unspecified":
-        unspecified_choice_fields = ("build_strategy", "engine", "framework", "language", "platform")
+        unspecified_choice_fields = ("build_strategy", "engine", "framework", "language", "platform", "rationale")
         return all(not value[field].strip() for field in unspecified_choice_fields)
     if value["build_strategy"] not in TECH_STACK_CONCRETE_BUILD_STRATEGIES:
         return False

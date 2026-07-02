@@ -29,15 +29,23 @@
 # promoted RFC (ai-org/rfc/<id>: rfc.json), or send the request back with a proposed interpretation.
 #
 # ==========================================================================================================
-# CANONICAL RECEIVE FLOW — ①②③④ (terum 2026-07-02, CONFIRMED). Read this before touching the Reference wiring.
+# CANONICAL RECEIVE FLOW - 1/2/3/4 (terum 2026-07-02, CONFIRMED). Read this before touching the Reference wiring.
 # This block is a "Memento tattoo": the correct flow lives HERE, in the code, because ADR/notes get missed.
-#   ① validate + ground        -> grounded RFC (what to build: problem + proposal).
-#   ② reference.build_from_rfc  -> POPULATE the single org-level Reference with THIS RFC's concepts.
-#                                  DESIGN facets are synchronous: the RFC WAITS because ③ consumes them.
+#   1. validate + ground       -> grounded RFC (what to build: problem + proposal).
+#                                  Provenance discipline: grounding never deliberates the stack. It may only mark
+#                                  tech_stack requester_specified when the original request names the stack, or
+#                                  unspecified otherwise. Franchise/domain stack precedent is background_facts
+#                                  evidence, never a stack decision rule.
+#   2. reference.build_from_rfc -> POPULATE the single org-level Reference with THIS RFC's concepts.
+#                                  DESIGN facets are synchronous: the RFC WAITS because 3 consumes them.
 #                                  IMPLEMENTATION facets are background: the RFC does NOT wait; this warms patch.
-#   ③ form_technical_approach   -> CONSUME the Reference by lookup to propose HOW to build it
-#                                  (Reference patterns + repo context + requester approach).
-#   ④ promote RFC (with Technical Approach) -> review.
+#   3. form_technical_approach  -> CONSUME the Reference by lookup to propose HOW to build it
+#                                  (Reference patterns + repo context + requester approach). ORG_BUILDER_PROFILE
+#                                  is injected as standing hard constraints at step 2: constraints prune the feasible
+#                                  set, then judgment chooses among feasible candidates. Fidelity precedent remains
+#                                  evidence; requester-specified stacks override org constraints, with conflicts
+#                                  recorded later as non-blocking risks.
+#   4. promote RFC (with Technical Approach) -> review.
 #
 # produce_rfc now executes the flow after confident grounding: it synchronously builds DESIGN Reference facets,
 # starts IMPLEMENTATION Reference research in the background, forms the Technical Approach with the exact design
@@ -148,6 +156,39 @@ REQUIRED_FIELDS = ENTRANCE_REQUIRED_FIELDS
 OPTIONAL_STRING_FIELDS = STRING_FIELDS
 OPTIONAL_LIST_FIELDS = STRING_ARRAY_FIELDS
 
+ORG_BUILDER_PROFILE: tuple[dict[str, str], ...] = (
+    {
+        "statement": "Contributors author text artifacts in git worktrees.",
+        "trace": "Codex CLI agents can create and edit code, data, configuration, and text files.",
+        "must": "Prefer stacks whose primary artifact can be authored and reviewed as text in a git worktree.",
+        "must_not": "Depend on GUI-editor workflows or opaque project state as the primary construction path.",
+    },
+    {
+        "statement": "The org does not author binary assets or operate a 3D DCC pipeline.",
+        "trace": "Asset production is the org's 2D vector/SVG graphicist; no Blender, Maya, or binary asset production pipeline is available.",
+        "must": "Use text-authored assets or 2D vector/SVG assets that can be generated and reviewed in the worktree.",
+        "must_not": "Require bespoke 3D models, DCC scenes, binary editor assets, or heavyweight asset cooking to prove the RFC.",
+    },
+    {
+        "statement": "Verification must run headlessly inside the worktree.",
+        "trace": "functional_check boots or probes the artifact CI-style without an interactive editor.",
+        "must": "Choose implementation paths that can be installed, launched, and checked by headless commands.",
+        "must_not": "Require interactive editor sessions, manual GUI inspection, or heavyweight native build pipelines for the first verification path.",
+    },
+    {
+        "statement": "Deliverables should be directly reachable by intended users.",
+        "trace": "Browser or lightweight desktop delivery is reachable; heavyweight engine installs are not assumed for users or CI.",
+        "must": "Prefer browser or lightweight desktop targets when they can satisfy the RFC.",
+        "must_not": "Make heavyweight installs or commercial engine toolchains the default user access path without requester instruction.",
+    },
+    {
+        "statement": "Licensing and cost are standing construction constraints.",
+        "trace": "The org weighs licensing, commercial engine terms, CI availability, and contributor cost before choosing a stack.",
+        "must": "Prefer stacks whose licenses, runtime costs, and CI/tooling costs fit routine repository work.",
+        "must_not": "Select a costly or license-sensitive stack solely because external precedent uses it.",
+    },
+)
+
 REQUEST_SCHEMA: dict[str, Any] = {
     "recognized_fields": list(RFC_VIEW_FIELDS),
     "field_registry": {entry.name: entry.description for entry in FIELD_REGISTRY},
@@ -216,7 +257,7 @@ SUCCESS_CRITERION_SCHEMA: dict[str, Any] = {
             "required": list(SUCCESS_CRITERION_CAPABILITY_FIELDS),
             "properties": {
                 "action": {"type": "string"},
-                "preconditions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                "preconditions": {"type": "array", "items": {"type": "string"}},
             },
         },
         "verifiable_outcome": {
@@ -249,12 +290,12 @@ NORMALIZE_PROBLEM_SCHEMA: dict[str, Any] = {
         "problem": {"type": "string"},
         "affected": {"type": "string"},
         "current_inadequacy": {"type": "string"},
-        "success_criteria": {"type": "array", "minItems": 1, "items": SUCCESS_CRITERION_SCHEMA},
+        "success_criteria": {"type": "array", "items": SUCCESS_CRITERION_SCHEMA},
         "non_goals": {"type": "array", "items": {"type": "string"}},
     },
 }
 
-CONSTRAINT_DERIVATION_VALUES = ("problem", "success_criteria", "non_goals", "repo", "domain")
+CONSTRAINT_DERIVATION_VALUES = ("problem", "success_criteria", "non_goals", "repo", "domain", "org_builder_profile")
 CONSTRAINT_DERIVATION_FIELDS = ("from", "trace")
 CONSTRAINT_IMPLICATION_FIELDS = ("must", "must_not")
 CONSTRAINT_ITEM_FIELDS = ("statement", "derivation", "implication")
@@ -356,8 +397,6 @@ PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
     "properties": {
         "patterns": {
             "type": "array",
-            "minItems": 3,
-            "maxItems": 6,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -380,8 +419,8 @@ PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                         "required": list(PRIOR_ART_TRADEOFF_FIELDS),
                         "properties": {
-                            "pros": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-                            "cons": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                            "pros": {"type": "array", "items": {"type": "string"}},
+                            "cons": {"type": "array", "items": {"type": "string"}},
                         },
                     },
                     "disposition": {
@@ -393,7 +432,7 @@ PRIOR_ART_MAP_SCHEMA: dict[str, Any] = {
                             "why": {"type": "string"},
                         },
                     },
-                    "traces_to": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "traces_to": {"type": "array", "items": {"type": "string"}},
                 },
             },
         },
@@ -467,8 +506,6 @@ GENERATE_CANDIDATES_SCHEMA: dict[str, Any] = {
     "properties": {
         "candidates": {
             "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
             "items": CANDIDATE_APPROACH_SCHEMA,
         },
     },
@@ -540,6 +577,14 @@ DECISION_RATIONALE_FIELDS = (
     "under_constraints",
     "accepting_tradeoffs",
 )
+STACK_DECISION_AXIS_FIELDS = (
+    "fidelity_precedent",
+    "builder_buildability",
+    "asset_supply",
+    "distribution_reachability",
+    "licensing_cost",
+)
+STACK_DECISION_AXIS_SLOT_FIELDS = ("evidence", "judgment")
 REJECTED_APPROACH_FIELDS = (
     "candidate_id",
     "objection",
@@ -548,6 +593,7 @@ SELECT_APPROACH_FIELDS = (
     "selected_candidate_id",
     "arguments",
     "rationale",
+    "stack_axes",
     "rejected",
 )
 
@@ -583,6 +629,23 @@ SELECT_APPROACH_SCHEMA: dict[str, Any] = {
                 "because": {"type": "array", "items": {"type": "string"}},
                 "under_constraints": {"type": "array", "items": {"type": "string"}},
                 "accepting_tradeoffs": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "stack_axes": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(STACK_DECISION_AXIS_FIELDS),
+            "properties": {
+                axis: {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(STACK_DECISION_AXIS_SLOT_FIELDS),
+                    "properties": {
+                        "evidence": {"type": "string"},
+                        "judgment": {"type": "string"},
+                    },
+                }
+                for axis in STACK_DECISION_AXIS_FIELDS
             },
         },
         "rejected": {
@@ -982,16 +1045,26 @@ def receive(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
     return data
 
 
-def intake(source: str | Path | Mapping[str, Any], repo: str | Path, rfc_path: str = "rfc.json") -> dict[str, Any]:
+def intake(
+    source: str | Path | Mapping[str, Any],
+    repo: str | Path,
+    rfc_path: str = "rfc.json",
+    progress_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Validate and ground a raw request, then promote it only when grounding is confident."""
     try:
         request = receive(source)
-        return produce_rfc(request, repo, rfc_path)
+        return produce_rfc(request, repo, rfc_path, progress_path=progress_path)
     except ValueError as exc:
         return {"status": "rejected", "error": str(exc)}
 
 
-def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path: str = "rfc.json") -> dict[str, Any]:
+def produce_rfc(
+    validated_request: Mapping[str, Any],
+    repo: str | Path,
+    rfc_path: str = "rfc.json",
+    progress_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Ground and write a validated registry request to git as ai-org/rfc/<id>:rfc.json."""
     raw_rfc = _entrance_request(validated_request)
     repo_path = Path(repo).resolve()
@@ -1035,6 +1108,7 @@ def produce_rfc(validated_request: Mapping[str, Any], repo: str | Path, rfc_path
         repo_path,
         context=approach_context,
         reference_terms=design_terms,
+        progress_path=progress_path,
     )
     if approach.get("ok") is False:
         return {
@@ -1141,6 +1215,7 @@ def _extract_constraints(
             last_error = parsed["error"]
             feedback = [last_error]
             continue
+        parsed = _merge_org_builder_constraints(parsed)
 
         lint_errors = _lint_constraints(parsed, accumulated_approach)
         if not lint_errors:
@@ -1268,6 +1343,7 @@ def _generate_candidates(
                 feedback = [last_error]
                 continue
             lint_errors = _lint_empty_slots(parsed)
+            lint_errors.extend(_lint_candidate_against_org_builder(parsed, constraints))
             if parsed["id"] in seen_ids:
                 lint_errors.append(f"id duplicates an earlier candidate: {parsed['id']}")
             if parsed["kind"] in seen_kinds:
@@ -1773,6 +1849,7 @@ def form_technical_approach(
     failure = _technical_approach_step_failure("surface_risks", risks)
     if failure:
         return failure
+    risks = _with_requester_stack_org_profile_risk(risks, rfc_view, selected)
     steps["surface_risks"] = risks
 
     risk_target_failure = _validate_risk_targets(risks, candidates, selected)
@@ -1929,6 +2006,14 @@ def _grounding_prompt(rfc_view: dict[str, Any], previous_violations: list[str] |
         "do not add legal disclaimers; do not spend proposed_rfc, assumptions, or grounding_notes on legal "
         "concerns. Do not avoid perceived IP risk by renaming, generalizing, or shrinking the named thing. "
         "Your job here is only to understand and faithfully render what to build.\n\n"
+        "Do not deliberate or choose the technical stack in grounding. proposed_rfc.tech_stack.provenance may "
+        "only be requester_specified when the original raw_request or proposal_hint explicitly names that stack "
+        "(for example Godot, React, Unreal, Unity, Python, or a concrete platform), or unspecified otherwise. "
+        "Never set provenance to ai_deliberated in grounding. When provenance is unspecified, leave "
+        "build_strategy, engine, framework, language, platform, and rationale empty. If research shows the named "
+        "domain, franchise, or product currently uses a stack, preserve that as evidence in background_facts, not as a "
+        "tech_stack decision. For example, 'modern mainline Dragon Quest ships on Unreal Engine' belongs in "
+        "background_facts unless the requester explicitly asked for Unreal.\n\n"
         "Default to the latest or current version, conventions, and best practices of the named thing unless "
         "the request explicitly asks for a retro, classic, old, vintage, specific past version, or specific "
         "past year target. This applies across domains: games should target the current experience, modern "
@@ -2027,6 +2112,7 @@ def _extract_constraints_prompt(
     feedback: list[str] | None = None,
 ) -> str:
     context_text = json.dumps(context or {}, indent=2, sort_keys=True, default=str)
+    org_profile_text = json.dumps(ORG_BUILDER_PROFILE, indent=2, sort_keys=True, ensure_ascii=True)
     approach_text = json.dumps(
         approach or {},
         indent=2,
@@ -2056,12 +2142,18 @@ def _extract_constraints_prompt(
         "that save reload restores identical state implies a persistence and versioning constraint; a criterion "
         "that battle resolution follows commands and stats implies a deterministic battle-state constraint. Use "
         "the raw RFC only as grounding and ambiguity context, not as an independent restart of problem discovery.\n\n"
+        "Merge ORG_BUILDER_PROFILE as standing org facts, not as per-run preferences. These are hard "
+        "constraints for unspecified stacks and must flow into candidate generation, evaluation, and selection. "
+        "Use derivation.from=org_builder_profile when you echo them. If tech_stack.provenance is "
+        "requester_specified, do not use these facts to reject the requested stack; conflicts are non-blocking "
+        "risks surfaced later.\n\n"
         "Write English only. Extract two lists:\n"
         "- hard_constraints: must-satisfy constraints that later approaches cannot violate.\n"
         "- soft_preferences: nice-to-have preferences that should influence trade-offs but may be outweighed.\n\n"
         "Each hard constraint item must include statement, derivation {from, trace}, and implication {must, "
         "must_not}. Each soft preference item must include statement, derivation {from, trace}, and rationale. "
-        "Set derivation.from to exactly one of: problem, success_criteria, non_goals, repo, domain. If a "
+        "Set derivation.from to exactly one of: problem, success_criteria, non_goals, repo, domain, "
+        "org_builder_profile. If a "
         "constraint or preference comes from a success criterion, derivation.from must be success_criteria and "
         "derivation.trace must name the specific criterion or nested criterion slot, such as "
         "success_criteria[0].verifiable_outcome.expected_state. Do not leave statement, derivation.trace, "
@@ -2077,6 +2169,7 @@ def _extract_constraints_prompt(
         "Return an empty list when no defensible items exist for a category; do not invent unsupported "
         "constraints.\n\n"
         + _format_rfc("Grounded registry RFC view", _rfc_to_view(rfc_view))
+        + f"\nORG_BUILDER_PROFILE:\n{org_profile_text}\n"
         + f"\nRoot success_criteria from step 1:\n{goals_text}\n"
         + f"\nAccumulated approach so far:\n{approach_text}\n"
         + f"\nRepository root:\n{repo}\n"
@@ -2182,6 +2275,12 @@ def _generate_candidate_prompt(
         "If rfc.tech_stack.provenance is unspecified, engine/framework/platform selection is a first-class "
         "candidate axis: compare available engines, frameworks, platform targets, and a from-scratch option "
         "only when justified against those available options. Do not use from_scratch as a silent default.\n\n"
+        "ORG_BUILDER_PROFILE constraints in the constraints tree are hard candidate-level filters for "
+        "unspecified stacks. Do not generate candidates whose primary construction path requires GUI-editor "
+        "workflow, binary asset authoring, interactive engine editors, heavyweight native build pipelines, or "
+        "non-headless verification. External fidelity precedent from background_facts may explain what the "
+        "franchise or domain uses, but it is evidence only; it cannot rescue a candidate the org cannot author "
+        "or verify.\n\n"
         f"Return exactly one {candidate_kind} candidate. Make it distinct from existing candidates.\n\n"
         "For each candidate:\n"
         "- id: stable lowercase identifier using letters, numbers, underscores, or hyphens.\n"
@@ -2293,6 +2392,16 @@ def _select_approach_prompt(
         "- selected_candidate_id: the exact id of the selected candidate.\n"
         "- arguments: support or objection Toulmin arguments about candidate ids.\n"
         "- rationale: because, under_constraints, and accepting_tradeoffs arrays.\n"
+        "- stack_axes: five non-empty nested records for stack reasoning. fidelity_precedent is what "
+        "background_facts or prior art says external exemplars use; builder_buildability is whether Codex CLI "
+        "agents can author the artifact as text in a worktree and functional_check can verify it headlessly; "
+        "asset_supply is whether the org's 2D vector/SVG asset path can supply needed assets; "
+        "distribution_reachability is whether intended users can reach the deliverable without heavyweight "
+        "installs; licensing_cost is license, commercial tooling, and CI cost exposure. Each axis must include "
+        "evidence and judgment. Fidelity precedent is evidence only and must not override hard builder "
+        "constraints. If no stack was specified by the requester, this is where the deliberation records why "
+        "the selected feasible stack wins. If from_scratch is selected, explicitly justify it against available "
+        "engine and framework options.\n"
         "- rejected: one item for each non-chosen candidate with candidate_id and objection.\n\n"
         f"Candidate approaches:\n{candidates_text}\n"
         f"\nEvaluation matrix:\n{evaluations_text}\n"
@@ -2435,6 +2544,10 @@ def _surface_risks_prompt(
         "Surface only delivery or design risks that can be attached to a candidate, decision, or implementation "
         "node. Do not change the chosen approach, rewrite the implementation strategy, create new patch "
         "slices, emit the final Technical Approach section, or perform later Technical Approach steps.\n\n"
+        "Requester sovereignty exception: when the accumulated decision came from a requester-specified "
+        "tech_stack, ORG_BUILDER_PROFILE conflicts are non-blocking risks. Do not reject or replace the "
+        "requested stack; attach any buildability, asset, reachability, or licensing conflict to the decision "
+        "or implementation node.\n\n"
         "Return these fields:\n"
         "- risks: each risk node has id, risk, mitigation, attaches_to candidate|decision|implementation, and "
         "target_id naming the node it attaches under. State which success criterion or decision the risk threatens where natural.\n\n"
@@ -3051,6 +3164,29 @@ def _parse_constraints(raw: str) -> dict[str, Any]:
     }
 
 
+def _merge_org_builder_constraints(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    hard = [dict(item) for item in parsed.get("hard_constraints", []) if isinstance(item, Mapping)]
+    soft = [dict(item) for item in parsed.get("soft_preferences", []) if isinstance(item, Mapping)]
+    existing_traces = {
+        item.get("derivation", {}).get("trace")
+        for item in hard
+        if isinstance(item.get("derivation"), Mapping)
+        and item.get("derivation", {}).get("from") == "org_builder_profile"
+    }
+    for item in ORG_BUILDER_PROFILE:
+        trace = item["trace"]
+        if trace in existing_traces:
+            continue
+        hard.append(
+            {
+                "statement": item["statement"],
+                "derivation": {"from": "org_builder_profile", "trace": trace},
+                "implication": {"must": item["must"], "must_not": item["must_not"]},
+            }
+        )
+    return {"hard_constraints": hard, "soft_preferences": soft}
+
+
 def _parse_constraint_items(
     value: Any,
     *,
@@ -3130,6 +3266,44 @@ def _constraints_approach_context(approach: Mapping[str, Any] | None) -> dict[st
 
 def _lint_constraints(parsed: Mapping[str, Any], approach: Mapping[str, Any]) -> list[str]:
     return _lint_empty_slots(parsed)
+
+
+ORG_BUILDER_DISALLOWED_STACK_MARKERS = (
+    "unreal",
+    "unity",
+    "maya",
+    "blender",
+    "3d dcc",
+    "visual studio solution",
+    "xcode project",
+    "native ios",
+    "native android",
+    "heavyweight native build",
+    "interactive editor",
+)
+
+
+def _lint_candidate_against_org_builder(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> list[str]:
+    if not _has_org_builder_constraints(constraints):
+        return []
+    text = json.dumps(candidate, sort_keys=True, ensure_ascii=True).lower()
+    hits = [marker for marker in ORG_BUILDER_DISALLOWED_STACK_MARKERS if marker in text]
+    if not hits:
+        return []
+    return [
+        "candidate conflicts with ORG_BUILDER_PROFILE hard constraints and must be pruned or rewritten: "
+        + ", ".join(hits)
+    ]
+
+
+def _has_org_builder_constraints(constraints: Mapping[str, Any]) -> bool:
+    for item in constraints.get("hard_constraints", []) if isinstance(constraints, Mapping) else []:
+        if not isinstance(item, Mapping):
+            continue
+        derivation = item.get("derivation")
+        if isinstance(derivation, Mapping) and derivation.get("from") == "org_builder_profile":
+            return True
+    return False
 
 
 def _success_criterion_trace_phrases(approach: Mapping[str, Any]) -> set[str]:
@@ -3499,6 +3673,10 @@ def _parse_approach_selection(raw: str, candidate_ids: list[str]) -> dict[str, A
             return _approach_selection_error("Codex approach selection returned invalid rationale values")
         parsed_rationale[field] = list(value)
 
+    stack_axes = _parse_stack_decision_axes(parsed.get("stack_axes"))
+    if stack_axes is None:
+        return _approach_selection_error("Codex approach selection returned invalid stack_axes")
+
     rejected = parsed.get("rejected")
     if not isinstance(rejected, list):
         return _approach_selection_error("Codex approach selection returned invalid rejected list")
@@ -3530,12 +3708,29 @@ def _parse_approach_selection(raw: str, candidate_ids: list[str]) -> dict[str, A
         "selected_candidate_id": chosen,
         "arguments": parsed_arguments,
         "rationale": parsed_rationale,
+        "stack_axes": stack_axes,
         "rejected": parsed_rejected,
     }
 
 
 def _approach_selection_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
+
+
+def _parse_stack_decision_axes(value: Any) -> dict[str, dict[str, str]] | None:
+    if not isinstance(value, dict) or set(value) != set(STACK_DECISION_AXIS_FIELDS):
+        return None
+    parsed: dict[str, dict[str, str]] = {}
+    for axis in STACK_DECISION_AXIS_FIELDS:
+        slot = value.get(axis)
+        if not isinstance(slot, dict) or set(slot) != set(STACK_DECISION_AXIS_SLOT_FIELDS):
+            return None
+        evidence = slot.get("evidence")
+        judgment = slot.get("judgment")
+        if not isinstance(evidence, str) or not isinstance(judgment, str):
+            return None
+        parsed[axis] = {"evidence": evidence, "judgment": judgment}
+    return parsed
 
 
 def _parse_implementation_strategy(raw: str) -> dict[str, Any]:
@@ -3705,6 +3900,47 @@ def _surface_risks_error(reason: str) -> dict[str, Any]:
     return {"ok": False, "error": reason}
 
 
+def _with_requester_stack_org_profile_risk(
+    risks: Mapping[str, Any],
+    rfc_view: Mapping[str, Any],
+    selected: Mapping[str, Any],
+) -> dict[str, Any]:
+    conflict = _requester_stack_org_profile_conflict(rfc_view)
+    existing = [dict(item) for item in risks.get("risks", [])] if isinstance(risks, Mapping) else []
+    if not conflict:
+        return {"risks": existing}
+    selected_id = str(selected.get("selected_candidate_id") or "provided_approach")
+    risk_id = "risk:requester_stack_org_profile_conflict"
+    if any(item.get("id") == risk_id for item in existing):
+        return {"risks": existing}
+    existing.append(
+        {
+            "id": risk_id,
+            "risk": conflict,
+            "mitigation": "Honor the requester-specified stack, keep generated alternatives out of the decision, and make verification gaps explicit in the patch plan.",
+            "attaches_to": "decision",
+            "target_id": f"decision:{selected_id}",
+        }
+    )
+    return {"risks": existing}
+
+
+def _requester_stack_org_profile_conflict(rfc_view: Mapping[str, Any]) -> str:
+    tech_stack = rfc_view.get("tech_stack")
+    if not isinstance(tech_stack, Mapping) or tech_stack.get("provenance") != "requester_specified":
+        return ""
+    stack_text = _tech_stack_text(tech_stack)
+    hits = [marker for marker in ORG_BUILDER_DISALLOWED_STACK_MARKERS if marker in stack_text]
+    if not hits:
+        return ""
+    stack_name = _stack_display_name(tech_stack) or "The requester-specified stack"
+    return (
+        f"{stack_name} conflicts with ORG_BUILDER_PROFILE defaults for text-authored worktree artifacts, "
+        "headless functional_check verification, lightweight delivery, or available 2D/SVG asset production. "
+        "Requester sovereignty makes this non-blocking."
+    )
+
+
 def _technical_approach_context(context: Mapping[str, Any] | None, repo: Path) -> dict[str, Any]:
     approach_context = dict(context or {})
     approach_context.setdefault("repo", repo)
@@ -3742,6 +3978,19 @@ def _provided_approach_from_tech_stack(rfc_view: Mapping[str, Any]) -> dict[str,
     }
 
 
+def _tech_stack_text(tech_stack: Mapping[str, Any]) -> str:
+    return " ".join(str(tech_stack.get(field, "")) for field in TECH_STACK_FIELDS).lower()
+
+
+def _stack_display_name(tech_stack: Mapping[str, Any]) -> str:
+    parts = [
+        str(tech_stack.get(field, "")).strip()
+        for field in ("engine", "framework", "language", "platform")
+        if str(tech_stack.get(field, "")).strip()
+    ]
+    return " / ".join(parts)
+
+
 def _fill_ai_deliberated_tech_stack(
     rfc_view: dict[str, Any],
     selected: Mapping[str, Any],
@@ -3752,10 +4001,12 @@ def _fill_ai_deliberated_tech_stack(
         return
     rationale = _selected_approach_rationale(selected)
     selected_candidate = _selected_candidate(selected, candidates)
-    build_strategy, engine, framework = _tech_stack_choice_from_candidate(selected_candidate)
+    build_strategy, engine, framework, language, platform = _tech_stack_choice_from_candidate(selected_candidate)
     tech_stack["build_strategy"] = build_strategy
     tech_stack["engine"] = engine
     tech_stack["framework"] = framework
+    tech_stack["language"] = language
+    tech_stack["platform"] = platform
     tech_stack["provenance"] = "ai_deliberated"
     tech_stack["rationale"] = (
         rationale
@@ -3773,20 +4024,20 @@ def _selected_candidate(selected: Mapping[str, Any], candidates: Mapping[str, An
     return None
 
 
-def _tech_stack_choice_from_candidate(candidate: Mapping[str, Any] | None) -> tuple[str, str, str]:
+def _tech_stack_choice_from_candidate(candidate: Mapping[str, Any] | None) -> tuple[str, str, str, str, str]:
     if not isinstance(candidate, Mapping):
-        return ("framework_based", "", "Selected Technical Approach")
+        return ("framework_based", "", "Selected Technical Approach", "text-authored repository code", "headless functional_check target")
     text = " ".join(
         str(candidate.get(field, ""))
         for field in ("id", "name", "kind", "summary")
         if isinstance(candidate.get(field, ""), str)
     ).lower()
     if "from scratch" in text or "from_scratch" in text:
-        return ("from_scratch", "", "")
+        return ("from_scratch", "", "", "text-authored repository code", "headless functional_check target")
     name = str(candidate.get("name") or candidate.get("id") or "Selected Technical Approach").strip()
     if "engine" in text or str(candidate.get("kind", "")) == "general_architectural":
-        return ("engine_based", name, "")
-    return ("framework_based", "", name)
+        return ("engine_based", name, "", "text-authored repository code", "headless functional_check target")
+    return ("framework_based", "", name, "text-authored repository code", "headless functional_check target")
 
 
 def _selected_approach_rationale(selected: Mapping[str, Any]) -> str:
@@ -3866,8 +4117,38 @@ def _provided_approach_selection(provided_approach: Any) -> dict[str, Any]:
             "under_constraints": ["Refinement remains inside ai_org.rfc and may use Reference and repo evidence."],
             "accepting_tradeoffs": ["Generated candidate comparison is not performed for this provided basis."],
         },
+        "stack_axes": _requester_specified_stack_axes(provided_approach),
         "rejected": [],
         "requester_approach": _json_safe(provided_approach),
+    }
+
+
+def _requester_specified_stack_axes(provided_approach: Any) -> dict[str, dict[str, str]]:
+    tech_stack = {}
+    if isinstance(provided_approach, Mapping) and isinstance(provided_approach.get("tech_stack"), Mapping):
+        tech_stack = dict(provided_approach["tech_stack"])
+    stack_text = _stack_display_name(tech_stack) or "the requester-specified stack"
+    return {
+        "fidelity_precedent": {
+            "evidence": "Requester sovereignty applies before comparing external precedent.",
+            "judgment": f"Condition the approach on {stack_text} instead of generating alternatives.",
+        },
+        "builder_buildability": {
+            "evidence": "ORG_BUILDER_PROFILE may reveal conflicts, but requester-specified stacks are authoritative.",
+            "judgment": "Record any buildability conflict as a non-blocking risk rather than rejecting the stack.",
+        },
+        "asset_supply": {
+            "evidence": "The org asset path remains 2D vector/SVG unless the requester stack requires otherwise.",
+            "judgment": "Plan around the requested stack and surface any asset-pipeline mismatch as risk.",
+        },
+        "distribution_reachability": {
+            "evidence": "The requested stack may impose install or runtime expectations beyond the org default.",
+            "judgment": "Keep alternatives out of the decision and capture reachability concerns in risks.",
+        },
+        "licensing_cost": {
+            "evidence": "Licensing and cost remain visible planning facts even when they cannot veto the stack.",
+            "judgment": "Track licensing or commercial-tooling exposure as non-blocking risk.",
+        },
     }
 
 
@@ -3982,6 +4263,7 @@ def _partial_question_tree(
             "selected_candidate_id": selected_id,
             "arguments": [dict(item) for item in selected.get("arguments", []) if isinstance(item, Mapping)],
             "rationale": dict(selected.get("rationale", {})) if isinstance(selected.get("rationale"), Mapping) else {},
+            "stack_axes": dict(selected.get("stack_axes", {})) if isinstance(selected.get("stack_axes"), Mapping) else {},
             "rejected": [dict(item) for item in selected.get("rejected", []) if isinstance(item, Mapping)],
         }
         if isinstance(implementation, Mapping):
@@ -4172,6 +4454,7 @@ def _decision_tree_node(
             "under_constraints": list(selected.get("rationale", {}).get("under_constraints", [])),
             "accepting_tradeoffs": list(selected.get("rationale", {}).get("accepting_tradeoffs", [])),
         },
+        "stack_axes": dict(selected.get("stack_axes", {})) if isinstance(selected.get("stack_axes"), Mapping) else {},
         "rejected": [dict(item) for item in selected.get("rejected", [])],
         "risks": _risks_for("decision", decision_id, risks),
         "implementation": implementation_node,
@@ -4416,7 +4699,65 @@ def _lint_grounding(
                 + ", ".join(retro_markers)
             )
 
+    violations.extend(_lint_grounding_tech_stack_provenance(request, rfc_view))
+
     return violations
+
+
+def _lint_grounding_tech_stack_provenance(request: Mapping[str, Any], rfc_view: Mapping[str, Any]) -> list[str]:
+    tech_stack = rfc_view.get("tech_stack")
+    if not isinstance(tech_stack, Mapping):
+        return ["C5 tech-stack provenance lint: tech_stack is not a structured object"]
+    provenance = tech_stack.get("provenance")
+    if provenance == "ai_deliberated":
+        return [
+            "C5 tech-stack provenance lint: grounding may not set provenance=ai_deliberated; only form_technical_approach may deliberate the stack"
+        ]
+    if provenance == "requester_specified" and not _original_request_names_stack(request, tech_stack):
+        return [
+            "C5 tech-stack provenance lint: grounding claimed requester_specified, but the original raw_request/proposal_hint did not name that stack"
+        ]
+    if provenance not in {"requester_specified", "unspecified"}:
+        return [f"C5 tech-stack provenance lint: grounding returned invalid provenance {provenance!r}"]
+    return []
+
+
+def _original_request_names_stack(request: Mapping[str, Any], tech_stack: Mapping[str, Any]) -> bool:
+    source_text = " ".join(
+        str(request.get(field, ""))
+        for field in ("raw_request", "proposal_hint")
+        if isinstance(request.get(field, ""), str)
+    ).lower()
+    if not source_text.strip():
+        return False
+    for phrase in _stack_name_phrases(tech_stack):
+        if phrase and phrase in source_text:
+            return True
+    return False
+
+
+def _stack_name_phrases(tech_stack: Mapping[str, Any]) -> list[str]:
+    phrases: list[str] = []
+    for field in ("engine", "framework", "language", "platform"):
+        value = str(tech_stack.get(field, "")).strip().lower()
+        if not value:
+            continue
+        phrases.append(value)
+        pieces = [piece for piece in re.split(r"[^a-z0-9+#.]+", value) if len(piece) >= 2]
+        phrases.extend(pieces)
+    aliases = {
+        "unreal engine 5": ["unreal", "ue5"],
+        "unreal engine": ["unreal", "ue"],
+        "react app": ["react"],
+        "react": ["react"],
+        "godot": ["godot"],
+        "unity": ["unity"],
+    }
+    expanded: list[str] = []
+    for phrase in phrases:
+        expanded.append(phrase)
+        expanded.extend(aliases.get(phrase, []))
+    return _dedupe(expanded)
 
 
 def _run_grounding_verifier(

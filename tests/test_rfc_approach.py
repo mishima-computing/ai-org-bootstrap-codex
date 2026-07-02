@@ -231,11 +231,108 @@ def test_unspecified_tech_stack_is_ai_deliberated_after_generated_selection(monk
     result = receive_module.form_technical_approach(rfc, tmp_path, skip_reference_build=True, reference_terms=[])
 
     assert result["ok"] is True
+    decision = result["technical_approach"]["problem"]["question"]["decision"]
+    assert set(decision["stack_axes"]) == set(receive_module.STACK_DECISION_AXIS_FIELDS)
+    for axis in receive_module.STACK_DECISION_AXIS_FIELDS:
+        assert decision["stack_axes"][axis]["evidence"]
+        assert decision["stack_axes"][axis]["judgment"]
     assert rfc["tech_stack"]["build_strategy"] == "framework_based"
     assert rfc["tech_stack"]["framework"] == "Repo Native"
     assert rfc["tech_stack"]["engine"] == ""
     assert rfc["tech_stack"]["provenance"] == "ai_deliberated"
     assert rfc["tech_stack"]["rationale"]
+
+
+def test_extract_constraints_merges_org_builder_profile_as_hard_constraints(monkeypatch, tmp_path):
+    def fake_run_json(repo: Path, **kwargs):
+        prompt = kwargs["prompt"]
+        assert "ORG_BUILDER_PROFILE" in prompt
+        assert "org_builder_profile" in prompt
+        return {"ok": True, "raw": json.dumps(_constraints())}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._extract_constraints(
+        _rfc_view(),
+        tmp_path,
+        {"repo": tmp_path},
+        {"normalized_problem": _normalized_problem()},
+    )
+
+    org_constraints = [
+        item for item in result["hard_constraints"] if item["derivation"]["from"] == "org_builder_profile"
+    ]
+    assert len(org_constraints) == len(receive_module.ORG_BUILDER_PROFILE)
+    assert org_constraints[0]["implication"]["must"]
+    assert org_constraints[0]["implication"]["must_not"]
+
+
+def test_stack_decision_empty_axis_retries(monkeypatch, tmp_path):
+    invalid_axes = _stack_axes()
+    invalid_axes["builder_buildability"] = {"evidence": "", "judgment": ""}
+    attempts = [
+        {**_decision(), "stack_axes": invalid_axes},
+        _decision(),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(attempts.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._select_approach(
+        _candidates(),
+        _evaluations(),
+        _constraints(),
+        {"repo": tmp_path},
+        _accumulated_approach_through_patch_plan(),
+    )
+
+    assert result == _decision()
+    assert len(prompts) == 2
+    assert "stack_axes.builder_buildability.evidence is empty" in prompts[1]
+
+
+def test_requester_specified_stack_skips_alternatives_and_records_org_conflict_risk(monkeypatch, tmp_path):
+    rfc = _rfc_view()
+    rfc["raw_request"] = "Make the battle slice in Unreal Engine 5."
+    rfc["proposal_hint"] = "Use Unreal Engine 5."
+    rfc["tech_stack"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unreal Engine 5",
+        "framework": "",
+        "language": "Blueprint and C++",
+        "platform": "desktop",
+        "rationale": "The requester explicitly specified Unreal Engine 5.",
+        "provenance": "requester_specified",
+    }
+
+    monkeypatch.setattr(receive_module, "_normalize_problem", lambda *args, **kwargs: _normalized_problem())
+    monkeypatch.setattr(receive_module, "_extract_constraints", lambda *args, **kwargs: _constraints())
+    monkeypatch.setattr(receive_module.reference, "build_from_rfc", lambda *args, **kwargs: {"processed_terms": []})
+    monkeypatch.setattr(receive_module, "_build_prior_art_map", lambda *args, **kwargs: _prior_art_map())
+    monkeypatch.setattr(
+        receive_module,
+        "_generate_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("requester stack should skip alternatives")),
+    )
+    monkeypatch.setattr(receive_module, "_implementation_strategy", lambda *args, **kwargs: _implementation())
+    monkeypatch.setattr(receive_module, "_right_size_patch_plan", lambda *args, **kwargs: _patch_plan())
+    monkeypatch.setattr(receive_module, "_surface_risks", lambda *args, **kwargs: {"risks": []})
+
+    result = receive_module.form_technical_approach(rfc, tmp_path)
+
+    assert result["ok"] is True
+    assert "generate_candidates" not in result["steps"]
+    decision = result["technical_approach"]["problem"]["question"]["decision"]
+    assert decision["selected_candidate_id"] == "provided_approach"
+    assert [candidate["id"] for candidate in result["technical_approach"]["problem"]["question"]["candidates"]] == [
+        "provided_approach"
+    ]
+    assert decision["risks"][0]["id"] == "risk:requester_stack_org_profile_conflict"
+    assert "Requester sovereignty makes this non-blocking" in decision["risks"][0]["risk"]
 
 
 def test_form_technical_approach_writes_incremental_progress_snapshots(monkeypatch, tmp_path):
@@ -1031,7 +1128,7 @@ def _rfc_view() -> dict[str, object]:
             "framework": "",
             "language": "",
             "platform": "",
-            "rationale": "No stack was specified; candidate generation should choose a stack.",
+            "rationale": "",
             "provenance": "unspecified",
         },
         "background_facts": "The first playable slice centers on a Slime and Spark spell.",
@@ -1265,7 +1362,33 @@ def _decision() -> dict[str, object]:
             "under_constraints": ["It keeps receive isolated and reuses codex_exec."],
             "accepting_tradeoffs": ["It adds more implementation detail than the minimal patch."],
         },
+        "stack_axes": _stack_axes(),
         "rejected": [{"candidate_id": "minimal", "objection": "Lower problem fit."}],
+    }
+
+
+def _stack_axes() -> dict[str, object]:
+    return {
+        "fidelity_precedent": {
+            "evidence": "The background facts mention turn-based RPG precedent.",
+            "judgment": "Use precedent as evidence but keep the repo-native path feasible.",
+        },
+        "builder_buildability": {
+            "evidence": "Codex can author the repo-native modules as text.",
+            "judgment": "The selected stack is buildable in a worktree.",
+        },
+        "asset_supply": {
+            "evidence": "The first slice uses named 2D content.",
+            "judgment": "The SVG graphicist can supply the needed assets.",
+        },
+        "distribution_reachability": {
+            "evidence": "The selected path runs through the repository test harness.",
+            "judgment": "Users can reach the deliverable without a heavyweight engine install.",
+        },
+        "licensing_cost": {
+            "evidence": "Repo-native code avoids commercial engine terms.",
+            "judgment": "Licensing and CI costs stay within normal repository work.",
+        },
     }
 
 

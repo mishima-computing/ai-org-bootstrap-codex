@@ -216,7 +216,7 @@ def _child(
         "framework": "",
         "language": "",
         "platform": "",
-        "rationale": "Inherit the parent stack unless this child overrides it.",
+        "rationale": "",
         "provenance": "unspecified",
     }
     data.update(

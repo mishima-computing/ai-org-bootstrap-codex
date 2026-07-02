@@ -94,6 +94,7 @@ def test_validate_tech_stack_unspecified_requires_empty_choice_fields():
     assert receive_module.validate_tech_stack(unspecified)
     assert not receive_module.validate_tech_stack({**unspecified, "build_strategy": "framework_based"})
     assert not receive_module.validate_tech_stack({**unspecified, "engine": "Unity"})
+    assert not receive_module.validate_tech_stack({**unspecified, "rationale": "Grounding chose nothing."})
 
 
 def test_receive_preserves_extra_keys():
@@ -174,6 +175,34 @@ def test_produce_rfc_forms_approach_and_writes_sibling_artifact(tmp_path, monkey
     assert "custom_priority" not in produced
     assert json.loads(_git(repo, "show", "ai-org/rfc/manual-intake:technical-approach.json")) == approach_tree
     assert calls == ["build_from_rfc", "start_background_build", "form_technical_approach"]
+
+
+def test_produce_rfc_forwards_progress_path(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive({"raw_request": "Manual Intake: commit with progress snapshots."})
+    grounded = _rfc_view("Manual Intake", raw_request=request["raw_request"])
+    progress_path = tmp_path / "progress" / "technical-approach.json"
+
+    monkeypatch.setattr(receive_module, "_ground_with_contract", lambda repo, rfc: GroundingResult(grounded, "identity"))
+    monkeypatch.setattr(
+        receive_module.reference,
+        "build_from_rfc",
+        lambda *args, **kwargs: {"terms": {}, "processed_terms": ["battle loop"], "expanded": [], "hits": [], "failed": {}},
+    )
+    monkeypatch.setattr(receive_module.reference, "start_background_build", lambda *args, **kwargs: object())
+
+    def fake_form_technical_approach(rfc_view, repo_path, **kwargs):
+        assert kwargs["progress_path"] == progress_path
+        Path(kwargs["progress_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(kwargs["progress_path"]).write_text(json.dumps({"current_step": None}), encoding="utf-8")
+        return {"ok": True, "technical_approach": _approach_tree()}
+
+    monkeypatch.setattr(receive_module, "form_technical_approach", fake_form_technical_approach)
+
+    result = produce_rfc(request, repo, progress_path=progress_path)
+
+    assert result["status"] == "promoted"
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {"current_step": None}
 
 
 def test_intake_grounding_confident_writes_grounded_branch(tmp_path, monkeypatch):
@@ -488,6 +517,137 @@ def test_grounding_contract_violations_reground_then_fail_closed(tmp_path, monke
     assert "branch" not in result
 
 
+def test_grounding_ai_deliberated_provenance_regrounds_and_fails_closed(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive({"raw_request": "Make Dragon Quest."})
+    bad_grounding = _rfc_view(
+        "Dragon Quest",
+        raw_request=request["raw_request"],
+        background_facts="Modern mainline Dragon Quest uses Unreal Engine as domain evidence.",
+    )
+    bad_grounding["tech_stack"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unreal Engine 5",
+        "framework": "",
+        "language": "C++",
+        "platform": "desktop",
+        "rationale": "Modern Dragon Quest uses Unreal Engine.",
+        "provenance": "ai_deliberated",
+    }
+    grounding_prompts = []
+
+    def handler(cmd):
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+        grounding_prompts.append(cmd[-1])
+        return {
+            "confident": True,
+            "proposed_rfc": bad_grounding,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounding incorrectly deliberated Unreal from franchise precedent.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = intake(request, repo)
+
+    assert result["ok"] is False
+    assert result["failed_step"] == "grounding"
+    assert any("grounding may not set provenance=ai_deliberated" in item for item in result["violations"])
+    assert len(grounding_prompts) == 3
+    assert "Your previous grounding violated" in grounding_prompts[1]
+
+
+def test_grounding_requester_specified_requires_original_stack_name(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive({"raw_request": "Make Dragon Quest."})
+    forged_grounding = _rfc_view("Dragon Quest", raw_request=request["raw_request"])
+    forged_grounding["tech_stack"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unreal Engine 5",
+        "framework": "",
+        "language": "C++",
+        "platform": "desktop",
+        "rationale": "Grounding forged requester stack provenance.",
+        "provenance": "requester_specified",
+    }
+
+    def handler(cmd):
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+        return {
+            "confident": True,
+            "proposed_rfc": forged_grounding,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounding claimed the requester specified Unreal.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = intake(request, repo)
+
+    assert result["ok"] is False
+    assert any("did not name that stack" in item for item in result["violations"])
+
+
+def test_grounding_accepts_requester_named_stack(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    request = receive({"raw_request": "Make Dragon Quest in Unreal Engine 5."})
+    grounded = _rfc_view("Dragon Quest", raw_request=request["raw_request"])
+    grounded["tech_stack"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unreal Engine 5",
+        "framework": "",
+        "language": "C++",
+        "platform": "desktop",
+        "rationale": "The requester explicitly named Unreal Engine 5.",
+        "provenance": "requester_specified",
+    }
+
+    def handler(cmd):
+        kind = _schema_kind(cmd[cmd.index("--output-schema") + 1])
+        if kind == "verifier":
+            return {
+                "faithful_specific": True,
+                "full_scope": True,
+                "non_legal": True,
+                "latest_default": True,
+                "reasons": [],
+            }
+        return {
+            "confident": True,
+            "proposed_rfc": grounded,
+            "assumptions": [],
+            "questions": [],
+            "grounding_notes": "Grounding preserved the requester-specified Unreal stack.",
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+    _install_successful_approach_pipeline(monkeypatch)
+
+    result = intake(request, repo)
+
+    assert result["status"] == "promoted"
+    produced = json.loads(_git(repo, "show", "ai-org/rfc/dragon-quest:rfc.json"))
+    assert produced["tech_stack"]["provenance"] == "requester_specified"
+
+
 def test_grounding_empty_working_title_gets_deterministic_fallback_before_promotion(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     request = receive(
@@ -646,13 +806,13 @@ def _rfc_view(
         "desired_outcomes_success": desired_outcomes_success,
         "affected_area_platform": affected_area_platform,
         "tech_stack": {
-            "build_strategy": "framework_based",
+            "build_strategy": "",
             "engine": "",
-            "framework": "repo-native Python modules",
-            "language": "Python",
-            "platform": "CLI",
-            "rationale": "Use the repository's existing Python modules.",
-            "provenance": "requester_specified",
+            "framework": "",
+            "language": "",
+            "platform": "",
+            "rationale": "",
+            "provenance": "unspecified",
         },
         "background_facts": background_facts,
         "constraints_assumptions": [],
