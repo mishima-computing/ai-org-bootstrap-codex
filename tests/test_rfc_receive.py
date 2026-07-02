@@ -98,6 +98,38 @@ def test_validate_tech_stack_unspecified_requires_empty_choice_fields():
     assert not receive_module.validate_tech_stack({**unspecified, "rationale": "Grounding chose nothing."})
 
 
+def test_ai_deliberated_tech_stack_platform_is_user_facing():
+    tech_stack = {
+        "build_strategy": "framework_based",
+        "engine": "",
+        "framework": "Phaser",
+        "language": "TypeScript",
+        "platform": "browser",
+        "rationale": "Approach deliberation selected Phaser for a text-authored browser runtime.",
+        "provenance": "ai_deliberated",
+    }
+
+    assert receive_module.validate_tech_stack(tech_stack)
+    assert not receive_module.validate_tech_stack(
+        {**tech_stack, "platform": "headless functional_check target"}
+    )
+
+
+def test_engine_based_tech_stack_requires_real_engine_product_name():
+    engine_based = {
+        "build_strategy": "engine_based",
+        "engine": "Godot",
+        "framework": "",
+        "language": "GDScript",
+        "platform": "browser",
+        "rationale": "Approach deliberation selected Godot after comparing engine options.",
+        "provenance": "ai_deliberated",
+    }
+
+    assert receive_module.validate_tech_stack(engine_based)
+    assert not receive_module.validate_tech_stack({**engine_based, "engine": "browser standards"})
+
+
 def test_receive_preserves_extra_keys():
     assert receive(
         {

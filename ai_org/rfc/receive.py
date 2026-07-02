@@ -151,6 +151,7 @@ from ai_org.rfc.field_registry import (
     RFC_VIEW_FIELDS,
     STRING_ARRAY_FIELDS,
     STRING_FIELDS,
+    TECH_STACK_CONCRETE_BUILD_STRATEGIES,
     TECH_STACK_FIELDS,
     entrance_defaults,
     rfc_view_schema,
@@ -459,10 +460,22 @@ CANDIDATE_APPROACH_FIELDS = (
     "name",
     "kind",
     "summary",
+    "stack_requirement",
     "first_playable_moment",
     "core_systems",
     "draws_on",
 )
+CANDIDATE_STACK_REQUIREMENT_FIELDS = (
+    "build_strategy",
+    "engine",
+    "framework",
+    "language",
+    "platform",
+    "authoring_model",
+    "verification_model",
+)
+CANDIDATE_AUTHORING_MODELS = ("text_first", "gui_editor", "binary_assets")
+CANDIDATE_VERIFICATION_MODELS = ("headless_ci", "gui_required")
 CANDIDATE_FIRST_PLAYABLE_FIELDS = (
     "player_actions",
     "named_content",
@@ -483,6 +496,42 @@ CANDIDATE_APPROACH_SCHEMA: dict[str, Any] = {
         "name": {"type": "string"},
         "kind": {"type": "string", "enum": list(CANDIDATE_APPROACH_KINDS)},
         "summary": {"type": "string"},
+        "stack_requirement": {
+            "type": "object",
+            "description": "Structured stack this candidate actually requires. Prose comparisons are not requirements.",
+            "additionalProperties": False,
+            "required": list(CANDIDATE_STACK_REQUIREMENT_FIELDS),
+            "properties": {
+                "build_strategy": {
+                    "type": "string",
+                    "enum": list(TECH_STACK_CONCRETE_BUILD_STRATEGIES),
+                    "description": "engine_based, framework_based, or from_scratch for this candidate.",
+                },
+                "engine": {
+                    "type": "string",
+                    "description": "Required existing engine product, empty unless build_strategy is engine_based.",
+                },
+                "framework": {
+                    "type": "string",
+                    "description": "Required existing framework product, empty unless build_strategy is framework_based.",
+                },
+                "language": {"type": "string", "description": "Primary authoring language."},
+                "platform": {
+                    "type": "string",
+                    "description": "User-facing runtime target, such as browser or lightweight desktop.",
+                },
+                "authoring_model": {
+                    "type": "string",
+                    "enum": list(CANDIDATE_AUTHORING_MODELS),
+                    "description": "text_first when Codex can author source text; gui_editor or binary_assets when required.",
+                },
+                "verification_model": {
+                    "type": "string",
+                    "enum": list(CANDIDATE_VERIFICATION_MODELS),
+                    "description": "headless_ci when the first verification path is command-driven; gui_required otherwise.",
+                },
+            },
+        },
         "first_playable_moment": {
             "type": "object",
             "additionalProperties": False,
@@ -1413,7 +1462,8 @@ def _generate_candidate_node(
             pruned_candidates.append({"candidate_id": parsed["id"], "objection": conflict_objection})
             return {"ok": True}
 
-        lint_errors = _lint_empty_slots(parsed)
+        lint_errors = _candidate_empty_slot_lints(parsed)
+        lint_errors.extend(_lint_candidate_stack_requirement(parsed))
         if parsed["id"] in seen_ids or _candidate_id_was_pruned(parsed["id"], pruned_candidates):
             lint_errors.append(f"id duplicates an earlier candidate: {parsed['id']}")
         if parsed["kind"] in seen_kinds:
@@ -2360,6 +2410,13 @@ def _generate_candidate_prompt(
         "- name: concise approach name.\n"
         "- kind: exactly one of minimal_local, repo_native, general_architectural, do_nothing_defer.\n"
         "- summary: what this approach would do and why it is materially different.\n"
+        "- stack_requirement: the stack this candidate actually requires, not rivals it only mentions. "
+        "Set build_strategy to engine_based only for an existing engine/framework product named in engine; "
+        "use framework_based only for an existing framework product named in framework; if the runtime is "
+        "hand-rolled on browser standards with no existing engine/framework, use from_scratch. Platform is "
+        "the user-facing runtime target such as browser or lightweight desktop; keep org verification "
+        "mechanisms in constraints, not platform. Use authoring_model=text_first and "
+        "verification_model=headless_ci only when Codex can author source text and verify by command.\n"
         "- first_playable_moment: name the player actions, locations, enemies, items or spells, and the "
         "win or progress condition that would make the first slice playable or inspectable.\n"
         "- core_systems: concrete gameplay, workflow, repository, or runtime systems this candidate would change.\n"
@@ -2473,8 +2530,10 @@ def _select_approach_prompt(
         "installs; licensing_cost is license, commercial tooling, and CI cost exposure. Each axis must include "
         "evidence and judgment. Fidelity precedent is evidence only and must not override hard builder "
         "constraints. If no stack was specified by the requester, this is where the deliberation records why "
-        "the selected feasible stack wins. If from_scratch is selected, explicitly justify it against available "
-        "engine and framework options.\n"
+        "the selected feasible stack wins. The selected candidate's tech_stack.platform names the user-facing "
+        "runtime target; org verification constraints belong in the constraints tree, not in the deliverable "
+        "platform. If from_scratch is selected, explicitly justify it against available engine and framework "
+        "options.\n"
         "- rejected: one item for each non-chosen candidate with candidate_id and objection.\n\n"
         f"Candidate approaches:\n{candidates_text}\n"
         f"\nEvaluation matrix:\n{evaluations_text}\n"
@@ -3341,7 +3400,51 @@ def _lint_constraints(parsed: Mapping[str, Any], approach: Mapping[str, Any]) ->
     return _lint_empty_slots(parsed)
 
 
-ORG_BUILDER_DISALLOWED_STACK_MARKERS = (
+def _lint_candidate_against_org_builder(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> list[str]:
+    objection = _org_builder_candidate_objection(candidate, constraints)
+    if not objection:
+        return []
+    return [objection]
+
+
+def _org_builder_candidate_objection(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> str:
+    if not _has_org_builder_constraints(constraints):
+        return ""
+    requirement = candidate.get("stack_requirement")
+    if not isinstance(requirement, Mapping):
+        return ""
+    conflicts: list[str] = []
+    authoring_model = requirement.get("authoring_model")
+    verification_model = requirement.get("verification_model")
+    if authoring_model in {"gui_editor", "binary_assets"}:
+        conflicts.append(f"authoring_model={authoring_model}")
+    if verification_model == "gui_required":
+        conflicts.append("verification_model=gui_required")
+    if not conflicts:
+        return ""
+    return (
+        "org-profile conflict: stack_requirement requires "
+        + ", ".join(conflicts)
+        + "; ORG_BUILDER_PROFILE requires Codex text-first worktree authoring and headless "
+        "functional_check verification, so GUI-editor, binary-asset authoring, heavyweight native build, "
+        "or non-headless verification paths must be pruned."
+    )
+
+
+ORG_INTERNAL_PLATFORM_TOKENS = ("functional_check", "worktree", "codex")
+BROWSER_STANDARDS_STACK_NAMES = (
+    "browser",
+    "browser standards",
+    "web platform",
+    "web standards",
+    "html css javascript",
+    "html/css/javascript",
+    "html/css/js",
+    "vanilla web",
+    "vanilla browser",
+)
+
+REQUESTER_STACK_ORG_PROFILE_RISK_MARKERS = (
     "unreal",
     "unity",
     "maya",
@@ -3356,27 +3459,65 @@ ORG_BUILDER_DISALLOWED_STACK_MARKERS = (
 )
 
 
-def _lint_candidate_against_org_builder(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> list[str]:
-    objection = _org_builder_candidate_objection(candidate, constraints)
-    if not objection:
-        return []
-    return [objection]
+def _lint_candidate_stack_requirement(candidate: Mapping[str, Any]) -> list[str]:
+    requirement = candidate.get("stack_requirement")
+    if not isinstance(requirement, Mapping):
+        return ["stack_requirement is missing"]
+    return _lint_stack_requirement_consistency(requirement, prefix="candidate stack_requirement")
 
 
-def _org_builder_candidate_objection(candidate: Mapping[str, Any], constraints: Mapping[str, Any]) -> str:
-    if not _has_org_builder_constraints(constraints):
-        return ""
-    text = json.dumps(candidate, sort_keys=True, ensure_ascii=True).lower()
-    hits = [marker for marker in ORG_BUILDER_DISALLOWED_STACK_MARKERS if marker in text]
-    if not hits:
-        return ""
-    return (
-        "org-profile conflict: candidate mentions "
-        + ", ".join(hits)
-        + "; ORG_BUILDER_PROFILE requires Codex text-first worktree authoring and headless "
-        "functional_check verification, so GUI-editor, binary-asset authoring, heavyweight native build, "
-        "or non-headless verification paths must be pruned."
-    )
+def _candidate_empty_slot_lints(candidate: Mapping[str, Any]) -> list[str]:
+    return [
+        error
+        for error in _lint_empty_slots(candidate)
+        if not _candidate_allows_empty_slot(candidate, error)
+    ]
+
+
+def _candidate_allows_empty_slot(candidate: Mapping[str, Any], error: str) -> bool:
+    requirement = candidate.get("stack_requirement")
+    if not isinstance(requirement, Mapping):
+        return False
+    build_strategy = requirement.get("build_strategy")
+    allowed_empty = {
+        "engine_based": {"stack_requirement.framework is empty"},
+        "framework_based": {"stack_requirement.engine is empty"},
+        "from_scratch": {"stack_requirement.engine is empty", "stack_requirement.framework is empty"},
+    }
+    return error in allowed_empty.get(build_strategy, set())
+
+
+def _lint_stack_requirement_consistency(requirement: Mapping[str, Any], *, prefix: str) -> list[str]:
+    errors: list[str] = []
+    build_strategy = str(requirement.get("build_strategy", ""))
+    engine = str(requirement.get("engine", "")).strip()
+    framework = str(requirement.get("framework", "")).strip()
+    platform = str(requirement.get("platform", "")).strip()
+    if _platform_contains_org_internal_token(platform):
+        errors.append(
+            f"{prefix}.platform must name the user-facing runtime target, not org verifier vocabulary"
+        )
+    if build_strategy == "engine_based" and (not engine or _names_browser_standards(engine)):
+        errors.append(
+            f"{prefix}.build_strategy engine_based requires a real engine/framework product in engine; "
+            "hand-rolled browser standards must use from_scratch"
+        )
+    if build_strategy == "framework_based" and not framework:
+        errors.append(f"{prefix}.build_strategy framework_based requires a framework product in framework")
+    return errors
+
+
+def _platform_contains_org_internal_token(platform: str) -> bool:
+    # This is a role-scoped lint on one deliverable field. These tokens are AI Org
+    # mechanism names, so their presence in platform indicates verifier leakage.
+    canonical = platform.lower()
+    return any(token in canonical for token in ORG_INTERNAL_PLATFORM_TOKENS)
+
+
+def _names_browser_standards(value: str) -> bool:
+    canonical = " ".join(value.lower().replace("/", " ").replace("-", " ").split())
+    compact = value.strip().lower()
+    return canonical in BROWSER_STANDARDS_STACK_NAMES or compact in BROWSER_STANDARDS_STACK_NAMES
 
 
 def _candidate_prune_feedback(pruned_candidates: list[dict[str, str]]) -> list[str]:
@@ -3647,6 +3788,9 @@ def _parse_candidate_approach(raw: str, expected_kind: str | None = None) -> dic
         return _candidate_generation_error("Codex candidate generation returned invalid candidate kind")
     if expected_kind is not None and parsed["kind"] != expected_kind:
         return _candidate_generation_error("Codex candidate generation returned unexpected candidate kind")
+    stack_requirement = _parse_candidate_stack_requirement(parsed.get("stack_requirement"))
+    if stack_requirement is None:
+        return _candidate_generation_error("Codex candidate generation returned invalid stack_requirement")
     first_playable = _parse_candidate_first_playable(parsed.get("first_playable_moment"))
     if first_playable is None:
         return _candidate_generation_error("Codex candidate generation returned invalid first_playable_moment")
@@ -3659,10 +3803,25 @@ def _parse_candidate_approach(raw: str, expected_kind: str | None = None) -> dic
         "name": parsed["name"],
         "kind": parsed["kind"],
         "summary": parsed["summary"],
+        "stack_requirement": stack_requirement,
         "first_playable_moment": first_playable,
         "core_systems": list(parsed["core_systems"]),
         "draws_on": list(parsed["draws_on"]),
     }
+
+
+def _parse_candidate_stack_requirement(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(CANDIDATE_STACK_REQUIREMENT_FIELDS):
+        return None
+    if not all(isinstance(value[field], str) for field in CANDIDATE_STACK_REQUIREMENT_FIELDS):
+        return None
+    if value["build_strategy"] not in TECH_STACK_CONCRETE_BUILD_STRATEGIES:
+        return None
+    if value["authoring_model"] not in CANDIDATE_AUTHORING_MODELS:
+        return None
+    if value["verification_model"] not in CANDIDATE_VERIFICATION_MODELS:
+        return None
+    return {field: value[field] for field in CANDIDATE_STACK_REQUIREMENT_FIELDS}
 
 
 def _parse_candidate_first_playable(value: Any) -> dict[str, Any] | None:
@@ -4063,7 +4222,7 @@ def _requester_stack_org_profile_conflict(rfc_view: Mapping[str, Any]) -> str:
     if not isinstance(tech_stack, Mapping) or tech_stack.get("provenance") != "requester_specified":
         return ""
     stack_text = _tech_stack_text(tech_stack)
-    hits = [marker for marker in ORG_BUILDER_DISALLOWED_STACK_MARKERS if marker in stack_text]
+    hits = [marker for marker in REQUESTER_STACK_ORG_PROFILE_RISK_MARKERS if marker in stack_text]
     if not hits:
         return ""
     stack_name = _stack_display_name(tech_stack) or "The requester-specified stack"
@@ -4158,19 +4317,29 @@ def _selected_candidate(selected: Mapping[str, Any], candidates: Mapping[str, An
 
 
 def _tech_stack_choice_from_candidate(candidate: Mapping[str, Any] | None) -> tuple[str, str, str, str, str]:
+    default_platform = "browser"
     if not isinstance(candidate, Mapping):
-        return ("framework_based", "", "Selected Technical Approach", "text-authored repository code", "headless functional_check target")
+        return ("framework_based", "", "Selected Technical Approach", "text-authored repository code", default_platform)
+    requirement = candidate.get("stack_requirement")
+    if isinstance(requirement, Mapping):
+        return (
+            str(requirement.get("build_strategy", "framework_based")),
+            str(requirement.get("engine", "")),
+            str(requirement.get("framework", "")),
+            str(requirement.get("language", "")),
+            str(requirement.get("platform", default_platform)),
+        )
     text = " ".join(
         str(candidate.get(field, ""))
         for field in ("id", "name", "kind", "summary")
         if isinstance(candidate.get(field, ""), str)
     ).lower()
     if "from scratch" in text or "from_scratch" in text:
-        return ("from_scratch", "", "", "text-authored repository code", "headless functional_check target")
+        return ("from_scratch", "", "", "text-authored repository code", default_platform)
     name = str(candidate.get("name") or candidate.get("id") or "Selected Technical Approach").strip()
     if "engine" in text or str(candidate.get("kind", "")) == "general_architectural":
-        return ("engine_based", name, "", "text-authored repository code", "headless functional_check target")
-    return ("framework_based", "", name, "text-authored repository code", "headless functional_check target")
+        return ("engine_based", name, "", "text-authored repository code", default_platform)
+    return ("framework_based", "", name, "text-authored repository code", default_platform)
 
 
 def _selected_approach_rationale(selected: Mapping[str, Any]) -> str:

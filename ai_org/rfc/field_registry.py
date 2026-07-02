@@ -124,8 +124,8 @@ FIELD_REGISTRY: tuple[FieldRegistryEntry, ...] = (
     FieldRegistryEntry(
         "tech_stack",
         "what the deliverable is built ON",
-        "structured sub-tags {build_strategy, engine, framework, language, platform, rationale, provenance}",
-        "from_scratch as a silent default; scope/routing; domain facts",
+        "structured sub-tags {build_strategy, engine, framework, language, platform, rationale, provenance}; platform is the user-facing runtime target such as browser or lightweight desktop",
+        "from_scratch as a silent default; scope/routing; domain facts; org verifier mechanisms such as functional_check, worktree, or codex in platform",
         "either",
         "rfc_handoff",
         "target",
@@ -235,7 +235,10 @@ def field_schema(entry: FieldRegistryEntry) -> dict[str, Any]:
                 "engine": {"type": "string"},
                 "framework": {"type": "string"},
                 "language": {"type": "string"},
-                "platform": {"type": "string"},
+                "platform": {
+                    "type": "string",
+                    "description": "User-facing runtime target, for example browser or lightweight desktop. Org verification constraints belong in constraints, not here.",
+                },
                 "rationale": {"type": "string"},
                 "provenance": {"type": "string", "enum": list(TECH_STACK_PROVENANCE)},
             },
@@ -308,4 +311,37 @@ def validate_tech_stack(value: object, *, require_choice: bool = True) -> bool:
         return False
     if value["build_strategy"] == "from_scratch" and not value["rationale"].strip():
         return False
+    if value["provenance"] == "ai_deliberated" and _platform_contains_org_verifier_vocabulary(value["platform"]):
+        return False
+    if value["build_strategy"] == "engine_based":
+        engine = value["engine"].strip()
+        if not engine or _names_browser_standards(engine):
+            return False
     return True
+
+
+ORG_INTERNAL_PLATFORM_TOKENS = ("functional_check", "worktree", "codex")
+BROWSER_STANDARDS_NAMES = (
+    "browser",
+    "browser standards",
+    "web platform",
+    "web standards",
+    "html css javascript",
+    "html/css/javascript",
+    "html/css/js",
+    "vanilla web",
+    "vanilla browser",
+)
+
+
+def _platform_contains_org_verifier_vocabulary(platform: str) -> bool:
+    # This lint is intentionally role-scoped to tech_stack.platform. These tokens
+    # are AI Org mechanism names, not user-facing runtime targets.
+    canonical = platform.lower()
+    return any(token in canonical for token in ORG_INTERNAL_PLATFORM_TOKENS)
+
+
+def _names_browser_standards(value: str) -> bool:
+    canonical = " ".join(value.lower().replace("/", " ").replace("-", " ").split())
+    compact = value.strip().lower()
+    return canonical in BROWSER_STANDARDS_NAMES or compact in BROWSER_STANDARDS_NAMES

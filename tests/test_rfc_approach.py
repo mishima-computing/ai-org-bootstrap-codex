@@ -239,6 +239,7 @@ def test_unspecified_tech_stack_is_ai_deliberated_after_generated_selection(monk
     assert rfc["tech_stack"]["build_strategy"] == "framework_based"
     assert rfc["tech_stack"]["framework"] == "Repo Native"
     assert rfc["tech_stack"]["engine"] == ""
+    assert rfc["tech_stack"]["platform"] == "browser"
     assert rfc["tech_stack"]["provenance"] == "ai_deliberated"
     assert rfc["tech_stack"]["rationale"]
 
@@ -360,7 +361,129 @@ def test_org_profile_conflicting_candidate_is_pruned_without_retry(monkeypatch, 
     assert len(prompts) == 3
     assert result["pruned_candidates"][0]["candidate_id"] == "unity"
     assert "org-profile conflict" in result["pruned_candidates"][0]["objection"]
+    assert "authoring_model=gui_editor" in result["pruned_candidates"][0]["objection"]
+    assert "verification_model=gui_required" in result["pruned_candidates"][0]["objection"]
     assert "headless functional_check verification" in result["pruned_candidates"][0]["objection"]
+
+
+def test_org_profile_allows_text_first_candidate_that_mentions_rival_engines(monkeypatch, tmp_path):
+    phaser = _candidate("browser_phaser_campaign", "minimal_local", "Phaser Campaign")
+    phaser["summary"] = (
+        "Phaser builds a browser campaign unlike Unity or Unreal while keeping all scenes text-authored."
+    )
+    phaser["core_systems"] = ["Phaser scene modules", "browser campaign runtime"]
+    phaser["stack_requirement"] = {
+        "build_strategy": "framework_based",
+        "engine": "",
+        "framework": "Phaser",
+        "language": "TypeScript",
+        "platform": "browser",
+        "authoring_model": "text_first",
+        "verification_model": "headless_ci",
+    }
+    outputs = [
+        phaser,
+        _candidate("feasible_b", "repo_native", "Feasible B"),
+        _candidate("feasible_c", "general_architectural", "Feasible C"),
+    ]
+
+    def fake_run_json(repo: Path, **kwargs):
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert [candidate["id"] for candidate in result["candidates"]] == [
+        "browser_phaser_campaign",
+        "feasible_b",
+        "feasible_c",
+    ]
+    assert "pruned_candidates" not in result
+
+
+def test_candidate_platform_rejects_org_internal_verifier_vocabulary(monkeypatch, tmp_path):
+    invalid = _candidate("bad_platform", "minimal_local", "Bad Platform")
+    invalid["stack_requirement"] = {
+        **invalid["stack_requirement"],
+        "platform": "headless functional_check target",
+    }
+    fixed = _candidate("browser_platform", "minimal_local", "Browser Platform")
+    outputs = [
+        invalid,
+        fixed,
+        _candidate("feasible_b", "repo_native", "Feasible B"),
+        _candidate("feasible_c", "general_architectural", "Feasible C"),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert [candidate["id"] for candidate in result["candidates"]] == [
+        "browser_platform",
+        "feasible_b",
+        "feasible_c",
+    ]
+    assert result["candidates"][0]["stack_requirement"]["platform"] == "browser"
+    assert len(prompts) == 4
+    assert "platform must name the user-facing runtime target" in prompts[1]
+
+
+def test_candidate_engine_based_rejects_browser_standards_as_engine(monkeypatch, tmp_path):
+    invalid = _candidate("browser_standards_engine", "minimal_local", "Browser Standards")
+    invalid["stack_requirement"] = {
+        **invalid["stack_requirement"],
+        "build_strategy": "engine_based",
+        "engine": "browser standards",
+        "framework": "",
+    }
+    fixed = _candidate("browser_standards_from_scratch", "minimal_local", "Browser Standards")
+    fixed["stack_requirement"] = {
+        **fixed["stack_requirement"],
+        "build_strategy": "from_scratch",
+        "engine": "",
+        "framework": "",
+    }
+    outputs = [
+        invalid,
+        fixed,
+        _candidate("feasible_b", "repo_native", "Feasible B"),
+        _candidate("feasible_c", "general_architectural", "Feasible C"),
+    ]
+    prompts = []
+
+    def fake_run_json(repo: Path, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"ok": True, "raw": json.dumps(outputs.pop(0))}
+
+    monkeypatch.setattr(receive_module.codex_exec, "run_json", fake_run_json)
+
+    result = receive_module._generate_candidates(
+        _normalized_problem(),
+        _constraints_with_org_builder_profile(),
+        _prior_art_map(),
+        {"repo": tmp_path},
+    )
+
+    assert result["candidates"][0]["stack_requirement"]["build_strategy"] == "from_scratch"
+    assert result["candidates"][0]["stack_requirement"]["engine"] == ""
+    assert "hand-rolled browser standards must use from_scratch" in prompts[1]
 
 
 def test_org_profile_pruning_retries_only_when_feasible_set_too_small(monkeypatch, tmp_path):
@@ -387,6 +510,7 @@ def test_org_profile_pruning_retries_only_when_feasible_set_too_small(monkeypatc
 
     assert [candidate["id"] for candidate in result["candidates"]] == ["feasible_a", "feasible_b"]
     assert [item["candidate_id"] for item in result["pruned_candidates"]] == ["unity", "unreal"]
+    assert "authoring_model=binary_assets" in result["pruned_candidates"][1]["objection"]
     assert len(prompts) == 4
     assert "Fewer than two feasible candidates remain after deterministic pruning" in prompts[3]
     assert "Pruned unity: org-profile conflict" in prompts[3]
@@ -460,7 +584,7 @@ def test_pruned_candidates_land_in_final_decision_rejected_list(monkeypatch, tmp
             {
                 "candidate_id": "unity",
                 "objection": (
-                    "org-profile conflict: candidate mentions unity; ORG_BUILDER_PROFILE requires Codex "
+                    "org-profile conflict: stack_requirement requires authoring_model=gui_editor; ORG_BUILDER_PROFILE requires Codex "
                     "text-first worktree authoring and headless functional_check verification."
                 ),
             }
@@ -1476,6 +1600,15 @@ def _candidate(candidate_id: str, kind: str, name: str) -> dict[str, object]:
         "name": name,
         "kind": kind,
         "summary": f"{name} builds the battle slice.",
+        "stack_requirement": {
+            "build_strategy": "framework_based",
+            "engine": "",
+            "framework": name,
+            "language": "JavaScript",
+            "platform": "browser",
+            "authoring_model": "text_first",
+            "verification_model": "headless_ci",
+        },
         "first_playable_moment": {
             "player_actions": ["Cast Spark at Slime."],
             "named_content": {
@@ -1494,6 +1627,15 @@ def _unity_candidate(kind: str, candidate_id: str = "unity") -> dict[str, object
     candidate = _candidate(candidate_id, kind, "Unity Engine")
     candidate["summary"] = "Unity builds the battle slice with editor-authored scenes and imported assets."
     candidate["core_systems"] = ["Unity scene workflow", "binary asset import"]
+    candidate["stack_requirement"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unity",
+        "framework": "",
+        "language": "C#",
+        "platform": "desktop",
+        "authoring_model": "gui_editor",
+        "verification_model": "gui_required",
+    }
     return candidate
 
 
@@ -1501,6 +1643,15 @@ def _unreal_candidate(kind: str, candidate_id: str = "unreal") -> dict[str, obje
     candidate = _candidate(candidate_id, kind, "Unreal Engine")
     candidate["summary"] = "Unreal builds the battle slice with editor-authored maps and native packaging."
     candidate["core_systems"] = ["Unreal editor workflow", "heavyweight native build"]
+    candidate["stack_requirement"] = {
+        "build_strategy": "engine_based",
+        "engine": "Unreal Engine",
+        "framework": "",
+        "language": "C++",
+        "platform": "desktop",
+        "authoring_model": "binary_assets",
+        "verification_model": "gui_required",
+    }
     return candidate
 
 
