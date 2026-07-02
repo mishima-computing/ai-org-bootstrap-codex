@@ -127,10 +127,13 @@ def test_refine_accepts_right_sized_codex_answer_with_surplus_children(tmp_path,
     repo = _init_repo(tmp_path)
     _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
     git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+    calls = 0
 
     def handler(_prompt: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
         return {
-            "right_sized": True,
+            "verdict": "already_right_sized",
             "summary_sentence": "The approved plan is one reviewable contribution.",
             "sizing_reason": "The implementation can be reviewed as a single bounded change.",
             "children": [
@@ -156,9 +159,100 @@ def test_refine_accepts_right_sized_codex_answer_with_surplus_children(tmp_path,
 
     assert result["ok"] is True
     assert result["status"] == "right-sized"
+    assert calls == 2
     assert result["surplus_children_ignored"] == 1
     assert git_wrapper.file_exists(repo, "ai-org/rfc/feature", "lineage-ledger.json") is False
     assert git_wrapper.branch_exists(repo, "ai-org/rfc/0001-1") is False
+
+
+def test_refine_accepts_already_right_sized_verdict_without_children(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
+    git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+    calls = 0
+
+    def handler(_prompt: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "verdict": "already_right_sized",
+            "summary_sentence": "The approved plan is one reviewable contribution.",
+            "sizing_reason": "The implementation can be reviewed as a single bounded change.",
+            "children": [],
+            "parent_gate_scope_item_ids": [],
+            "depends_on": [],
+            "elaboration_notes": [],
+        }
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = lineage.refine(repo, "feature")
+
+    assert result["ok"] is True
+    assert result["status"] == "right-sized"
+    assert calls == 1
+    assert result["surplus_children_ignored"] == 0
+    assert git_wrapper.file_exists(repo, "ai-org/rfc/feature", "lineage-ledger.json") is False
+
+
+def test_already_right_sized_with_children_retries_and_accepts_split(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _write_direction_ok_rfc(repo, "feature", _rfc(), _approach())
+    git_wrapper.ensure_serial(repo, "ai-org/rfc/feature")
+    prompts: list[str] = []
+
+    children = [
+        _child(
+            "prep",
+            "Prep battle state",
+            "leafed",
+            [
+                "success_criteria:0",
+                "patch_plan:first_playable",
+                "acceptance_tests:screenshot_checks:0",
+            ],
+            ["Battle state is testable."],
+            ["Battle state"],
+        ),
+        _child(
+            "behavior",
+            "Add visible battle behavior",
+            "leafed",
+            [
+                "patch_plan:follow_ups:0",
+                "acceptance_tests:interaction_checks:0",
+                "acceptance_tests:playtest_checks:0",
+                "must_address_risks:risk-ui",
+            ],
+            ["Spark interaction is visible."],
+            ["Battle UI"],
+        ),
+    ]
+
+    def handler(prompt: str) -> dict[str, Any]:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {
+                "verdict": "already_right_sized",
+                "summary_sentence": "Split into near-horizon and follow-up RFCs.",
+                "sizing_reason": "The children contain the decomposition.",
+                "children": children,
+                "parent_gate_scope_item_ids": [],
+                "depends_on": [],
+                "elaboration_notes": [],
+            }
+        return _split(children)
+
+    _install_codex_fake(monkeypatch, handler)
+
+    result = lineage.refine(repo, "feature")
+
+    assert result["ok"] is True
+    assert result["status"] == "split"
+    assert len(prompts) == 2
+    assert "deterministic pre-check says the parent is not already one right-sized leaf" in prompts[1]
+    assert {child["id"] for child in result["children"]} == {"0001-1", "0001-2"}
+    assert git_wrapper.file_exists(repo, "ai-org/rfc/feature", "lineage-ledger.json") is True
 
 
 def test_double_mapped_scope_item_is_rejected():
@@ -324,6 +418,8 @@ def test_lineage_schema_is_codex_safe_subset():
     assert "allOf" not in serialized
     assert "anyOf" not in serialized
     assert "oneOf" not in serialized
+    assert "right_sized" not in lineage.LINEAGE_SPLIT_SCHEMA["properties"]
+    assert lineage.LINEAGE_SPLIT_SCHEMA["properties"]["verdict"]["enum"] == ["split", "already_right_sized"]
     _assert_required_is_all_properties(lineage.LINEAGE_SPLIT_SCHEMA)
     _assert_required_is_all_properties(lineage.LINEAGE_SPLIT_SCHEMA["properties"]["children"]["items"])
     _assert_required_is_all_properties(lineage.LINEAGE_SPLIT_SCHEMA["properties"]["depends_on"]["items"])
@@ -563,7 +659,7 @@ def _split(
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
-        "right_sized": False,
+        "verdict": "split",
         "summary_sentence": "Split the approved plan into children.",
         "sizing_reason": "The patch plan has multiple stages.",
         "children": children,

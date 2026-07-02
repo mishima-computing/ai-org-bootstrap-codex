@@ -71,7 +71,7 @@ LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "right_sized",
+        "verdict",
         "summary_sentence",
         "sizing_reason",
         "children",
@@ -80,7 +80,10 @@ LINEAGE_SPLIT_SCHEMA: dict[str, Any] = {
         "elaboration_notes",
     ],
     "properties": {
-        "right_sized": {"type": "boolean"},
+        "verdict": {
+            "enum": ["split", "already_right_sized"],
+            "description": "'already_right_sized' means THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD RFCS ARE NEEDED; 'split' means the children array contains the decomposition.",
+        },
         "summary_sentence": {"type": "string"},
         "sizing_reason": {"type": "string"},
         "children": {
@@ -148,6 +151,7 @@ def refine(
         return {"ok": False, "status": "failed-closed", "branch": branch, "error": "no parent scope items found"}
 
     feedback: list[str] = []
+    contradiction_retried = False
     parsed: dict[str, Any] | None = None
     validation: dict[str, Any] = {"ok": False, "errors": ["lineage split did not run"]}
     for attempt in range(1, MAX_VALIDATION_ATTEMPTS + 1):
@@ -157,6 +161,15 @@ def refine(
         parsed = split_result["split"]
         if parsed["right_sized"]:
             surplus_children_ignored = parsed.get("surplus_children_ignored", 0)
+            if surplus_children_ignored and not contradiction_retried:
+                contradiction_retried = True
+                feedback = [
+                    "Clarification: deterministic pre-check says the parent is not already one right-sized leaf, "
+                    "but your verdict was already_right_sized while children were populated. If the children array "
+                    "contains a real decomposition, return verdict='split'. Use verdict='already_right_sized' only "
+                    "when THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD RFCS ARE NEEDED."
+                ]
+                continue
             return {
                 "ok": True,
                 "status": "right-sized",
@@ -473,6 +486,9 @@ def _split_prompt(
         "Do not re-derive a split from RFC prose.\n\n"
         "Rules:\n"
         "- Use split-into[AND]; alternatives were resolved before direction-ok.\n"
+        "- Set verdict='already_right_sized' only when THE PARENT RFC IS ALREADY ONE RIGHT-SIZED LEAF AND NO CHILD "
+        "RFCS ARE NEEDED.\n"
+        "- Set verdict='split' when the children array contains the decomposition of the parent.\n"
         "- Near-horizon stages become right-sized leafed children.\n"
         "- Later stages stay coarse but must have acceptance criteria and exit criteria.\n"
         "- Every parent scope item must appear exactly once, either in one child scope_item_ids or in "
@@ -496,10 +512,11 @@ def _parse_split(raw: str, branch: str) -> dict[str, Any]:
         return {"ok": False, "error": f"Codex lineage split returned invalid JSON: {exc}", "branch": branch}
     if not isinstance(parsed, dict) or set(parsed) != set(LINEAGE_SPLIT_SCHEMA["properties"]):
         return {"ok": False, "error": "Codex lineage split returned invalid fields", "branch": branch}
-    if not isinstance(parsed.get("right_sized"), bool):
-        return {"ok": False, "error": "Codex lineage split returned invalid right_sized", "branch": branch}
+    if parsed.get("verdict") not in {"split", "already_right_sized"}:
+        return {"ok": False, "error": "Codex lineage split returned invalid verdict", "branch": branch}
     if not isinstance(parsed.get("summary_sentence"), str) or not isinstance(parsed.get("sizing_reason"), str):
         return {"ok": False, "error": "Codex lineage split returned invalid sizing text", "branch": branch}
+    parsed = {**parsed, "right_sized": parsed["verdict"] == "already_right_sized"}
     if parsed["right_sized"]:
         children = parsed.get("children")
         surplus_children_ignored = len(children) if isinstance(children, list) else 0
