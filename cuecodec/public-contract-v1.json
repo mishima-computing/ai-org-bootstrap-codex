@@ -1,0 +1,141 @@
+{
+  "contract": "public-contract-v1",
+  "module_path": "github.com/mishima-computing/cuecodec",
+  "package": "cuecodec",
+  "go_release": "1.26.5",
+  "dependencies": [
+    {
+      "module": "cuelang.org/go",
+      "version": "v0.17.0",
+      "sum": "h1:PrijS5ofUD01yiG11w74I04laXKLaBiMhEYvdt8Gb/A=",
+      "go_mod_sum": "h1:xlly/o1wSLvxOsi5vkQGieU0rLOt7TvUIizOFtnxHRU="
+    }
+  ],
+  "authoritative_roots": [
+    "cue.mod/module.cue",
+    "cue/schema/",
+    "cue/records/"
+  ],
+  "admitted_kind": {
+    "api_version": "cuecodec.mishima-computing.github.io/v1",
+    "kind": "ProofDocument",
+    "record_path": "cue/records/proof_document.cue",
+    "stable_id": "proof-document:precision-proof",
+    "records": [
+      {
+        "record_path": "cue/records/proof_document.cue",
+        "stable_id": "proof-document:precision-proof"
+      },
+      {
+        "record_path": "cue/records/proof_document_release.cue",
+        "stable_id": "proof-document:release-readiness"
+      }
+    ]
+  },
+  "internal_evidence_contracts": [
+    "SourceSnapshotV1",
+    "ImportClosureV1",
+    "CanonicalCUETextV1",
+    "KindAdmissionProofV1",
+    "error-precedence-v1",
+    "structured-output-v1"
+  ],
+  "review_formats": [
+    {
+      "name": "FlatReviewV1",
+      "encoding": "RFC 7464 JSON text sequence",
+      "section_framing": "RS + compact JSON + LF",
+      "section_json": "UTF-8; fields rows then stable_id; row fields pointer then value; Go 1.26.5 encoding/json string escaping",
+      "section_order": "stable_id byte order",
+      "row_order": "escaped RFC 6901 JSON Pointer byte order",
+      "row_values": "canonical precision-preserving carrier scalar tokens and empty containers",
+      "authority_boundary": "output-only"
+    }
+  ],
+  "exports": {
+    "types": [
+      {
+        "name": "Kind",
+        "form": "struct",
+        "fields": [
+          "APIVersion string",
+          "Kind string"
+        ]
+      },
+      {
+        "name": "Limits",
+        "form": "struct",
+        "fields": [
+          "MaxDepth int",
+          "MaxBytes int"
+        ]
+      },
+      {
+        "name": "Options",
+        "form": "struct",
+        "fields": [
+          "RepositoryRoot string",
+          "Limits Limits"
+        ]
+      },
+      {
+        "name": "Codec",
+        "form": "opaque struct"
+      },
+      {
+        "name": "Record",
+        "form": "opaque struct"
+      },
+      {
+        "name": "ErrorCode",
+        "form": "string"
+      },
+      {
+        "name": "CodecError",
+        "form": "struct",
+        "fields": [
+          "Code ErrorCode",
+          "Operation string",
+          "Kind Kind",
+          "RecordPath string",
+          "CUEPath string",
+          "JSONPointer string",
+          "RuleID string"
+        ]
+      }
+    ],
+    "functions": [
+      "New(Options) (*Codec, error)"
+    ],
+    "methods": [
+      "(*Codec).SupportedKinds() []Kind",
+      "(*Codec).LoadRecord(context.Context, Kind, string) (Record, error)",
+      "(*Codec).ParseCanonical(context.Context, Kind, []byte) (Record, error)",
+      "(*Codec).EncodeCanonical(context.Context, Record) ([]byte, error)",
+      "(*Codec).EncodeFlatReviewV1(context.Context, Kind) ([]byte, error)",
+      "(*Codec).ExportJSON(context.Context, Record) ([]byte, error)",
+      "(Record).Kind() Kind",
+      "(Record).StableID() string",
+      "(Record).SourcePath() string",
+      "(Record).Value() cue.Value",
+      "(*CodecError).Error() string"
+    ],
+    "constants": {
+      "CodeInvalidArgument": "INVALID_ARGUMENT",
+      "CodeUnsupportedKind": "UNSUPPORTED_KIND",
+      "CodeRepositoryBoundary": "REPOSITORY_BOUNDARY",
+      "CodeInputLimit": "INPUT_LIMIT",
+      "CodeRead": "READ",
+      "CodeSyntax": "SYNTAX",
+      "CodeIdentity": "IDENTITY",
+      "CodeSchemaValidation": "SCHEMA_VALIDATION",
+      "CodeIncomplete": "INCOMPLETE",
+      "CodeStructuralLimit": "STRUCTURAL_LIMIT",
+      "CodeNonCanonical": "NON_CANONICAL",
+      "CodeProjection": "PROJECTION",
+      "CodeSchemaGeneration": "SCHEMA_GENERATION",
+      "CodeSchemaGuard": "SCHEMA_GUARD",
+      "CodePairedInstance": "PAIRED_INSTANCE"
+    }
+  }
+}

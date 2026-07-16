@@ -1,0 +1,2526 @@
+{
+  "schema": "ai-org-durable-body-coverage-catalog-v1",
+  "reconstruction": {
+    "original_ground_truth": "unavailable_in_repository",
+    "basis": "stdlib AST reconstruction over durable Git-body gateway calls and direct JSON boundaries",
+    "scanner": "registered-body-io-stdlib-ast-v1",
+    "expected_sites": 138,
+    "admitted_sites": 138,
+    "pending_sites": 0,
+    "policy": "The migration is closed: all reconstructed durable Git-body sites are assigned to an admitted, executable context in their established lifecycle cohort; pending coverage is forbidden."
+  },
+  "rows": [
+    {
+      "site_id": "semantic-status-read",
+      "context_id": "semantic-status-note-v1",
+      "cohort": "semantic_status",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SemanticStatus",
+        "variant": "git-note"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "read_semantic",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "semantic-status-write",
+      "context_id": "semantic-status-note-v1",
+      "cohort": "semantic_status",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SemanticStatus",
+        "variant": "git-note"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "write_semantic",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-003",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "commit_files",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-004",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "create_branch_with_files",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-005",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "create_ref_with_files",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-006",
+      "context_id": "implementation-result-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationResult",
+        "variant": "harness-authored"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/__main__.py",
+        "scope": "main",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-007",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "_contrib_branch_for",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-008",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "_contrib_branch_for",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-009",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "_contrib_branch_for",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-010",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "announce",
+        "node_kind": "call",
+        "operation": "git_wrapper.create_ref_with_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-011",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "announce",
+        "node_kind": "call",
+        "operation": "git_wrapper.push_cas",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-012",
+      "context_id": "authoring-announcement-root-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "root-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "announce",
+        "node_kind": "call",
+        "operation": "git_wrapper.push_create",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-013",
+      "context_id": "authoring-announcement-child-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "child-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "announce",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-014",
+      "context_id": "authoring-announcement-child-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "child-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "evaluate",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-015",
+      "context_id": "authoring-announcement-child-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "child-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "parse_announcement_record",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-016",
+      "context_id": "authoring-announcement-child-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "child-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "withdraw",
+        "node_kind": "call",
+        "operation": "git_wrapper.push_delete",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-017",
+      "context_id": "authoring-announcement-child-v1",
+      "cohort": "authoring_announcement",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthoringAnnouncement",
+        "variant": "child-announcement"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/announcements.py",
+        "scope": "withdraw",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-018",
+      "context_id": "questions-contribution-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "contribution"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_commit_contingency_plan",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-019",
+      "context_id": "questions-contribution-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "contribution"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_commit_contingency_plan",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-020",
+      "context_id": "implementation-experience-report-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationExperienceReport",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_commit_implementation_experience_report",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-021",
+      "context_id": "implementation-experience-report-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationExperienceReport",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_commit_implementation_experience_report",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-022",
+      "context_id": "implementation-experience-report-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationExperienceReport",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_commit_implementation_experience_report",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-023",
+      "context_id": "questions-contribution-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "contribution"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_contrib_contingency_plans",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-024",
+      "context_id": "implementation-result-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationResult",
+        "variant": "harness-authored"
+      },
+      "source_selector": {
+        "path": "ai_org/contributor_handoff.py",
+        "scope": "parse_result",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-026",
+      "context_id": "implementation-result-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationResult",
+        "variant": "harness-authored"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "_write_result_artifact",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-027",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-028",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-029",
+      "context_id": "implementation-result-contract-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationResultContract",
+        "variant": "contributor-contract"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 3
+      }
+    },
+    {
+      "site_id": "durable-body-site-030",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 4
+      }
+    },
+    {
+      "site_id": "durable-body-site-031",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 5
+      }
+    },
+    {
+      "site_id": "durable-body-site-032",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-033",
+      "context_id": "child-patch-series-cover-letter-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-034",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-035",
+      "context_id": "implementation-result-contract-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationResultContract",
+        "variant": "contributor-contract"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 3
+      }
+    },
+    {
+      "site_id": "durable-body-site-036",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 4
+      }
+    },
+    {
+      "site_id": "durable-body-site-037",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/code_worker.py",
+        "scope": "load_brief",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 5
+      }
+    },
+    {
+      "site_id": "durable-body-site-038",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/discovery.py",
+        "scope": "_authorable_nodes",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-039",
+      "context_id": "patch-series-metadata-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesMetadata",
+        "variant": "network-root-and-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/discovery.py",
+        "scope": "_read_committed_json",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-040",
+      "context_id": "patch-series-metadata-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesMetadata",
+        "variant": "network-root-and-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/discovery.py",
+        "scope": "_read_committed_json",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-043",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_must_answer_questions_rejection",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-044",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_must_answer_questions_rejection",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-045",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_must_answer_questions_rejection",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-046",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_must_answer_questions_rejection",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-047",
+      "context_id": "functional-check-carrier-recipe-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "FunctionalCheckCarrierRecipe",
+        "variant": "contributor-handoff"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_patchwork_check_acknowledgement_rejection",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-048",
+      "context_id": "functional-check-carrier-recipe-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "FunctionalCheckCarrierRecipe",
+        "variant": "contributor-handoff"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_patchwork_check_acknowledgement_rejection",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-049",
+      "context_id": "functional-check-carrier-recipe-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "FunctionalCheckCarrierRecipe",
+        "variant": "contributor-handoff"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_patchwork_check_acknowledgement_rejection",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 3
+      }
+    },
+    {
+      "site_id": "durable-body-site-050",
+      "context_id": "functional-check-carrier-recipe-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "FunctionalCheckCarrierRecipe",
+        "variant": "contributor-handoff"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_patchwork_check_acknowledgement_rejection",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 4
+      }
+    },
+    {
+      "site_id": "durable-body-site-051",
+      "context_id": "functional-check-carrier-recipe-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "FunctionalCheckCarrierRecipe",
+        "variant": "contributor-handoff"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_author/functional_check.py",
+        "scope": "_read_verdict",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-054",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_series_bodies.py",
+        "scope": "read_cover_letter",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-056",
+      "context_id": "request-provenance-custom-ref-v1",
+      "cohort": "request_outcome",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestProvenanceRecord",
+        "variant": "request-outcome-custom-ref"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "read_request_provenance",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-057",
+      "context_id": "request-outcome-custom-ref-v1",
+      "cohort": "request_outcome",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestOutcome",
+        "variant": "request-outcome-custom-ref"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "read_request_outcome",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-058",
+      "context_id": "request-provenance-custom-ref-v1",
+      "cohort": "request_outcome",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestProvenanceRecord",
+        "variant": "request-outcome-custom-ref"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "prepare_terminal_request",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-059",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_existing_spine_contract_paths",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-060",
+      "context_id": "root-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_load_manifest_network_from_git",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-061",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_parse_ingested_json",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-062",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_parse_ingested_json_line",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-063",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_normalize_split",
+        "node_kind": "call",
+        "operation": "dict",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-064",
+      "context_id": "patchwork-check-event-stream-v1",
+      "cohort": "patchwork_check_event_stream",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchworkCheckEventStream",
+        "variant": "network-node"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_project_tree_patchwork_check_events_from_git",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-065",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_projected_root_children_from_git",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-066",
+      "context_id": "series-coverage-ledger-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesCoverageLedger",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_rebaseline",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-067",
+      "context_id": "root-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_refine",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-068",
+      "context_id": "series-coverage-ledger-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesCoverageLedger",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_refine",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-069",
+      "context_id": "maintainer-series-request-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "MaintainerSeriesRequest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_refine",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 3
+      }
+    },
+    {
+      "site_id": "durable-body-site-070",
+      "context_id": "patch-queue-status-rollup-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchQueueStatusRollup",
+        "variant": "network-control-read"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_refine",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-071",
+      "context_id": "series-coverage-ledger-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesCoverageLedger",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_refine",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-072",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_write_node_manifest",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-073",
+      "context_id": "synthetic-network-review-record-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_write_synthetic_escalation_round",
+        "node_kind": "call",
+        "operation": "review_bodies.prepare_marker_tree",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-074",
+      "context_id": "synthetic-network-review-record-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "_write_synthetic_escalation_round",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-075",
+      "context_id": "child-patch-series-cover-letter-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "elaborate",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-076",
+      "context_id": "patch-series-metadata-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesMetadata",
+        "variant": "network-root-and-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "mark_stale",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-077",
+      "context_id": "lineage-carrier-recipe-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "LineageCarrierRecipe",
+        "variant": "network-publication"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "migrate_legacy_tree_to_edges",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-078",
+      "context_id": "series-coverage-ledger-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesCoverageLedger",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "rebaseline_pending",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-079",
+      "context_id": "child-network-node-manifest-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "NetworkNodeManifest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "revalidate_stale",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-080",
+      "context_id": "patch-series-metadata-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesMetadata",
+        "variant": "network-root-and-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "revalidate_stale",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-081",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "split_pending",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-082",
+      "context_id": "series-coverage-ledger-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesCoverageLedger",
+        "variant": "network-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "stale_revalidation_pending",
+        "node_kind": "call",
+        "operation": "git_wrapper.file_exists",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-083",
+      "context_id": "maintainer-series-request-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "MaintainerSeriesRequest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "stamp_children",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-084",
+      "context_id": "lineage-carrier-recipe-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "LineageCarrierRecipe",
+        "variant": "network-publication"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/patch_series_gate.py",
+        "scope": "validate_lineage_gate_from_git",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-085",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_approach_selection",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-086",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_candidate_approach",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-087",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_candidate_evaluation",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-088",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_closed_questions",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-089",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_constraints",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-090",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_domain_specification",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-091",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_grounding_result",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-092",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_grounding_verdict",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-093",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_implementation_strategy",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-094",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_normalized_problem",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-095",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_prior_art_map",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-096",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_right_size_patch_plan",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-097",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_surface_risks",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-098",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_targeted_fragments",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-099",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_targeted_fragments",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-100",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_parse_targeted_fragments",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-101",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_questions_artifact_with_routed_closures",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-102",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_questions_artifact_with_routed_closures",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-103",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_read_json_from_branch",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-104",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_read_json_from_branch",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-105",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_reconcile_dangling_references",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-106",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_repair_evaluation_matrix_coverage",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-107",
+      "context_id": "child-technical-approach-tree-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_repair_evaluation_matrix_coverage",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-108",
+      "context_id": "request-outcome-custom-ref-v1",
+      "cohort": "request_outcome",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestOutcome",
+        "variant": "request-outcome-custom-ref"
+      },
+      "source_selector": {
+        "path": "ai_org/git_wrapper.py",
+        "scope": "publish_terminal_request",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-109",
+      "context_id": "implementation-experience-report-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationExperienceReport",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_unprocessed_experience_reports",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-110",
+      "context_id": "implementation-experience-report-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "ImplementationExperienceReport",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_unprocessed_experience_reports",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-111",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_write_patch_series_branch",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-112",
+      "context_id": "request-provenance-branch-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestProvenanceRecord",
+        "variant": "patch-series-branch"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "_write_patch_series_branch",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-113",
+      "context_id": "maintainer-series-request-v1",
+      "cohort": "network_publication",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "MaintainerSeriesRequest",
+        "variant": "network-child"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "receive",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-114",
+      "context_id": "author-response-record-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "AuthorResponseRecord",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/receive.py",
+        "scope": "reform_patch_series",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-115",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/requester_assumptions.py",
+        "scope": "record_requester_authority_assumptions",
+        "node_kind": "call",
+        "operation": "json.dumps",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-116",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/requester_assumptions.py",
+        "scope": "requester_assumption_entries_by_objection_id",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-117",
+      "context_id": "revision-delta-record-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RevisionDeltaRecord",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/review_bodies.py",
+        "scope": "prepare_revision_delta",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-118",
+      "context_id": "revision-delta-record-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RevisionDeltaRecord",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/review_bodies.py",
+        "scope": "parse_record",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-119",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_parse_axis_review",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-120",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_parse_consolidation",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-121",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_questions_the_patch_must_answer",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-122",
+      "context_id": "questions-patch-series-v1",
+      "cohort": "contributor_handoff",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "QuestionsThePatchMustAnswer",
+        "variant": "patch-series"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_questions_the_patch_must_answer",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-123",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_read_json_from_git",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-124",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_read_json_from_git",
+        "node_kind": "call",
+        "operation": "json.loads",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-125",
+      "context_id": "patch-series-cover-letter-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "PatchSeriesCoverLetter",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_series_bodies.py",
+        "scope": "read_patch_series_cohort",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-126",
+      "context_id": "request-provenance-branch-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "RequestProvenanceRecord",
+        "variant": "patch-series-branch"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_series_bodies.py",
+        "scope": "prepare_patch_series_cohort",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-127",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/review_bodies.py",
+        "scope": "read_record",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-128",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_review_round_records",
+        "node_kind": "call",
+        "operation": "git_wrapper.tree_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-129",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/review_bodies.py",
+        "scope": "read_record",
+        "node_kind": "call",
+        "operation": "git_wrapper.show_file",
+        "occurrence": 2
+      }
+    },
+    {
+      "site_id": "durable-body-site-130",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/review_bodies.py",
+        "scope": "prepare_direction_review",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-131",
+      "context_id": "direction-review-round-v1",
+      "cohort": "review_reform",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "DirectionReviewRound",
+        "variant": "review-reform-cohort"
+      },
+      "source_selector": {
+        "path": "ai_org/patchwork_queue/review.py",
+        "scope": "_write_marker",
+        "node_kind": "call",
+        "operation": "git_wrapper.commit_files",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-132",
+      "context_id": "root-technical-approach-tree-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "TechnicalApproachTree",
+        "variant": "patch-series-root"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_series_bodies.py",
+        "scope": "prepare_root_technical_approach_preview",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-133",
+      "context_id": "series-scope-decomposition-v1",
+      "cohort": "patch_series_root",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {
+        "apiVersion": "ai-org-cue-body-v1",
+        "kind": "SeriesScopeDecomposition",
+        "variant": "patch-series-root-preview"
+      },
+      "source_selector": {
+        "path": "ai_org/patch_series_bodies.py",
+        "scope": "project_series_scope_decomposition",
+        "node_kind": "function",
+        "operation": "definition",
+        "occurrence": 1
+      }
+    },
+    {
+      "site_id": "durable-body-site-134",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_producer_promise", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-135",
+      "context_id": "producer-task-binding-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerTaskBinding", "variant": "contribution-task"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_producer_task_binding", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-136",
+      "context_id": "producer-completion-assertion-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerCompletionAssertion", "variant": "producer-claim"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_producer_completion_assertion", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-137",
+      "context_id": "claim-admission-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ClaimAdmission", "variant": "functional-acceptance"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_claim_admission", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-138",
+      "context_id": "functional-acceptance-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "FunctionalAcceptanceVerdict", "variant": "contribution"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_functional_acceptance_verdict", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-139",
+      "context_id": "acceptance-authority-seal-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "AcceptanceAuthoritySeal", "variant": "verifier-authority"},
+      "source_selector": {"path": "ai_org/patch_series_bodies.py", "scope": "read_acceptance_authority_seal", "node_kind": "function", "operation": "definition", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-140",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_author/announcements.py", "scope": "announce", "node_kind": "call", "operation": "git_wrapper.create_ref_with_files", "occurrence": 2}
+    },
+    {
+      "site_id": "durable-body-site-141",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_author/producer_lifecycle.py", "scope": "transition_slots", "node_kind": "call", "operation": "git_wrapper.create_ref_with_files", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-142",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_author/producer_lifecycle.py", "scope": "transition_slots", "node_kind": "call", "operation": "git_wrapper.push_cas", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-143",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_author/producer_lifecycle.py", "scope": "transition_slots", "node_kind": "call", "operation": "git_wrapper.show_file", "occurrence": 1}
+    },
+    {
+      "site_id": "durable-body-site-144",
+      "context_id": "producer-promise-v1",
+      "cohort": "producer_lifecycle",
+      "disposition": "admitted",
+      "executable": true,
+      "contract": {"apiVersion": "ai-org-cue-body-v1", "kind": "ProducerPromise", "variant": "producer-commitment"},
+      "source_selector": {"path": "ai_org/patch_author/producer_lifecycle.py", "scope": "transition_slots", "node_kind": "call", "operation": "git_wrapper.tree_files", "occurrence": 1}
+    }
+  ]
+}

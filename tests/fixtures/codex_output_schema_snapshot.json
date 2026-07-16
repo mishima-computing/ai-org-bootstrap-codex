@@ -1,0 +1,3358 @@
+{
+  "ai_org.engineering_precedent_store.AUTHOR_LEVEL_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "author_level": {
+        "type": "string"
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "author_level",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.BASELINE_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "implementation": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "implementation"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DELTA_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "keep": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "keep",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DESIGN_COMPETENCE_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "author_level": {
+        "type": "string"
+      },
+      "keep": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "keep",
+      "author_level",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DESIGN_EXTRACT_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "alternatives": {
+        "type": "string"
+      },
+      "delta_claim": {
+        "type": "string"
+      },
+      "evidence": {
+        "type": "string"
+      },
+      "evidence_class": {
+        "enum": [
+          "standard",
+          "official_doc",
+          "peer_reviewed",
+          "practitioner_report",
+          "workaround_thread"
+        ],
+        "type": "string"
+      },
+      "implementation_hooks": {
+        "type": "string"
+      },
+      "lang_env_version": {
+        "type": "string"
+      },
+      "quality_attributes": {
+        "type": "string"
+      },
+      "rationale": {
+        "type": "string"
+      },
+      "relevant": {
+        "type": "boolean"
+      },
+      "structure": {
+        "type": "string"
+      },
+      "tradeoffs": {
+        "type": "string"
+      },
+      "when_not_to_use": {
+        "type": "string"
+      },
+      "when_to_use": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "relevant",
+      "structure",
+      "rationale",
+      "when_to_use",
+      "when_not_to_use",
+      "tradeoffs",
+      "alternatives",
+      "implementation_hooks",
+      "quality_attributes",
+      "evidence",
+      "delta_claim",
+      "lang_env_version",
+      "evidence_class"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DESIGN_SEARCH_KEYWORDS_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "keywords": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "keywords"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DESIGN_SOURCE_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "sources": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "url",
+            "content",
+            "status"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "sources"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.DISTILL_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "lang_env_version": {
+        "type": "string"
+      },
+      "pitfalls": {
+        "type": "string"
+      },
+      "snippet": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "snippet",
+      "summary",
+      "lang_env_version",
+      "pitfalls"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.EXTRACT_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "evidence_class": {
+        "enum": [
+          "standard",
+          "official_doc",
+          "peer_reviewed",
+          "practitioner_report",
+          "workaround_thread"
+        ],
+        "type": "string"
+      },
+      "lang_env_version": {
+        "type": "string"
+      },
+      "pitfalls": {
+        "type": "string"
+      },
+      "relevant": {
+        "type": "boolean"
+      },
+      "snippet": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "relevant",
+      "snippet",
+      "summary",
+      "lang_env_version",
+      "pitfalls",
+      "evidence_class"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.REFERENCE_TERMS_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "terms": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "terms"
+    ],
+    "type": "object"
+  },
+  "ai_org.engineering_precedent_store.SEARCH_KEYWORDS_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "keywords": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "keywords"
+    ],
+    "type": "object"
+  },
+  "ai_org.maintainer_merge.mainline._VERDICT": {
+    "additionalProperties": false,
+    "properties": {
+      "accept": {
+        "type": "boolean"
+      },
+      "reasons": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "accept",
+      "reasons"
+    ],
+    "type": "object"
+  },
+  "ai_org.maintainer_merge.subsystem._VERDICT": {
+    "additionalProperties": false,
+    "properties": {
+      "accept": {
+        "type": "boolean"
+      },
+      "reasons": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "accept",
+      "reasons"
+    ],
+    "type": "object"
+  },
+  "ai_org.patch_author.code_worker.CONTINGENCY_PLAN_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "contingency_plan": {
+        "description": "What the patch implements if the executable check FAILS \u2014 a concrete alternative approach for exactly this question's part of the work.",
+        "type": "string"
+      },
+      "direction_change_node_ids": {
+        "description": "The committed direction node ids a check failure would invalidate; empty unless rewind_class is requires_direction_change. Use exact ids from the anchored nodes' tree.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "rewind_class": {
+        "description": "in_patch: the contingency touches only files/patch items. requires_direction_change: a check failure would invalidate committed direction nodes.",
+        "enum": [
+          "in_patch",
+          "requires_direction_change"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "contingency_plan",
+      "rewind_class",
+      "direction_change_node_ids"
+    ],
+    "type": "object"
+  },
+  "ai_org.patch_author.functional_check.VERDICT_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "blockers": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "where": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "where",
+            "why"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "notes": {
+        "type": "string"
+      },
+      "reachable": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "reachable",
+      "blockers",
+      "notes"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.patch_series_gate.LINEAGE_SPLIT_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "children": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "acceptance_criteria": {
+              "description": "Child acceptance criteria copied from the deliberated approach.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "child_key": {
+              "description": "Stable local key unique within this split. MUST match ^[a-z0-9_]+$ - lowercase letters, digits, and underscores ONLY; NO hyphens, spaces, or uppercase (e.g. authority_closure, not authority-closure).",
+              "type": "string"
+            },
+            "edges": {
+              "description": "Single authoritative dependency network declaration.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "or_group": {
+                    "description": "Shared OR group id; empty means AND.",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "description": "Required reason for depends/excludes; optional for part_of.",
+                    "type": "string"
+                  },
+                  "state": {
+                    "description": "Lifecycle state or target-declared milestone; empty defaults to accepted for depends.",
+                    "type": "string"
+                  },
+                  "to": {
+                    "description": "Target node key or serial for depends/part_of; empty otherwise.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "depends",
+                      "excludes",
+                      "part_of"
+                    ]
+                  },
+                  "when": {
+                    "description": "Total state predicate; empty means always active.",
+                    "type": "string"
+                  },
+                  "with": {
+                    "description": "Excluded peer key for excludes; empty otherwise.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "to",
+                  "with",
+                  "state",
+                  "or_group",
+                  "when",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "functional_check": {
+              "description": "How functional_check verifies this child.",
+              "type": "string"
+            },
+            "risks": {
+              "description": "Must-address risks handled by this child.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "scope_item_ids": {
+              "description": "Parent scope item ids covered exactly by this child.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stage_name": {
+              "description": "Rolling-wave stage this child belongs to.",
+              "type": "string"
+            },
+            "summary": {
+              "description": "Single-concern scope summary.",
+              "type": "string"
+            },
+            "systems": {
+              "description": "Implementation systems touched by this child.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "Human-readable child patch series title.",
+              "type": "string"
+            },
+            "ux_acceptance_tests": {
+              "description": "UX acceptance tests covered by this child.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "child_key",
+            "title",
+            "stage_name",
+            "edges",
+            "summary",
+            "acceptance_criteria",
+            "functional_check",
+            "scope_item_ids",
+            "systems",
+            "ux_acceptance_tests",
+            "risks"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "parent_retained_scope_ids": {
+        "description": "Scope item ids retained by the parent integration gate.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "rationale": {
+        "description": "Short sizing or split rationale.",
+        "type": "string"
+      },
+      "split_mode": {
+        "description": "Whether the approved technical approach is already one bounded leaf or must split.",
+        "enum": [
+          "right_sized",
+          "split_into_children"
+        ]
+      }
+    },
+    "required": [
+      "split_mode",
+      "rationale",
+      "children",
+      "parent_retained_scope_ids"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.CANONICAL_ROOT_PREVIEW_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "deliverable_requirements": {
+        "description": "One requirement for each goal whose determination is true.",
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "deliverable": {
+              "description": "Canonical deliverable text shared with the production obligation.",
+              "type": "string"
+            },
+            "id": {
+              "description": "Stable identity of this deliverable requirement.",
+              "type": "string"
+            },
+            "production_obligation_id": {
+              "description": "Identity of the one cross-linked production obligation.",
+              "type": "string"
+            },
+            "referee_goal_id": {
+              "description": "Identity of the one referee goal requiring this deliverable.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "referee_goal_id",
+            "production_obligation_id",
+            "deliverable"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "goals": {
+        "description": "Canonical referee goals with explicit deliverable determinations.",
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "type": "string"
+            },
+            "capability_action": {
+              "type": "string"
+            },
+            "capability_preconditions": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "description": "Stable referee-goal identity supplied by canonical root preparation.",
+              "type": "string"
+            },
+            "outcome_evidence": {
+              "type": "string"
+            },
+            "outcome_expected_state": {
+              "type": "string"
+            },
+            "requires_deliverable": {
+              "description": "Explicitly true when this referee criterion requires a produced deliverable.",
+              "type": "boolean"
+            },
+            "ux_trace": {
+              "type": "string"
+            },
+            "verification_check": {
+              "type": "string"
+            },
+            "verification_method": {
+              "enum": [
+                "automated_test",
+                "manual_check",
+                "metric"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "requires_deliverable",
+            "actor",
+            "capability_action",
+            "capability_preconditions",
+            "outcome_expected_state",
+            "outcome_evidence",
+            "verification_method",
+            "verification_check",
+            "ux_trace"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "patch_plan": {
+        "description": "Executable root items whose obligation arrays form an exact partition.",
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "item_id": {
+              "description": "Stable identity of one executable root patch-plan item.",
+              "type": "string"
+            },
+            "production_obligation_ids": {
+              "description": "The exact production obligations assigned to this item.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "item_id",
+            "production_obligation_ids"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "production_obligations": {
+        "description": "One producer obligation cross-linked to each deliverable requirement.",
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "deliverable": {
+              "description": "Canonical deliverable text shared with the requirement.",
+              "type": "string"
+            },
+            "deliverable_requirement_id": {
+              "description": "Identity of the paired deliverable requirement.",
+              "type": "string"
+            },
+            "eligibility_predicate": {
+              "description": "Predicate a prospective producer can evaluate for itself.",
+              "type": "string"
+            },
+            "id": {
+              "description": "Stable producer-obligation identity.",
+              "type": "string"
+            },
+            "referee_goal_id": {
+              "description": "Identity of the paired referee goal.",
+              "type": "string"
+            },
+            "replacement_reason": {
+              "description": "Empty for an initial obligation; otherwise the factual replacement reason.",
+              "type": "string"
+            },
+            "replaces_obligation_id": {
+              "description": "Empty for an initial obligation; otherwise the exact predecessor identity.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "referee_goal_id",
+            "deliverable_requirement_id",
+            "deliverable",
+            "eligibility_predicate",
+            "replaces_obligation_id",
+            "replacement_reason"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "goals",
+      "deliverable_requirements",
+      "production_obligations",
+      "patch_plan"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.CANDIDATE_APPROACH_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "core_systems": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "draws_on": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "first_proof_moment": {
+        "additionalProperties": false,
+        "properties": {
+          "named_content": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "user_actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "win_or_progress_condition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_actions",
+          "named_content",
+          "win_or_progress_condition"
+        ],
+        "type": "object"
+      },
+      "id": {
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "minimal_local",
+          "repo_native",
+          "general_architectural",
+          "do_nothing_defer"
+        ],
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "stack_requirement": {
+        "additionalProperties": false,
+        "description": "Structured stack this candidate actually requires. Prose comparisons are not requirements.",
+        "properties": {
+          "authoring_model": {
+            "description": "text_first when Codex can author source text; gui_editor or binary_assets when required.",
+            "enum": [
+              "text_first",
+              "gui_editor",
+              "binary_assets"
+            ],
+            "type": "string"
+          },
+          "build_strategy": {
+            "description": "engine_based, framework_based, or from_scratch for this candidate.",
+            "enum": [
+              "engine_based",
+              "framework_based",
+              "from_scratch"
+            ],
+            "type": "string"
+          },
+          "engine": {
+            "description": "Required existing engine product, empty unless build_strategy is engine_based.",
+            "type": "string"
+          },
+          "framework": {
+            "description": "Required existing framework product, empty unless build_strategy is framework_based.",
+            "type": "string"
+          },
+          "language": {
+            "description": "Primary authoring language.",
+            "type": "string"
+          },
+          "platform": {
+            "description": "User-facing runtime target, such as browser or lightweight desktop.",
+            "type": "string"
+          },
+          "verification_model": {
+            "description": "headless_ci when the first verification path is command-driven; gui_required otherwise.",
+            "enum": [
+              "headless_ci",
+              "gui_required"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "build_strategy",
+          "engine",
+          "framework",
+          "language",
+          "platform",
+          "authoring_model",
+          "verification_model"
+        ],
+        "type": "object"
+      },
+      "summary": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "name",
+      "kind",
+      "summary",
+      "stack_requirement",
+      "first_proof_moment",
+      "core_systems",
+      "draws_on"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.DOMAIN_SPECIFICATION_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "aspects": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability": {
+              "description": "applies means the patch series must specify this aspect; not_applicable means specification_body is the reason it does not apply.",
+              "enum": [
+                "applies",
+                "not_applicable"
+              ],
+              "type": "string"
+            },
+            "aspect_name": {
+              "type": "string"
+            },
+            "quantities": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "unit": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "value",
+                  "unit"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "sources": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "specification_body": {
+              "type": "string"
+            },
+            "tables": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "columns": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rows": {
+                    "items": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "type": "array"
+                  },
+                  "table_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "table_name",
+                  "columns",
+                  "rows"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "aspect_name",
+            "applicability",
+            "specification_body",
+            "quantities",
+            "tables",
+            "sources"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "aspects"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.EVALUATE_CANDIDATES_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "evaluations": {
+        "items": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "candidate_id": {
+              "type": "string"
+            },
+            "scores": {
+              "additionalProperties": false,
+              "properties": {
+                "compat_migration": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "complexity": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "operability": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "problem_fit": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "quality_attributes": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "repo_fit": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "reversibility": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "risk": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "testability": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "rating": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rating",
+                    "reason"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "problem_fit",
+                "repo_fit",
+                "complexity",
+                "quality_attributes",
+                "compat_migration",
+                "testability",
+                "operability",
+                "reversibility",
+                "risk"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "candidate_id",
+            "scores"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "evaluations"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.EVALUATE_CANDIDATE_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "candidate_id": {
+        "type": "string"
+      },
+      "scores": {
+        "additionalProperties": false,
+        "properties": {
+          "compat_migration": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "complexity": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "operability": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "problem_fit": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "quality_attributes": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "repo_fit": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "reversibility": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "risk": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "testability": {
+            "additionalProperties": false,
+            "properties": {
+              "rating": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rating",
+              "reason"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "problem_fit",
+          "repo_fit",
+          "complexity",
+          "quality_attributes",
+          "compat_migration",
+          "testability",
+          "operability",
+          "reversibility",
+          "risk"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "candidate_id",
+      "scores"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.EXTRACT_CONSTRAINTS_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "hard_constraints": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "derivation": {
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "enum": [
+                    "problem",
+                    "success_criteria",
+                    "non_goals",
+                    "repo",
+                    "domain"
+                  ],
+                  "type": "string"
+                },
+                "trace": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "from",
+                "trace"
+              ],
+              "type": "object"
+            },
+            "implication": {
+              "additionalProperties": false,
+              "properties": {
+                "must": {
+                  "type": "string"
+                },
+                "must_not": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "must",
+                "must_not"
+              ],
+              "type": "object"
+            },
+            "statement": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "statement",
+            "derivation",
+            "implication"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "soft_preferences": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "derivation": {
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "enum": [
+                    "problem",
+                    "success_criteria",
+                    "non_goals",
+                    "repo",
+                    "domain"
+                  ],
+                  "type": "string"
+                },
+                "trace": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "from",
+                "trace"
+              ],
+              "type": "object"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "statement": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "statement",
+            "derivation",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "hard_constraints",
+      "soft_preferences"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.GENERATE_CANDIDATES_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "candidates": {
+        "items": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "core_systems": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "draws_on": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "first_proof_moment": {
+              "additionalProperties": false,
+              "properties": {
+                "named_content": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "kind"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "user_actions": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "win_or_progress_condition": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "user_actions",
+                "named_content",
+                "win_or_progress_condition"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "minimal_local",
+                "repo_native",
+                "general_architectural",
+                "do_nothing_defer"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "stack_requirement": {
+              "additionalProperties": false,
+              "description": "Structured stack this candidate actually requires. Prose comparisons are not requirements.",
+              "properties": {
+                "authoring_model": {
+                  "description": "text_first when Codex can author source text; gui_editor or binary_assets when required.",
+                  "enum": [
+                    "text_first",
+                    "gui_editor",
+                    "binary_assets"
+                  ],
+                  "type": "string"
+                },
+                "build_strategy": {
+                  "description": "engine_based, framework_based, or from_scratch for this candidate.",
+                  "enum": [
+                    "engine_based",
+                    "framework_based",
+                    "from_scratch"
+                  ],
+                  "type": "string"
+                },
+                "engine": {
+                  "description": "Required existing engine product, empty unless build_strategy is engine_based.",
+                  "type": "string"
+                },
+                "framework": {
+                  "description": "Required existing framework product, empty unless build_strategy is framework_based.",
+                  "type": "string"
+                },
+                "language": {
+                  "description": "Primary authoring language.",
+                  "type": "string"
+                },
+                "platform": {
+                  "description": "User-facing runtime target, such as browser or lightweight desktop.",
+                  "type": "string"
+                },
+                "verification_model": {
+                  "description": "headless_ci when the first verification path is command-driven; gui_required otherwise.",
+                  "enum": [
+                    "headless_ci",
+                    "gui_required"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "build_strategy",
+                "engine",
+                "framework",
+                "language",
+                "platform",
+                "authoring_model",
+                "verification_model"
+              ],
+              "type": "object"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "kind",
+            "summary",
+            "stack_requirement",
+            "first_proof_moment",
+            "core_systems",
+            "draws_on"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "candidates"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.GROUNDING_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "ascii_working_slug": {
+        "description": "Lowercase ASCII branch slug using only a-z, 0-9, and hyphen, from 3 to 48 characters.",
+        "type": "string"
+      },
+      "assumptions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "confident": {
+        "type": "boolean"
+      },
+      "grounding_notes": {
+        "type": "string"
+      },
+      "proposed_patch_series": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_area_platform": {
+            "description": "role=scope/routing boundary; belongs=product area, repo/module, version, target surface; must_not=the build-platform choice (that is tech_stack), general context, research notes; owner=either; required_at=patch_series_handoff; lint_scope=target",
+            "type": "string"
+          },
+          "alternatives_considered": {
+            "description": "role=early design space when already known; belongs=obvious alternatives, prior art, \"do nothing\"; must_not=being a required entrance field; owner=grounding; required_at=optional; lint_scope=context",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "background_facts": {
+            "description": "role=bounded objective context; belongs=only facts needed to interpret the request (the named thing, its domain, existing constraints); must_not=source lists, research transcript, motivation, proposal, staff/lore/full-history; owner=grounding; required_at=patch_series_handoff; lint_scope=context",
+            "type": "string"
+          },
+          "constraints_assumptions": {
+            "description": "role=planning limits and unverified beliefs; belongs=compatibility constraints, budget/time assumptions, user assumptions, recorded requester-decision assumptions; must_not=proven facts without uncertainty labels; owner=grounding; required_at=optional; lint_scope=context",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "desired_outcomes_success": {
+            "description": "role=success signals; belongs=acceptance criteria, success metrics, expected result; must_not=implementation plan; owner=grounding; required_at=patch_series_handoff; lint_scope=target",
+            "type": "string"
+          },
+          "grounding_provenance": {
+            "description": "role=research audit trail; belongs=search notes, source-derived facts, confidence, unresolved verification gaps; must_not=content consumed downstream as product requirement nouns; owner=grounding; required_at=patch_series_handoff; lint_scope=context",
+            "type": "string"
+          },
+          "intended_users_or_jobs": {
+            "description": "role=who benefits and the job/outcome; belongs=personas, user/job story, benefit; must_not=staff lists, brand lore, implementation tasks; owner=grounding; required_at=patch_series_handoff; lint_scope=target",
+            "type": "string"
+          },
+          "non_goals_out_of_scope": {
+            "description": "role=prevent scope creep; belongs=things reasonably expected but excluded; must_not=rejected implementation alternatives; owner=grounding; required_at=optional; lint_scope=context",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "open_questions": {
+            "description": "role=blockers for patch series drafting; belongs=unknowns, choices needing requester/product decision; must_not=future nice-to-haves already out of scope; owner=grounding; required_at=patch_series_handoff; lint_scope=context",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "problem_or_motivation": {
+            "description": "role=why the change is needed; belongs=current pain/opportunity/inadequacy; must_not=encyclopedia facts that do not explain the problem; owner=grounding; required_at=patch_series_handoff; lint_scope=target",
+            "type": "string"
+          },
+          "proposal_hint": {
+            "description": "role=a requested solution captured WITHOUT treating it as decided; belongs=\"use React\", \"like X\", \"add multiplayer\"; must_not=final design/specification; owner=requester; required_at=optional; lint_scope=context",
+            "type": "string"
+          },
+          "raw_request": {
+            "description": "role=preserve the original ask verbatim; belongs=one-line/rough request, attachments; must_not=cleaned-up research prose or inferred requirements; owner=requester; required_at=entrance; lint_scope=context",
+            "type": "string"
+          },
+          "references": {
+            "description": "role=external pointers; belongs=URLs, docs, prior issues, source labels; must_not=summaries, quotations, conclusions; owner=either; required_at=patch_series_handoff; lint_scope=context",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "request_type": {
+            "description": "role=route workflow; belongs=feature|bug|research|game_app|refactor|policy|unknown; must_not=requirements details; owner=either; required_at=optional; lint_scope=context",
+            "type": "string"
+          },
+          "tech_stack": {
+            "additionalProperties": false,
+            "description": "role=what the deliverable is built ON; belongs=structured sub-tags {build_strategy, engine, framework, language, platform, rationale, provenance}; platform is the user-facing runtime target such as browser or lightweight desktop, or for a deliverable that is not a user-facing product, the deliverable's own target surface such as git-committed specification documents; must_not=from_scratch as a silent default; scope/routing; domain facts; org verifier mechanisms such as functional_check or codex in platform (worktree too, when the deliverable is a user-facing product); owner=either; required_at=patch_series_handoff; lint_scope=target",
+            "properties": {
+              "build_strategy": {
+                "enum": [
+                  "",
+                  "engine_based",
+                  "framework_based",
+                  "from_scratch"
+                ],
+                "type": "string"
+              },
+              "engine": {
+                "type": "string"
+              },
+              "framework": {
+                "type": "string"
+              },
+              "language": {
+                "type": "string"
+              },
+              "platform": {
+                "description": "User-facing runtime target, for example browser or lightweight desktop. Org verification constraints belong in constraints, not here.",
+                "type": "string"
+              },
+              "provenance": {
+                "enum": [
+                  "requester_specified",
+                  "ai_deliberated",
+                  "unspecified"
+                ],
+                "type": "string"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "build_strategy",
+              "engine",
+              "framework",
+              "language",
+              "platform",
+              "rationale",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          "user_experience_requirements": {
+            "additionalProperties": false,
+            "description": "role=patch-series-altitude observable graphics/UI/UX contract derived by grounding; belongs=observable behavior, states, feedback channels, named-reference and genre conventions, accessibility baselines, and screenshot/interaction/playtest checks that prove perceivability; must_not=exact palettes, sprite dimensions, typography, component names, file names, implementation details, decorative claims with no observable effect, or research prose; owner=grounding; required_at=patch_series_handoff; lint_scope=target",
+            "properties": {
+              "acceptance_tests": {
+                "additionalProperties": false,
+                "properties": {
+                  "interaction_checks": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "playtest_checks": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "screenshot_checks": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "screenshot_checks",
+                  "interaction_checks",
+                  "playtest_checks"
+                ],
+                "type": "object"
+              },
+              "accessibility_baseline": {
+                "additionalProperties": false,
+                "properties": {
+                  "audio_independence": {
+                    "type": "string"
+                  },
+                  "color_independence": {
+                    "type": "string"
+                  },
+                  "controls": {
+                    "type": "string"
+                  },
+                  "pacing": {
+                    "type": "string"
+                  },
+                  "text_readability": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "controls",
+                  "text_readability",
+                  "color_independence",
+                  "audio_independence",
+                  "pacing"
+                ],
+                "type": "object"
+              },
+              "action_feedback_matrix": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "action_verb": {
+                      "type": "string"
+                    },
+                    "feedback_requirement": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action_verb",
+                    "feedback_requirement"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "applicability": {
+                "additionalProperties": false,
+                "properties": {
+                  "applicability": {
+                    "enum": [
+                      "user_facing",
+                      "not_user_facing"
+                    ],
+                    "type": "string"
+                  },
+                  "not_user_facing_reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "applicability",
+                  "not_user_facing_reason"
+                ],
+                "type": "object"
+              },
+              "core_status_surfaces": {
+                "additionalProperties": false,
+                "properties": {
+                  "inventory_resources": {
+                    "type": "string"
+                  },
+                  "location_identity": {
+                    "type": "string"
+                  },
+                  "objective_progress": {
+                    "type": "string"
+                  },
+                  "opposition_status": {
+                    "type": "string"
+                  },
+                  "player_status": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "player_status",
+                  "opposition_status",
+                  "inventory_resources",
+                  "objective_progress",
+                  "location_identity"
+                ],
+                "type": "object"
+              },
+              "entity_affordances": {
+                "additionalProperties": false,
+                "properties": {
+                  "collectibles": {
+                    "type": "string"
+                  },
+                  "decorative_elements": {
+                    "type": "string"
+                  },
+                  "exits_and_transitions": {
+                    "type": "string"
+                  },
+                  "gates_and_locks": {
+                    "type": "string"
+                  },
+                  "hazards_and_bosses": {
+                    "type": "string"
+                  },
+                  "interactive_entities": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "interactive_entities",
+                  "exits_and_transitions",
+                  "gates_and_locks",
+                  "hazards_and_bosses",
+                  "collectibles",
+                  "decorative_elements"
+                ],
+                "type": "object"
+              },
+              "experience_identity": {
+                "additionalProperties": false,
+                "properties": {
+                  "genre_conventions": {
+                    "type": "string"
+                  },
+                  "must_not_resemble": {
+                    "type": "string"
+                  },
+                  "must_resemble": {
+                    "type": "string"
+                  },
+                  "named_reference": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "named_reference",
+                  "genre_conventions",
+                  "must_resemble",
+                  "must_not_resemble"
+                ],
+                "type": "object"
+              },
+              "hud_and_ui_flow": {
+                "additionalProperties": false,
+                "properties": {
+                  "dialog_flow": {
+                    "type": "string"
+                  },
+                  "failure_and_recovery": {
+                    "type": "string"
+                  },
+                  "menu_flow": {
+                    "type": "string"
+                  },
+                  "primary_hud": {
+                    "type": "string"
+                  },
+                  "secondary_screens": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "primary_hud",
+                  "secondary_screens",
+                  "menu_flow",
+                  "dialog_flow",
+                  "failure_and_recovery"
+                ],
+                "type": "object"
+              },
+              "presentation_model": {
+                "additionalProperties": false,
+                "properties": {
+                  "camera_and_view": {
+                    "type": "string"
+                  },
+                  "ui_taxonomy_notes": {
+                    "type": "string"
+                  },
+                  "world_readability": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "camera_and_view",
+                  "world_readability",
+                  "ui_taxonomy_notes"
+                ],
+                "type": "object"
+              },
+              "progression_legibility": {
+                "additionalProperties": false,
+                "properties": {
+                  "current_goal_visibility": {
+                    "type": "string"
+                  },
+                  "ending_state_consistency": {
+                    "type": "string"
+                  },
+                  "flag_observability": {
+                    "type": "string"
+                  },
+                  "locked_state_feedback": {
+                    "type": "string"
+                  },
+                  "unlocked_state_feedback": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "current_goal_visibility",
+                  "locked_state_feedback",
+                  "unlocked_state_feedback",
+                  "flag_observability",
+                  "ending_state_consistency"
+                ],
+                "type": "object"
+              },
+              "visual_language_constraints": {
+                "additionalProperties": false,
+                "properties": {
+                  "animation_minimums": {
+                    "type": "string"
+                  },
+                  "contrast": {
+                    "type": "string"
+                  },
+                  "labels_and_markers": {
+                    "type": "string"
+                  },
+                  "palette_role": {
+                    "type": "string"
+                  },
+                  "silhouette_readability": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "contrast",
+                  "palette_role",
+                  "silhouette_readability",
+                  "labels_and_markers",
+                  "animation_minimums"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "applicability",
+              "experience_identity",
+              "presentation_model",
+              "core_status_surfaces",
+              "entity_affordances",
+              "action_feedback_matrix",
+              "progression_legibility",
+              "hud_and_ui_flow",
+              "visual_language_constraints",
+              "accessibility_baseline",
+              "acceptance_tests"
+            ],
+            "type": "object"
+          },
+          "working_title": {
+            "description": "role=short tracking handle; belongs=concise noun/verb phrase; must_not=full proposal/rationale/domain essay; owner=either; required_at=patch_series_handoff; lint_scope=target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "raw_request",
+          "working_title",
+          "request_type",
+          "problem_or_motivation",
+          "intended_users_or_jobs",
+          "desired_outcomes_success",
+          "affected_area_platform",
+          "tech_stack",
+          "user_experience_requirements",
+          "background_facts",
+          "constraints_assumptions",
+          "references",
+          "grounding_provenance",
+          "open_questions",
+          "non_goals_out_of_scope",
+          "proposal_hint",
+          "alternatives_considered"
+        ],
+        "type": "object"
+      },
+      "questions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "confident",
+      "proposed_patch_series",
+      "ascii_working_slug",
+      "assumptions",
+      "questions",
+      "grounding_notes"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.GROUNDING_VERDICT_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "faithful_specific": {
+        "type": "boolean"
+      },
+      "full_scope": {
+        "type": "boolean"
+      },
+      "latest_default": {
+        "type": "boolean"
+      },
+      "non_legal": {
+        "type": "boolean"
+      },
+      "reasons": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "faithful_specific",
+      "full_scope",
+      "non_legal",
+      "latest_default",
+      "reasons"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.IMPLEMENTATION_STRATEGY_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "persistence": {
+        "additionalProperties": false,
+        "properties": {
+          "saved_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "saved_fields"
+        ],
+        "type": "object"
+      },
+      "systems": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "key_modules": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "named_content": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "observable_behavior": {
+              "type": "string"
+            },
+            "observable_effect": {
+              "type": "string"
+            },
+            "system_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "system_name",
+            "observable_behavior",
+            "observable_effect",
+            "named_content",
+            "key_modules"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "systems",
+      "persistence"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.NAMED_CONTENT_SCHEMA": {
+    "items": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "type": "array"
+  },
+  "ai_org.patchwork_queue.receive.NORMALIZE_PROBLEM_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "affected": {
+        "type": "string"
+      },
+      "current_inadequacy": {
+        "type": "string"
+      },
+      "non_goals": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "open_questions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "problem": {
+        "type": "string"
+      },
+      "success_criteria": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "type": "string"
+            },
+            "capability": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "preconditions": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "action",
+                "preconditions"
+              ],
+              "type": "object"
+            },
+            "requires_deliverable": {
+              "description": "Producer Eligibility Predicate: true exactly when satisfying this Canonical Referee Criterion requires a produced deliverable.",
+              "type": "boolean"
+            },
+            "ux_trace": {
+              "description": "Dotted path rooted at user_experience_requirements for the UX section this criterion traces to, or exactly none when the criterion is not UX-facing.",
+              "type": "string"
+            },
+            "verifiable_outcome": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "type": "string"
+                },
+                "expected_state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "expected_state",
+                "evidence"
+              ],
+              "type": "object"
+            },
+            "verification": {
+              "additionalProperties": false,
+              "properties": {
+                "check": {
+                  "type": "string"
+                },
+                "method": {
+                  "enum": [
+                    "automated_test",
+                    "manual_check",
+                    "metric"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "method",
+                "check"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "actor",
+            "capability",
+            "verifiable_outcome",
+            "verification",
+            "ux_trace",
+            "requires_deliverable"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "problem",
+      "affected",
+      "current_inadequacy",
+      "success_criteria",
+      "non_goals",
+      "open_questions"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.PRIOR_ART_MAP_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "patterns": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "disposition": {
+              "additionalProperties": false,
+              "properties": {
+                "choice": {
+                  "enum": [
+                    "adopt",
+                    "adapt",
+                    "reject"
+                  ],
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "choice",
+                "why"
+              ],
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "source": {
+              "additionalProperties": false,
+              "properties": {
+                "facet_kind": {
+                  "enum": [
+                    "design",
+                    "implementation",
+                    "none"
+                  ],
+                  "type": "string"
+                },
+                "reference_concept": {
+                  "type": "string"
+                },
+                "where": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reference_concept",
+                "facet_kind",
+                "where"
+              ],
+              "type": "object"
+            },
+            "traces_to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tradeoffs": {
+              "additionalProperties": false,
+              "properties": {
+                "cons": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "pros": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "pros",
+                "cons"
+              ],
+              "type": "object"
+            },
+            "when_applies": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "source",
+            "when_applies",
+            "tradeoffs",
+            "disposition",
+            "traces_to"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "patterns"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.RIGHT_SIZE_PATCH_PLAN_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "deferred": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "item": {
+              "type": "string"
+            },
+            "why_safe_to_defer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "item",
+            "why_safe_to_defer"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "first_proof_moment": {
+        "additionalProperties": false,
+        "properties": {
+          "how_verified": {
+            "type": "string"
+          },
+          "named_content": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "presentation_baseline": {
+            "type": "string"
+          },
+          "user_can": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "win_or_progress_condition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_can",
+          "named_content",
+          "presentation_baseline",
+          "win_or_progress_condition",
+          "how_verified"
+        ],
+        "type": "object"
+      },
+      "follow_ups": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "adds": {
+              "type": "string"
+            },
+            "named_content": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "description": "Open deliverable-specific category chosen by the model, such as location, enemy, module, dataset, workflow, or API.",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Concrete named item, module, dataset, entity, screen, file, or other content in the deliverable.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "adds",
+            "named_content"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "open_questions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "first_proof_moment",
+      "follow_ups",
+      "deferred",
+      "open_questions"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.SELECT_APPROACH_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "about_candidate_id": {
+              "type": "string"
+            },
+            "backing": {
+              "type": "string"
+            },
+            "claim": {
+              "type": "string"
+            },
+            "grounds": {
+              "type": "string"
+            },
+            "rebuttal": {
+              "type": "string"
+            },
+            "role": {
+              "enum": [
+                "support",
+                "objection"
+              ],
+              "type": "string"
+            },
+            "warrant": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "about_candidate_id",
+            "claim",
+            "grounds",
+            "warrant",
+            "backing",
+            "rebuttal"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "open_questions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "rationale": {
+        "additionalProperties": false,
+        "properties": {
+          "accepting_tradeoffs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "because": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "under_constraints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "because",
+          "under_constraints",
+          "accepting_tradeoffs"
+        ],
+        "type": "object"
+      },
+      "rejected": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_id": {
+              "type": "string"
+            },
+            "objection": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "candidate_id",
+            "objection"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "selected_candidate_id": {
+        "type": "string"
+      },
+      "stack_axes": {
+        "additionalProperties": false,
+        "properties": {
+          "fidelity_precedent": {
+            "additionalProperties": false,
+            "properties": {
+              "evidence": {
+                "type": "string"
+              },
+              "judgment": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "evidence",
+              "judgment"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "fidelity_precedent"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "selected_candidate_id",
+      "arguments",
+      "rationale",
+      "stack_axes",
+      "rejected",
+      "open_questions"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.SUCCESS_CRITERION_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "actor": {
+        "type": "string"
+      },
+      "capability": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "preconditions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "preconditions"
+        ],
+        "type": "object"
+      },
+      "requires_deliverable": {
+        "description": "Producer Eligibility Predicate: true exactly when satisfying this Canonical Referee Criterion requires a produced deliverable.",
+        "type": "boolean"
+      },
+      "ux_trace": {
+        "description": "Dotted path rooted at user_experience_requirements for the UX section this criterion traces to, or exactly none when the criterion is not UX-facing.",
+        "type": "string"
+      },
+      "verifiable_outcome": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "type": "string"
+          },
+          "expected_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_state",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "verification": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "automated_test",
+              "manual_check",
+              "metric"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "check"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "actor",
+      "capability",
+      "verifiable_outcome",
+      "verification",
+      "ux_trace",
+      "requires_deliverable"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.receive.SURFACE_RISKS_SCHEMA": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "risks": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "attaches_to": {
+              "enum": [
+                "candidate",
+                "decision",
+                "implementation",
+                "patch_plan"
+              ],
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "mitigation": {
+              "type": "string"
+            },
+            "risk": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "risk",
+            "mitigation",
+            "attaches_to",
+            "target_id"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "risks"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.review.AUFHEBEN_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "contradiction_resolutions": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "affected_objection_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "resolution": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "summary",
+            "resolution",
+            "affected_objection_ids"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "deduplicated_objections": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "anchor_node_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "axis": {
+              "enum": [
+                "need",
+                "approach",
+                "compat",
+                "scope",
+                "maintenance"
+              ]
+            },
+            "claim": {
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "citation": {
+                    "type": "string"
+                  },
+                  "consulted_terms": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "source_type": {
+                    "enum": [
+                      "reference",
+                      "prior_decision",
+                      "repo_fact",
+                      "tree_node",
+                      "patch_series_field"
+                    ]
+                  }
+                },
+                "required": [
+                  "source_type",
+                  "citation",
+                  "consulted_terms"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "impact": {
+              "type": "string"
+            },
+            "objection_id": {
+              "type": "string"
+            },
+            "requested_author_action": {
+              "enum": [
+                "re_explain",
+                "provide_evidence",
+                "revise_subtree",
+                "split_scope",
+                "withdraw"
+              ]
+            },
+            "resolution_authority": {
+              "enum": [
+                "author",
+                "requester"
+              ]
+            },
+            "reviewed_scope": {
+              "description": "What the reviewer actually examined to raise this objection (short, factual).",
+              "type": "string"
+            },
+            "reviewer_confidence": {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "status": {
+              "enum": [
+                "open",
+                "deferral_accepted",
+                "deferral_rejected"
+              ]
+            },
+            "type": {
+              "enum": [
+                "blocking",
+                "clarification",
+                "nonblocking_suggestion",
+                "style_defer"
+              ]
+            }
+          },
+          "required": [
+            "objection_id",
+            "anchor_node_ids",
+            "axis",
+            "type",
+            "claim",
+            "evidence",
+            "impact",
+            "requested_author_action",
+            "resolution_authority",
+            "status",
+            "reviewer_confidence",
+            "reviewed_scope"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "evidence": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "consulted_terms": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_type": {
+              "enum": [
+                "reference",
+                "prior_decision",
+                "repo_fact",
+                "tree_node",
+                "patch_series_field"
+              ]
+            }
+          },
+          "required": [
+            "source_type",
+            "citation",
+            "consulted_terms"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "nak_reason": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      },
+      "verdict": {
+        "enum": [
+          "direction-ok",
+          "needs_revision",
+          "nak"
+        ]
+      }
+    },
+    "required": [
+      "verdict",
+      "summary",
+      "deduplicated_objections",
+      "contradiction_resolutions",
+      "nak_reason",
+      "evidence"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.review.CONTRADICTION_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "affected_objection_ids": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "resolution": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "summary",
+      "resolution",
+      "affected_objection_ids"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.review.EVIDENCE_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "citation": {
+        "type": "string"
+      },
+      "consulted_terms": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "source_type": {
+        "enum": [
+          "reference",
+          "prior_decision",
+          "repo_fact",
+          "tree_node",
+          "patch_series_field"
+        ]
+      }
+    },
+    "required": [
+      "source_type",
+      "citation",
+      "consulted_terms"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.review.OBJECTION_ITEM_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "anchor_node_ids": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "axis": {
+        "enum": [
+          "need",
+          "approach",
+          "compat",
+          "scope",
+          "maintenance"
+        ]
+      },
+      "claim": {
+        "type": "string"
+      },
+      "evidence": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "citation": {
+              "type": "string"
+            },
+            "consulted_terms": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_type": {
+              "enum": [
+                "reference",
+                "prior_decision",
+                "repo_fact",
+                "tree_node",
+                "patch_series_field"
+              ]
+            }
+          },
+          "required": [
+            "source_type",
+            "citation",
+            "consulted_terms"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "impact": {
+        "type": "string"
+      },
+      "objection_id": {
+        "type": "string"
+      },
+      "requested_author_action": {
+        "enum": [
+          "re_explain",
+          "provide_evidence",
+          "revise_subtree",
+          "split_scope",
+          "withdraw"
+        ]
+      },
+      "resolution_authority": {
+        "enum": [
+          "author",
+          "requester"
+        ]
+      },
+      "reviewed_scope": {
+        "description": "What the reviewer actually examined to raise this objection (short, factual).",
+        "type": "string"
+      },
+      "reviewer_confidence": {
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "status": {
+        "enum": [
+          "open",
+          "deferral_accepted",
+          "deferral_rejected"
+        ]
+      },
+      "type": {
+        "enum": [
+          "blocking",
+          "clarification",
+          "nonblocking_suggestion",
+          "style_defer"
+        ]
+      }
+    },
+    "required": [
+      "objection_id",
+      "anchor_node_ids",
+      "axis",
+      "type",
+      "claim",
+      "evidence",
+      "impact",
+      "requested_author_action",
+      "resolution_authority",
+      "status",
+      "reviewer_confidence",
+      "reviewed_scope"
+    ],
+    "type": "object"
+  },
+  "ai_org.patchwork_queue.review.OBJECTION_SCHEMA": {
+    "additionalProperties": false,
+    "properties": {
+      "axis": {
+        "enum": [
+          "need",
+          "approach",
+          "compat",
+          "scope",
+          "maintenance"
+        ]
+      },
+      "objections": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "anchor_node_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "axis": {
+              "enum": [
+                "need",
+                "approach",
+                "compat",
+                "scope",
+                "maintenance"
+              ]
+            },
+            "claim": {
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "citation": {
+                    "type": "string"
+                  },
+                  "consulted_terms": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "source_type": {
+                    "enum": [
+                      "reference",
+                      "prior_decision",
+                      "repo_fact",
+                      "tree_node",
+                      "patch_series_field"
+                    ]
+                  }
+                },
+                "required": [
+                  "source_type",
+                  "citation",
+                  "consulted_terms"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "impact": {
+              "type": "string"
+            },
+            "objection_id": {
+              "type": "string"
+            },
+            "requested_author_action": {
+              "enum": [
+                "re_explain",
+                "provide_evidence",
+                "revise_subtree",
+                "split_scope",
+                "withdraw"
+              ]
+            },
+            "resolution_authority": {
+              "enum": [
+                "author",
+                "requester"
+              ]
+            },
+            "reviewed_scope": {
+              "description": "What the reviewer actually examined to raise this objection (short, factual).",
+              "type": "string"
+            },
+            "reviewer_confidence": {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "status": {
+              "enum": [
+                "open",
+                "deferral_accepted",
+                "deferral_rejected"
+              ]
+            },
+            "type": {
+              "enum": [
+                "blocking",
+                "clarification",
+                "nonblocking_suggestion",
+                "style_defer"
+              ]
+            }
+          },
+          "required": [
+            "objection_id",
+            "anchor_node_ids",
+            "axis",
+            "type",
+            "claim",
+            "evidence",
+            "impact",
+            "requested_author_action",
+            "resolution_authority",
+            "status",
+            "reviewer_confidence",
+            "reviewed_scope"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "verdict": {
+        "enum": [
+          "Direction-reviewed-by",
+          "objections_pending"
+        ]
+      }
+    },
+    "required": [
+      "axis",
+      "verdict",
+      "objections"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,15 @@
+"""Run python -m ai_org.maintainer_merge by calling merge.pull."""
+from __future__ import annotations
+
+import sys
+
+from ai_org.maintainer_merge import pull
+
+
+def main() -> None:
+    repo = sys.argv[1] if len(sys.argv) > 1 else "."
+    print(pull(repo))
+
+
+if __name__ == "__main__":
+    main()

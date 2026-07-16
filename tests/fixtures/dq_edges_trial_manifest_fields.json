@@ -1,0 +1,199 @@
+{
+  "nodes": [
+    {
+      "child_key": "advanced_tactics",
+      "depends_on_child_keys": [
+        "full_command_battle"
+      ],
+      "depends_on_node_paths": [
+        "sub/full_command_battle"
+      ],
+      "request": "Add full auto-battle beyond the initial tactics label only after manual command correctness, battle rules, threat tuning, and status feedback are stable.",
+      "serial_after_child_key": "full_command_battle"
+    },
+    {
+      "child_key": "audio_commission",
+      "depends_on_child_keys": [
+        "presentation_viewport_matrix"
+      ],
+      "depends_on_node_paths": [
+        "sub/presentation_viewport_matrix"
+      ],
+      "request": "Commission audio cues; cite spine/art-bible.json and spine/asset-manifest.schema.json.",
+      "serial_after_child_key": ""
+    },
+    {
+      "child_key": "decorative_animation_layers",
+      "depends_on_child_keys": [
+        "presentation_viewport_matrix"
+      ],
+      "depends_on_node_paths": [
+        "sub/presentation_viewport_matrix"
+      ],
+      "request": "Commission decorative animation layers; cite spine/art-bible.json and spine/asset-manifest.schema.json.",
+      "serial_after_child_key": "presentation_viewport_matrix"
+    },
+    {
+      "child_key": "early_progression_loop",
+      "depends_on_child_keys": [
+        "first_playable_shell"
+      ],
+      "depends_on_node_paths": [
+        "sub/first_playable_shell"
+      ],
+      "request": "Complete the Sunvale Road to Moonlit Well to Copper Drake loop with NPC clue progression, Old Observatory Door denied/unlocked feedback, Suncrest Sigil reward, changed door art, and route transition.",
+      "serial_after_child_key": "first_playable_shell"
+    },
+    {
+      "child_key": "failure_recovery",
+      "depends_on_child_keys": [
+        "save_envelope_adapter",
+        "full_command_battle",
+        "world_services_interactions"
+      ],
+      "depends_on_node_paths": [
+        "sub/save_envelope_adapter",
+        "sub/full_command_battle",
+        "sub/world_services_interactions"
+      ],
+      "request": "Implement low HP warnings, poison ticks, KO, full-party defeat, safe return to last shrine, gold consequence, inn rest, cure service, revival service, and before/after recovery assertions.",
+      "serial_after_child_key": "save_envelope_adapter"
+    },
+    {
+      "child_key": "final_arc_post_clear",
+      "depends_on_child_keys": [
+        "midgame_progression_graph",
+        "full_command_battle",
+        "save_envelope_adapter",
+        "presentation_viewport_matrix"
+      ],
+      "depends_on_node_paths": [
+        "sub/midgame_progression_graph",
+        "sub/full_command_battle",
+        "sub/save_envelope_adapter",
+        "sub/presentation_viewport_matrix",
+        "sub/side_content_ledgers"
+      ],
+      "request": "Complete the late gates, final dungeon, final boss phases, epilogue, credits, clear-save marker, post-clear continue, restored-world NPC dialog, and manual full critical-path playthrough record.",
+      "serial_after_child_key": "side_content_ledgers"
+    },
+    {
+      "child_key": "first_playable_shell",
+      "depends_on_child_keys": [],
+      "depends_on_node_paths": [],
+      "request": "Create the initial React/TypeScript browser app, scene routing, title/adventure-log flow, Aster Bell Hamlet exploration, basic status surfaces, a scripted Mosslet battle, one chest, shrine save, and continue restore semantics from the approved first_playable patch plan.",
+      "serial_after_child_key": ""
+    },
+    {
+      "child_key": "full_command_battle",
+      "depends_on_child_keys": [
+        "early_progression_loop"
+      ],
+      "depends_on_node_paths": [
+        "sub/early_progression_loop"
+      ],
+      "request": "Expand combat from the first battle to Attack, Spell, Skill, Defend, Item, Flee, and Tactics with target selection, misses, resistance text, poison, KO labels, rewards, and level-up summaries synchronized with party status.",
+      "serial_after_child_key": "early_progression_loop"
+    },
+    {
+      "child_key": "late_bilingual_copy",
+      "depends_on_child_keys": [
+        "final_arc_post_clear",
+        "presentation_viewport_matrix"
+      ],
+      "depends_on_node_paths": [
+        "sub/final_arc_post_clear",
+        "sub/presentation_viewport_matrix"
+      ],
+      "request": "Write late bilingual copy; cite spine/art-bible.json and spine/asset-manifest.schema.json.",
+      "serial_after_child_key": "final_arc_post_clear"
+    },
+    {
+      "child_key": "midgame_progression_graph",
+      "depends_on_child_keys": [
+        "early_progression_loop",
+        "save_envelope_adapter"
+      ],
+      "depends_on_node_paths": [
+        "sub/early_progression_loop",
+        "sub/save_envelope_adapter",
+        "sub/presentation_viewport_matrix"
+      ],
+      "request": "Extend the progression graph beyond the first gate with additional regions, route locks, party growth milestones, companion joins, boss flags, map markers, changed town states, and reachable mid-game world-state evidence.",
+      "serial_after_child_key": "presentation_viewport_matrix"
+    },
+    {
+      "child_key": "online_sync",
+      "depends_on_child_keys": [
+        "save_envelope_adapter"
+      ],
+      "depends_on_node_paths": [
+        "sub/save_envelope_adapter"
+      ],
+      "request": "Defer cloud sync, online sharing, or social map exchange because local versioned slots and export/import cover the single-player durable-play contract.",
+      "serial_after_child_key": "save_envelope_adapter"
+    },
+    {
+      "child_key": "presentation_viewport_matrix",
+      "depends_on_child_keys": [
+        "first_playable_shell",
+        "early_progression_loop",
+        "full_command_battle",
+        "failure_recovery"
+      ],
+      "depends_on_node_paths": [
+        "sub/first_playable_shell",
+        "sub/early_progression_loop",
+        "sub/full_command_battle",
+        "sub/failure_recovery"
+      ],
+      "request": "Broaden automated presentation coverage across representative title, town, field, dungeon, battle, post-key-event, final, and post-clear states at target desktop/mobile viewports, including focus reachability, Unicode text fit, color-independent labels, and no-overlap assertions.",
+      "serial_after_child_key": "failure_recovery"
+    },
+    {
+      "child_key": "rendering_performance",
+      "depends_on_child_keys": [
+        "presentation_viewport_matrix"
+      ],
+      "depends_on_node_paths": [
+        "sub/presentation_viewport_matrix"
+      ],
+      "request": "Introduce large-map virtualization and advanced DOM/SVG performance optimization only when measured map, effect, battle overlay, or framed-window pressure appears.",
+      "serial_after_child_key": "presentation_viewport_matrix"
+    },
+    {
+      "child_key": "save_envelope_adapter",
+      "depends_on_child_keys": [
+        "world_services_interactions"
+      ],
+      "depends_on_node_paths": [
+        "sub/world_services_interactions"
+      ],
+      "request": "Fill out the versioned adventure-log save envelope, storage adapter, validation, migration hook, and import/export path for full early-loop state round trips by complete replacement load semantics.",
+      "serial_after_child_key": "world_services_interactions"
+    },
+    {
+      "child_key": "side_content_ledgers",
+      "depends_on_child_keys": [
+        "save_envelope_adapter"
+      ],
+      "depends_on_node_paths": [
+        "sub/save_envelope_adapter",
+        "sub/midgame_progression_graph"
+      ],
+      "request": "Add optional but persistent completion ledgers for mini medals, arena ranks, rescued monsters, bestiary defeated counts, reward claims, and NPC acknowledgement.",
+      "serial_after_child_key": "midgame_progression_graph"
+    },
+    {
+      "child_key": "world_services_interactions",
+      "depends_on_child_keys": [
+        "full_command_battle"
+      ],
+      "depends_on_node_paths": [
+        "sub/full_command_battle"
+      ],
+      "request": "Add shop purchases, inn rest, shrine save service, healer cure, searchable props, doors, stairs, opened chest art, repeat-use feedback, and automated repeated-use interaction checks.",
+      "serial_after_child_key": "full_command_battle"
+    }
+  ]
+}

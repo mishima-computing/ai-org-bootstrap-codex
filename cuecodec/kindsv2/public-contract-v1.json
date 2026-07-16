@@ -1,0 +1,142 @@
+{
+  "contract": "engine-codec-public-contract-v1",
+  "module_path": "github.com/mishima-computing/cuecodec",
+  "package": "kindsv2",
+  "go_release": "1.26.5",
+  "protocol": {
+    "name": "cuecodec-process-v1",
+    "operations": [
+      "handshake",
+      "inspect",
+      "emit",
+      "parse",
+      "vet",
+      "project",
+      "schema"
+    ],
+    "request_framing": "one strict JSON object on stdin",
+    "response_framing": "one compact JSON object followed by LF on stdout",
+    "failure_payload_rule": "failure responses never contain artifact"
+  },
+  "authority": {
+    "snapshot": "engine-authority-snapshot-v2",
+    "roots": [
+      "cue/engine/registry/durable-body-catalog-v1.json",
+      "cue/engine/schema/semantic_status.cue"
+    ]
+  },
+  "admitted_contract": {
+    "context_id": "semantic-status-note-v1",
+    "api_version": "ai-org-cue-body-v1",
+    "kind": "SemanticStatus",
+    "variant": "git-note",
+    "canonical_format": "final-cue-text-v1",
+    "canonical_coordinate": "refs/notes/ai-org/semantic-status/{target_oid}",
+    "note_target_source": "frozen branch head object ID",
+    "consumer_projection": "consumer-json-v1",
+    "structured_output_schema": "codex-structured-output-v1",
+    "historical_writer": "semantic-status-json-v0",
+    "historical_aliases": [
+      "semantic-status-json-v0@refs/notes/ai-org/semantic-status/{target_oid}"
+    ]
+  },
+  "limits": [
+    {
+      "name": "max_bytes",
+      "value": 8388608,
+      "measurement_domain": "decoded codec input and emitted artifact bytes, excluding process base64 framing",
+      "source": "cuecodec/codec.go:24",
+      "checked_sha256": "3bd9daeb54d37838fc873b09315ff8c884a8cb3e44983b3ac1b8ce74e1c6cde4"
+    },
+    {
+      "name": "max_depth",
+      "value": 64,
+      "measurement_domain": "recursively concrete decoded CUE value depth from a depth-one root",
+      "source": "cuecodec/codec.go:23",
+      "checked_sha256": "3bd9daeb54d37838fc873b09315ff8c884a8cb3e44983b3ac1b8ce74e1c6cde4"
+    }
+  ],
+  "exports": {
+    "constants": [
+      "CUEGoModuleVersion",
+      "CUELanguageVersion",
+      "CanonicalFormatV1",
+      "CodeAuthority",
+      "CodeDuplicateKey",
+      "CodeEncoding",
+      "CodeFraming",
+      "CodeIdentity",
+      "CodeIncomplete",
+      "CodeInputLimit",
+      "CodeInvalidArgument",
+      "CodeNonCanonical",
+      "CodeNotAdmitted",
+      "CodeProjection",
+      "CodeSchemaGeneration",
+      "CodeSchemaGuard",
+      "CodeSchemaValidation",
+      "CodeStructuralLimit",
+      "CodeSyntax",
+      "CodexSchemaProfileV1",
+      "ConsumerJSONProfileV1",
+      "DefaultMaxBytes",
+      "DefaultMaxDepth",
+      "ModulePath",
+      "OperationEmit",
+      "OperationHandshake",
+      "OperationInspect",
+      "OperationParse",
+      "OperationProject",
+      "OperationSchema",
+      "OperationVet",
+      "ProducerLifecycleManifestV1",
+      "ProtocolV1",
+      "PublicContractV1",
+      "SemanticAPIVersionV1",
+      "SemanticContextV1",
+      "SemanticKindV1",
+      "SemanticManifestV1",
+      "SemanticVariantV1"
+    ],
+    "types": [
+      "Artifact",
+      "CatalogContract",
+      "CatalogEntry",
+      "CatalogReconstruction",
+      "CodecFailure",
+      "ContractInfo",
+      "ContractIdentity",
+      "CoverageReport",
+      "ErrorCode",
+      "Failure",
+      "HandshakeInfo",
+      "LimitPolicy",
+      "Operation",
+      "Options",
+      "Registry",
+      "RegistryInspection",
+      "Request",
+      "Response",
+      "SourceSelector"
+    ],
+    "functions": [
+      "New(...Options) (*Registry, error)",
+      "DecodeRequest([]byte) (Request, *Failure)"
+    ],
+    "methods": [
+      "(*Registry).Catalog() []CatalogEntry",
+      "(*Registry).Coverage() CoverageReport",
+      "(*Registry).Emit(context.Context, string, []byte) (Artifact, error)",
+      "(*Registry).Handshake(context.Context) (HandshakeInfo, error)",
+      "(*Registry).Handle(context.Context, Request) Response",
+      "(*Registry).Inspect(context.Context) (RegistryInspection, error)",
+      "(*Registry).Parse(context.Context, string, []byte) (Artifact, error)",
+      "(*Registry).Project(context.Context, string, string, []byte) (Artifact, error)",
+      "(*Registry).Schema(context.Context, string, string) (Artifact, error)",
+      "(*Registry).ValidateProjection(context.Context, string, []byte) error",
+      "(*Registry).Vet(context.Context, string, []byte) error",
+      "(Artifact).Bytes() ([]byte, error)",
+      "(*Failure).Error() string"
+    ]
+  }
+}
